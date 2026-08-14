@@ -23,21 +23,22 @@
 4.[憑證狀態檢視]與[系統狀態] 如果都正常，就可以開始進行設備部署作業
 
 --------------------------------------------------------------
-# mdmcert-free-cert-apply_win-x64.zip 說明
+# mdmcert 前提說明
 
 大多數憑證都可以透過ASM/ABM平台直接取得，但APNs的推播憑證是最難取得的憑證，以下說明這個工具用途
 
 來源是免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
 Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工具
 
-**這個檔案是自製的windows x64的編譯執行檔與自動化power shell**
-
 如果需要linux / macos版本可以到原始官方網站下載release zip檔案  https://github.com/micromdm/micromdm/releases
-
 官方操作說明：
 https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md
 
-**操作步驟如下：**
+
+--------------------------------------------------------------
+# mdmcert-free-cert-apply_win-x64.zip 操作說明
+
+**這個檔案是自製的windows x64的編譯執行檔與自動化power shell**
 
 1.請先到https://mdmcert.download/ 註冊與驗證，email需要是edu的網域，需要收信驗證
 
