@@ -25,3 +25,5 @@ Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工
 
 pem效期只有一年，屆時需要再利用push.req重新產生一次pem憑證
 (push.req不需要更新，可以直接用舊的)
+
+P.S. 教育單位也可以申請免費apple developer方案，藉此產生mdm憑證，但是需要許多額外的申請步驟
