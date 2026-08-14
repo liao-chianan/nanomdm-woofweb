@@ -39,7 +39,7 @@ https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-pr
 --------------------------------------------------------------
 # mdmcert-free-cert-apply_win-x64.zip 操作說明
 
-**這個檔案是自製的windows x64的編譯執行檔與自動化power shell**
+**這個檔案是自製的windows x64的編譯執行檔與自動化power shell，讓使用者可以windows環境底下處理取得APNs推播憑證**
 
 1.請先到https://mdmcert.download/ 註冊與驗證，email需要是edu的網域，需要收信驗證
 
@@ -59,3 +59,15 @@ pem效期只有一年，屆時需要再利用push.req重新產生一次pem憑證
 (push.req不需要更新，可以直接用舊的)
 
 P.S. 教育單位也可以申請免費apple developer方案，藉此產生mdm憑證，但是需要許多額外的申請步驟
+
+--------------------------------------------------------------
+
+開發原因：2026年6月份，apple ac2的功能故障，不得不開發這個工具  (詳見此討論串)
+
+https://forums.macrumors.com/threads/apple-configurator-2-cannot-sign-in-error-message-displayed.2484580/
+
+感謝原始開發nanomdm與micromdm的貢獻者，釋出這個工具，希望對沒有管理經費的小型學校有所助益
+
+
+
+
