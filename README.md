@@ -1,98 +1,116 @@
---------------------------------------------------------------
-# nanomdm-woofweb  說明
+# nanomdm-woofweb
 
-**利用開源專案micromdm/nanomdm   https://github.com/micromdm/   搭配自製的精簡web介面來管理校內的iPad**
+利用開源專案 [micromdm/nanomdm](https://github.com/micromdm/) 搭配自製的精簡 Web 介面，來管理校內的 iPad。
 
-**使用前提**
+---
 
-1.請用 debian 作業系統，硬體為x86/x64，測試平台為proxmox ve虛擬機搭配debian 12
+## 使用前提
 
-2.操作環境需要具備一個**對外的域名**與網際網路連線，**80與443 port需要對外開放**
+1. 作業系統：Debian，硬體為 x86/x64（測試平台為 Proxmox VE 虛擬機搭配 Debian 12）
+2. 操作環境需要具備一個**對外的域名**與網際網路連線，**80 與 443 port 需要對外開放**
+3. 具備Apple ASM/ABM 的管理帳號
 
+---
 
-**安裝方式**
+## 安裝方式
 
-1.使用具有sudo權限的使用者，透過下載一鍵安裝的bash命令
+### 1. 一鍵安裝
 
-```wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh```
+使用具有 `sudo` 權限的使用者，下載並執行一鍵安裝腳本：
 
+```bash
+wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh
+```
 
-2.安裝過程中會詢問必要參數，API KEY與資料庫密碼會預設用亂數產生，並且自動部署docker與相關服務  
+### 2. 互動式設定
 
-3.安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業，[憑證狀態檢視] 中有提示如何取得憑證並且上傳：  
+安裝過程中會詢問必要參數。API KEY 與資料庫密碼會預設用亂數產生，並且自動部署 Docker 與相關服務。
 
-==>APNs Push 憑證：最麻煩的憑證，正常管道是付費訂閱apple developer program後取得mdm憑證再去產生push cert  
-免費的管道則是透過mdmcert來申請憑證，請往下看 [mdmcert搭配mdmctl利用方式與前提說明]  
-學校單位亦可以透過申請方式免費訂閱apple developer program，但需要不少額外步驟，有興趣可以自行申請  
+### 3. 憑證處理作業
 
-==>DEP OAuth Token：先從自己的nanomdm webui下載公鑰，接著到 https://school.apple.com/#/main/preferences/myprofile (偏好設定 → 裝置管理服務),  
-選擇指定的伺服器:「編輯 → 上傳公用密鑰」是更新公鑰(新設/更換伺服器時需要)，「下載權杖」可以下載 .p7m 檔案上傳給自己的nanomdm伺服器更新 Token;。  
+安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業。**[憑證狀態檢視]** 頁面中有提示如何取得憑證並上傳：
 
-==>VPP Content Token：到 https://school.apple.com/#/main/preferences/paymentsandbilling/appsandbooks (偏好設定 → 付款與帳單 → 內容與代號),  
-下載對應的 VPP Token 檔案,新增/取代.vpptoken 檔案即可。  
+#### APNs Push 憑證
 
-==>NanoAXM 私鑰/OAuth憑證：到 https://school.apple.com/#/main/preferences/apiaccounts (偏好設定 → API),  
-可以查看/建立 Client ID(用戶端ID)與 Key ID(密鑰ID)，過程會下載金鑰，僅能下載一次，請妥善保管(注意client ID和Key ID不要搞混)
+最麻煩的憑證。正常管道是付費訂閱 Apple Developer Program 後取得 MDM 憑證，再去產生 push cert。
 
-4.[憑證狀態檢視]與[系統狀態] 如果都正常，可以到[ASM所有裝置]同步，  
-可以撈取ASM中所有裝置的資訊，也可以把其他mdm server管理的裝置改派到這台新的nanomdm (支援csv批次處理)  
+免費的管道則是透過 mdmcert 來申請憑證，請參考下方「[mdmcert 搭配 mdmctl 利用方式與前提說明](#mdmcert-搭配-mdmctl-利用方式與前提說明)」章節。
 
-5.[裝置註冊狀態]如果有看到設備，代表就可以開始進行部署作業，建議步驟如下：  
-==>再製/編修群組註冊檔並套用  
-==>再製/編修群組描述檔  
-==>新增群組，並選定要搭配的群組註冊檔+群組描述檔，設定此群組要綁定安裝的APP  
-==>到[裝置註冊狀態]幫裝置取名，指定群組並存檔，當裝置出現 DEP profile_uuid與對應範本，代表裝置可以清空重新註冊  
-==>裝置註冊後會自動派發註冊檔+描述檔+安裝APP，註冊成功就可以進行個別命令派送/群組命令派送  
+> 學校單位亦可以透過申請方式免費訂閱 Apple Developer Program，但需要不少額外步驟，有興趣可以自行申請。
 
---------------------------------------------------------------
-# mdmcert搭配mdmctl利用方式與前提說明
+#### DEP OAuth Token
 
-大多數憑證都可以透過ASM/ABM平台直接取得，但APNs的推播憑證是最難取得的憑證，標準管道是透過付費訂閱Apple Developer Program取得
+1. 先從自己的 nanomdm webui 下載公鑰
+2. 接著到 [school.apple.com 偏好設定 → 裝置管理服務](https://school.apple.com/#/main/preferences/myprofile)，選擇指定的伺服器：
+   - **編輯 → 上傳公用密鑰**：更新公鑰（新設/更換伺服器時需要）
+   - **下載權杖**：下載 `.p7m` 檔案，上傳給自己的 nanomdm 伺服器更新 Token
 
-但我們可以利用免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
-Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工具
+#### VPP Content Token
 
-如果需要linux / macos版本可以到原始官方網站下載release zip檔案  https://github.com/micromdm/micromdm/releases
+到 [school.apple.com 偏好設定 → 付款與帳單 → 內容與代號](https://school.apple.com/#/main/preferences/paymentsandbilling/appsandbooks)，下載對應的 VPP Token 檔案，新增/取代 `.vpptoken` 檔案即可。
 
-mdmctl官方操作說明：
-https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md
+#### NanoAXM 私鑰/OAuth 憑證
 
-P.S. 教育單位也可以申請免費apple developer方案，藉此產生mdm憑證，但是需要許多額外的申請步驟
+到 [school.apple.com 偏好設定 → API](https://school.apple.com/#/main/preferences/apiaccounts)，可以查看/建立 Client ID（用戶端 ID）與 Key ID（密鑰 ID）。
 
---------------------------------------------------------------
-# 自製的 mdmcert-free-cert-apply_win-x64.zip 操作說明
+> 過程會下載金鑰，**僅能下載一次**，請妥善保管（注意 Client ID 和 Key ID 不要搞混）。
 
-https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free-cert-apply_win-x64.zip
+### 4. 同步 ASM 裝置
 
-**這個檔案是透過mdmctl的原始碼自製的windows x64的編譯執行檔與自動化power shell，讓使用者可以windows環境底下處理取得APNs推播憑證**
+**[憑證狀態檢視]** 與 **[系統狀態]** 如果都正常，可以到 **[ASM 所有裝置]** 同步：
 
-1.請先到https://mdmcert.download/ 註冊與驗證，email需要是edu的網域，需要收信驗證
+- 可以撈取 ASM 中所有裝置的資訊
+- 也可以把其他 MDM Server 管理的裝置改派到這台新的 nanomdm（支援 CSV 批次處理）
 
-2.驗證成功後請解壓縮這個檔案，用powershell執行 01-mdmctl-freecert-email.ps1，再次輸入你申請的email
+### 5. 開始部署
 
-3.大約等個幾分鐘，去email收信，會收到帶有時間戳記的plist.b64.p7檔案，把這個檔案下載後放到mdmctl同一個資料夾
+**[裝置註冊狀態]** 如果有看到設備，代表就可以開始進行部署作業，建議步驟如下：
 
-4.執行02-mdmctl-freecert-decrypt.ps1，會再產出一個push.req檔案
+1. 再製/編修群組註冊檔並套用
+2. 再製/編修群組描述檔
+3. 新增群組，並選定要搭配的群組註冊檔＋群組描述檔，設定此群組要綁定安裝的 App
+4. 到 **[裝置註冊狀態]** 幫裝置取名、指定群組並存檔，當裝置出現 DEP profile_uuid 與對應範本，代表裝置可以清空重新註冊
+5. 裝置註冊後會自動派發註冊檔＋描述檔＋安裝 App，註冊成功就可以進行個別命令派送/群組命令派送
 
-5.透過https://identity.apple.com/pushcert/  可以搭配這個push.req檔案來產生pem憑證，請下載這個pem憑證檔案
+---
 
-6.此時資料夾中的push.key檔案為私鑰，pem檔案為配對的憑證，在nanomdm woofweb中可以上傳這兩個檔案，來進行APNs推播使用
+## mdmcert 搭配 mdmctl 利用方式與前提說明
 
-!!重要，這個資料夾的資料務必保留好!!   
+大多數憑證都可以透過 ASM/ABM 平台直接取得，但 APNs 的推播憑證是最難取得的憑證，標準管道是透過付費訂閱 Apple Developer Program 取得。
 
-pem效期只有一年，屆時需要再利用push.req重新產生一次pem憑證
-(push.req不需要更新，可以直接用舊的)
+但我們可以利用免費 MDM cert 工具 **mdmctl**，這是由 micromdm/nanomdm 的開發者 [Jesse Peterson](https://github.com/jessepeterson) 所提供的免費平台與工具。
 
+- 如果需要 Linux / macOS 版本，可以到原始官方網站下載 release zip 檔案：[github.com/micromdm/micromdm/releases](https://github.com/micromdm/micromdm/releases)
+- mdmctl 官方操作說明：[mdmctl-signing-profiles.md](https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md)
 
+> P.S. 教育單位也可以申請免費 Apple Developer 方案，藉此產生 MDM 憑證，但需要許多額外的申請步驟。
 
---------------------------------------------------------------
+---
 
-開發原因：2026年6月份，apple ac2的功能故障，不得不開發這個工具  (詳見此討論串)
+## 自製的 mdmcert-free-cert-apply_win-x64.zip 操作說明
 
-https://forums.macrumors.com/threads/apple-configurator-2-cannot-sign-in-error-message-displayed.2484580/
+下載連結：[mdmcert-free-cert-apply_win-x64.zip](https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free-cert-apply_win-x64.zip)
 
-感謝原始開發nanomdm與micromdm的貢獻者，釋出這個工具，希望對沒有管理經費的小型學校有所助益  Woof! Woof!
+這個檔案是透過 mdmctl 的原始碼自製的 Windows x64 編譯執行檔與自動化 PowerShell，讓使用者可以在 Windows 環境底下處理取得 APNs 推播憑證。
 
+1. 請先到 [mdmcert.download](https://mdmcert.download/) 註冊與驗證，email 需要是 `.edu` 網域，需要收信驗證
+2. 驗證成功後請解壓縮這個檔案，用 PowerShell 執行 `01-mdmctl-freecert-email.ps1`，再次輸入你申請的 email
+3. 大約等個幾分鐘，去 email 收信，會收到帶有時間戳記的 `plist.b64.p7` 檔案，把這個檔案下載後放到 mdmctl 同一個資料夾
+4. 執行 `02-mdmctl-freecert-decrypt.ps1`，會再產出一個 `push.req` 檔案
+5. 透過 [identity.apple.com/pushcert](https://identity.apple.com/pushcert/) 可以搭配這個 `push.req` 檔案來產生 pem 憑證，請下載這個 pem 憑證檔案
+6. 此時資料夾中的 `push.key` 檔案為私鑰，pem 檔案為配對的憑證，在 nanomdm-woofweb 中可以上傳這兩個檔案，來進行 APNs 推播使用
 
+> ⚠️ **重要，這個資料夾的資料務必保留好！**
+>
+> pem 效期只有一年，屆時需要再利用 `push.req` 重新產生一次 pem 憑證。
+> （`push.req` 不需要更新，可以直接用舊的）
 
+---
 
+## 開發緣起
+
+2026 年 6 月份，Apple Configurator 2 的功能故障，不得不開發這個工具（[詳見此討論串](https://forums.macrumors.com/threads/apple-configurator-2-cannot-sign-in-error-message-displayed.2484580/)）。
+
+感謝原始開發 nanomdm 與 micromdm 的貢獻者，釋出這個工具，希望對沒有管理經費的小型學校有所助益。
+
+**Woof! Woof! 🐾**
