@@ -25,7 +25,9 @@
 --------------------------------------------------------------
 # mdmcert-free-cert-apply_win-x64.zip 說明
 
-免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
+大多數憑證都可以透過ASM/ABM平台直接取得，但APNs的推播憑證是最難取得的憑證，以下說明這個工具用途
+
+來源是免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
 Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工具
 
 **這個檔案是自製的windows x64的編譯執行檔與自動化power shell**
