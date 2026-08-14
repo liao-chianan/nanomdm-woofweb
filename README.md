@@ -49,7 +49,7 @@
 
 大多數憑證都可以透過ASM/ABM平台直接取得，但APNs的推播憑證是最難取得的憑證，標準管道是透過付費訂閱Apple Developer Program取得
 
-取得來源是免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
+但我們可以利用免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
 Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工具
 
 如果需要linux / macos版本可以到原始官方網站下載release zip檔案  https://github.com/micromdm/micromdm/releases
@@ -57,13 +57,14 @@ Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工
 mdmctl官方操作說明：
 https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md
 
+P.S. 教育單位也可以申請免費apple developer方案，藉此產生mdm憑證，但是需要許多額外的申請步驟
 
 --------------------------------------------------------------
 # 自製的 mdmcert-free-cert-apply_win-x64.zip 操作說明
 
 https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free-cert-apply_win-x64.zip
 
-**這個檔案是自製的windows x64的編譯執行檔與自動化power shell，讓使用者可以windows環境底下處理取得APNs推播憑證**
+**這個檔案是透過mdmctl的原始碼自製的windows x64的編譯執行檔與自動化power shell，讓使用者可以windows環境底下處理取得APNs推播憑證**
 
 1.請先到https://mdmcert.download/ 註冊與驗證，email需要是edu的網域，需要收信驗證
 
@@ -82,7 +83,7 @@ https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free
 pem效期只有一年，屆時需要再利用push.req重新產生一次pem憑證
 (push.req不需要更新，可以直接用舊的)
 
-P.S. 教育單位也可以申請免費apple developer方案，藉此產生mdm憑證，但是需要許多額外的申請步驟
+
 
 --------------------------------------------------------------
 
