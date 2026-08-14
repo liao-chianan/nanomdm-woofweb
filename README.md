@@ -1,7 +1,7 @@
 --------------------------------------------------------------
 # nanomdm-woofweb  說明
 
-**利用開源專案micromdm/nanomdm，搭配自製的精簡web介面來管理校內的iPad**
+**利用開源專案micromdm/nanomdm   https://github.com/micromdm/   搭配自製的精簡web介面來管理校內的iPad**
 
 **使用前提**
 
@@ -21,19 +21,19 @@
 
 3.安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業
 
-4.[憑證狀態檢視]與[系統狀態] 如果都正常，就可以開始進行設備部署作業
+4.[憑證狀態檢視]與[系統狀態] 如果都正常，就可以開始編修群組註冊檔、群組描述檔、群組綁定APP 等部署iPad的作業。
 
 --------------------------------------------------------------
-# mdmcert利用方式與前提說明
+# mdmcert搭配mdmctl利用方式與前提說明
 
-大多數憑證都可以透過ASM/ABM平台直接取得，但APNs的推播憑證是最難取得的憑證，以下說明這個工具用途
+大多數憑證都可以透過ASM/ABM平台直接取得，但APNs的推播憑證是最難取得的憑證，標準管道是透過付費訂閱Apple Developer Program取得
 
-來源是免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
+取得來源是免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
 Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工具
 
 如果需要linux / macos版本可以到原始官方網站下載release zip檔案  https://github.com/micromdm/micromdm/releases
 
-官方操作說明：
+mdmctl官方操作說明：
 https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md
 
 
@@ -52,9 +52,9 @@ https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free
 
 4.執行02-mdmctl-freecert-decrypt.ps1，會再產出一個push.req檔案
 
-5.透過https://identity.apple.com/pushcert/  可以搭配這個push.req檔案來產生並且pem憑證
+5.透過https://identity.apple.com/pushcert/  可以搭配這個push.req檔案來產生pem憑證，請下載這個pem憑證檔案
 
-6.push.key檔案為私鑰，pem檔案為配對的憑證，在nanomdm woofweb中就可以上傳這兩個檔案，來進行APNs推播使用
+6.此時資料夾中的push.key檔案為私鑰，pem檔案為配對的憑證，在nanomdm woofweb中可以上傳這兩個檔案，來進行APNs推播使用
 
 !!重要，這個資料夾的資料務必保留好!!   
 
