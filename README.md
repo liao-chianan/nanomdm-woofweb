@@ -18,9 +18,24 @@
 
 
 2.安裝過程中會詢問必要參數，API KEY與資料庫密碼會預設用亂數產生，並且自動部署docker與相關服務  
-3.安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業，[憑證狀態檢視] 中有提示如何取得憑證並且上傳  
+
+3.安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業，[憑證狀態檢視] 中有提示如何取得憑證並且上傳：  
+==>APNs Push 憑證：最麻煩的憑證，正常管道是付費訂閱apple developer program後取得mdm憑證再去產生push cert  
+免費的管道則是透過mdmcert來申請憑證，請往下看 [mdmcert搭配mdmctl利用方式與前提說明]  
+學校單位亦可以透過申請方式免費訂閱apple developer program，但需要不少額外步驟，有興趣可以自行申請  
+
+==>DEP OAuth Token：到 https://school.apple.com/#/main/preferences/myprofile (偏好設定 → 裝置管理服務),  
+選擇指定的伺服器:「編輯 → 上傳公用密鑰」是更新公鑰(新設/更換伺服器時需要)，「下載權杖」可以下載 .p7m 檔案上傳給自己的nanomdm伺服器更新 Token;。  
+
+==>VPP Content Token：到 https://school.apple.com/#/main/preferences/paymentsandbilling/appsandbooks (偏好設定 → 付款與帳單 → 內容與代號),  
+下載對應的 VPP Token 檔案,新增/取代.vpptoken 檔案即可。  
+
+==>NanoAXM 私鑰/OAuth憑證：到 https://school.apple.com/#/main/preferences/apiaccounts (偏好設定 → API),  
+可以查看/建立 Client ID(用戶端ID)與 Key ID(密鑰ID)，過程會下載金鑰，僅能下載一次，請妥善保管(注意client ID和Key ID不要搞混)
+
 4.[憑證狀態檢視]與[系統狀態] 如果都正常，可以到[ASM所有裝置]同步，  
 可以撈取ASM中所有裝置的資訊，也可以把其他mdm server管理的裝置改派到這台新的nanomdm (支援csv批次處理)  
+
 5.[裝置註冊狀態]如果有看到設備，代表就可以開始進行部署作業，建議步驟如下：  
 ==>再製/編修群組註冊檔並套用  
 ==>再製/編修群組描述檔  
