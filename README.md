@@ -17,7 +17,7 @@
 ```wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh```
 
 
-2.安裝過程中會詢問必要參數，並且自動部署docker與相關服務
+2.安裝過程中會詢問必要參數，API KEY與資料庫密碼會預設用亂數產生，並且自動部署docker與相關服務
 
 3.安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業
 
