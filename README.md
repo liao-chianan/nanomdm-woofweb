@@ -31,6 +31,7 @@
 Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工具
 
 如果需要linux / macos版本可以到原始官方網站下載release zip檔案  https://github.com/micromdm/micromdm/releases
+
 官方操作說明：
 https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md
 
