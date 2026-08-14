@@ -30,6 +30,11 @@ Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工
 
 **這個檔案是自製的windows x64的編譯執行檔與自動化power shell**
 
+如果需要linux / macos版本可以到原始官方網站下載release zip檔案  https://github.com/micromdm/micromdm/releases
+
+官方操作說明：
+https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md
+
 **操作步驟如下：**
 
 1.請先到https://mdmcert.download/ 註冊與驗證，email需要是edu的網域，需要收信驗證
