@@ -1,13 +1,32 @@
-# nanomdm-woofweb
-Woof Woof
+--------------------------------------------------------------
+# nanomdm-woofweb  說明
+
+**利用開源專案micromdm/nanomdm，搭配自製的精簡web介面**
+
+**使用前提**
+
+1.請用 debian 作業系統，硬體為x86/x64，測試平台為proxmox ve虛擬機搭配debian 12
+2.需要具備一個對外的域名與網際網路連線，80與443 port需要開啟
+
+
+**安裝方式**
+
+
+
+1.使用具有sudo權限的使用者，透過下載一鍵安裝的bash命令
+2.安裝過程中會詢問必要參數，並且自動部署docker與相關服務
+3.安裝完畢後，可以透過網頁介面進行後續的憑證處理作業
+4.[憑證狀態檢視]與[系統狀態] 如果都正常，就可以開始進行部署作業
 
 --------------------------------------------------------------
-mdmcert-free-cert-apply_win-x64.zip 說明
+# mdmcert-free-cert-apply_win-x64.zip 說明
 
 免費mdm cert工具mdmctl，這是由micromdm/nanomdm的開發者
 Jesse Peterson  https://github.com/jessepeterson  所提供的免費平台與工具
 
-自行補上了windows x64的編譯執行檔與自動化power shell，操作步驟如下
+**這個檔案是自製的windows x64的編譯執行檔與自動化power shell**
+
+**操作步驟如下：**
 
 1.請先到https://mdmcert.download/ 註冊與驗證，email需要是edu的網域，需要收信驗證
 
