@@ -13,7 +13,7 @@
 **安裝方式**
 1.使用具有sudo權限的使用者，透過下載一鍵安裝的bash命令
 
-wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh
+```wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh```
 
 
 2.安裝過程中會詢問必要參數，並且自動部署docker與相關服務
