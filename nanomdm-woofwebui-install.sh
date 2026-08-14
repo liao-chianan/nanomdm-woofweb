@@ -327,6 +327,19 @@ log_ok "MySQL 初始化腳本準備完成(01-schemas.sql / 02-create-users.sql)"
 # 6. 部署 Docker 服務
 # =============================================================================
 
+# 重要:docker-compose.yml裡nanomdm服務的-webhook-url參數帶有YOUR_DOMAIN_HERE佔位符,
+# 必須在啟動任何docker compose指令之前先替換掉,不然nanomdm容器會拿著這個字面字串
+# 當作webhook網址,導致裝置註冊後的自動化(改名、推送baseline)完全收不到通知。
+log_step "設定 docker-compose.yml 的 webhook 網址"
+
+COMPOSE_FILE="/opt/nanomdm-deployment/docker-compose.yml"
+if [ -f "$COMPOSE_FILE" ]; then
+    sed -i -e "s|YOUR_DOMAIN_HERE|${SERVER_DOMAIN}|g" "$COMPOSE_FILE"
+    log_ok "已套用網域到 docker-compose.yml 的 webhook-url"
+else
+    die "找不到 $COMPOSE_FILE,無法繼續安裝"
+fi
+
 # 重要防呆:docker官方MySQL image的docker-entrypoint-initdb.d初始化腳本(建立資料庫/帳號)
 # 只有在資料目錄是「全新空白」時才會執行。如果這是重跑第二次(例如上次安裝中途失敗過),
 # mysql-data目錄可能已經有殘留資料,MySQL會直接跳過所有初始化腳本、用舊資料開機,
