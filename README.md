@@ -20,11 +20,12 @@
 2.安裝過程中會詢問必要參數，API KEY與資料庫密碼會預設用亂數產生，並且自動部署docker與相關服務  
 
 3.安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業，[憑證狀態檢視] 中有提示如何取得憑證並且上傳：  
+
 ==>APNs Push 憑證：最麻煩的憑證，正常管道是付費訂閱apple developer program後取得mdm憑證再去產生push cert  
 免費的管道則是透過mdmcert來申請憑證，請往下看 [mdmcert搭配mdmctl利用方式與前提說明]  
 學校單位亦可以透過申請方式免費訂閱apple developer program，但需要不少額外步驟，有興趣可以自行申請  
 
-==>DEP OAuth Token：到 https://school.apple.com/#/main/preferences/myprofile (偏好設定 → 裝置管理服務),  
+==>DEP OAuth Token：先從自己的nanomdm webui下載公鑰，接著到 https://school.apple.com/#/main/preferences/myprofile (偏好設定 → 裝置管理服務),  
 選擇指定的伺服器:「編輯 → 上傳公用密鑰」是更新公鑰(新設/更換伺服器時需要)，「下載權杖」可以下載 .p7m 檔案上傳給自己的nanomdm伺服器更新 Token;。  
 
 ==>VPP Content Token：到 https://school.apple.com/#/main/preferences/paymentsandbilling/appsandbooks (偏好設定 → 付款與帳單 → 內容與代號),  
