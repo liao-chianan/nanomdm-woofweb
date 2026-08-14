@@ -40,6 +40,8 @@ https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-pr
 --------------------------------------------------------------
 # 自製的 mdmcert-free-cert-apply_win-x64.zip 操作說明
 
+https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free-cert-apply_win-x64.zip
+
 **這個檔案是自製的windows x64的編譯執行檔與自動化power shell，讓使用者可以windows環境底下處理取得APNs推播憑證**
 
 1.請先到https://mdmcert.download/ 註冊與驗證，email需要是edu的網域，需要收信驗證
