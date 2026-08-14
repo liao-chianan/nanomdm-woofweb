@@ -11,13 +11,16 @@
 
 
 **安裝方式**
-
-
-
 1.使用具有sudo權限的使用者，透過下載一鍵安裝的bash命令
+
+wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh
+
+
 2.安裝過程中會詢問必要參數，並且自動部署docker與相關服務
-3.安裝完畢後，可以透過網頁介面進行後續的憑證處理作業
-4.[憑證狀態檢視]與[系統狀態] 如果都正常，就可以開始進行部署作業
+
+3.安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業
+
+4.[憑證狀態檢視]與[系統狀態] 如果都正常，就可以開始進行設備部署作業
 
 --------------------------------------------------------------
 # mdmcert-free-cert-apply_win-x64.zip 說明
