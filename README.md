@@ -54,7 +54,7 @@ https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free
 
 5.透過https://identity.apple.com/pushcert/  可以搭配這個push.req檔案來產生並且pem憑證
 
-6.push.key檔案為私鑰，pem檔案為配對的憑證，去nanomdm的webui中就可以上傳
+6.push.key檔案為私鑰，pem檔案為配對的憑證，在nanomdm woofweb中就可以上傳這兩個檔案，來進行APNs推播使用
 
 !!重要，這個資料夾的資料務必保留好!!   
 
