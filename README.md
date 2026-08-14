@@ -69,7 +69,7 @@ P.S. 教育單位也可以申請免費apple developer方案，藉此產生mdm憑
 
 https://forums.macrumors.com/threads/apple-configurator-2-cannot-sign-in-error-message-displayed.2484580/
 
-感謝原始開發nanomdm與micromdm的貢獻者，釋出這個工具，希望對沒有管理經費的小型學校有所助益
+感謝原始開發nanomdm與micromdm的貢獻者，釋出這個工具，希望對沒有管理經費的小型學校有所助益  Woof! Woof!
 
 
 
