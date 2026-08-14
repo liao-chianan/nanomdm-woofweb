@@ -451,6 +451,23 @@ else
 fi
 
 # =============================================================================
+# 套用 default-enroll.json 裡的註冊入口URL(enroll-server.py的網址)
+# =============================================================================
+log_step "設定群組註冊檔(default-enroll.json)"
+
+DEFAULT_ENROLL_JSON="/opt/nanomdm-deployment/dep-profiles/default-enroll.json"
+
+if [ -f "$DEFAULT_ENROLL_JSON" ]; then
+    sed -i \
+        -e "s|YOUR_DOMAIN_HERE|${SERVER_DOMAIN}|g" \
+        "$DEFAULT_ENROLL_JSON"
+    log_ok "已套用網域到註冊入口URL"
+    log_warn "support_phone_number/support_email_address 欄位維持佔位值,可以之後在webui「群組註冊檔」頁面編輯"
+else
+    log_warn "找不到 $DEFAULT_ENROLL_JSON,略過這個步驟(請確認專案zip裡有這個檔案)"
+fi
+
+# =============================================================================
 # 7. nginx + certbot 憑證申請
 # =============================================================================
 log_step "設定 nginx 並申請 Let's Encrypt 憑證"
