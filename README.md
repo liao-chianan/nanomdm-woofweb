@@ -22,6 +22,8 @@
 wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh
 ```
 
+> P.S.專案安裝過程會用到的docker image，為了保持版本穩定性，主要是用我測試過的docker image直接提供 (直接用官方最新版可能會導致相容性問題)
+
 ### 2. 互動式設定
 
 安裝過程中會詢問必要參數。API KEY 與資料庫密碼會預設用亂數產生，並且自動部署 Docker 與相關服務。
@@ -94,7 +96,7 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 這個檔案是透過 mdmctl 的原始碼自製的 Windows x64 編譯執行檔與自動化 PowerShell，讓使用者可以在 Windows 環境底下處理取得 APNs 推播憑證。
 
 1. 請先到 [mdmcert.download](https://mdmcert.download/) 註冊與驗證，email 需要是 `.edu` 網域，需要收信驗證
-2. 驗證成功後請解壓縮這個檔案，用 PowerShell 執行 `01-mdmctl-freecert-email.ps1`，再次輸入你申請的 email
+2. 驗證成功後請下載並解壓縮mdmcert-free-cert-apply_win-x64.zip這個檔案，用 PowerShell 執行 `01-mdmctl-freecert-email.ps1`，再次輸入你申請的 email申請p7檔案
 3. 大約等個幾分鐘，去 email 收信，會收到帶有時間戳記的 `plist.b64.p7` 檔案，把這個檔案下載後放到 mdmctl 同一個資料夾
 4. 執行 `02-mdmctl-freecert-decrypt.ps1`，會再產出一個 `push.req` 檔案
 5. 透過 [identity.apple.com/pushcert](https://identity.apple.com/pushcert/) 可以搭配這個 `push.req` 檔案來產生 pem 憑證，請下載這個 pem 憑證檔案
@@ -103,14 +105,16 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 > ⚠️ **重要，這個資料夾的資料務必保留好！**
 >
 > pem 效期只有一年，屆時需要再利用 `push.req` 重新產生一次 pem 憑證。
-> （`push.req` 不需要更新，可以直接用舊的）
+> （`push.req` 不需要更新，可以直接用舊的，應該吧？）
 
 ---
 
 ## 開發緣起
 
-2026 年 6 月份，Apple Configurator 2 的功能故障，不得不開發這個工具（[詳見此討論串](https://forums.macrumors.com/threads/apple-configurator-2-cannot-sign-in-error-message-displayed.2484580/)）。
+2026 年 7 月份，免費的Apple Configurator 2 的功能故障了近一個月，不得不開發這個工具  
+（[詳見此討論串](https://forums.macrumors.com/threads/apple-configurator-2-cannot-sign-in-error-message-displayed.2484580/)）  
 
-感謝原始開發 nanomdm 與 micromdm 的貢獻者，釋出這個工具，希望對沒有管理經費的小型學校有所助益。
+特別感謝原始開發 nanomdm 與 micromdm 的開發者，有了他們才能產出這個小專案!  
+釋出這個用Claude自製的工具，希望對沒有管理經費的小型學校有所助益。  
 
-**Woof! Woof! 🐾**
+**🐶 Woof! Woof! 🐾**
