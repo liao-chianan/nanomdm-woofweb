@@ -38,7 +38,7 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 
 免費的管道則是透過 mdmcert 來申請憑證，請參考下方「[mdmcert 搭配 mdmctl 利用方式與前提說明](#mdmcert-搭配-mdmctl-利用方式與前提說明)」章節。
 
-> 學校單位亦可以透過申請方式免費訂閱 Apple Developer Program，但需要不少額外步驟，有興趣可以自行申請。
+> 學校單位亦可以透過申請方式免費訂閱 Apple Developer Program，但需要不少額外步驟，有興趣可以自行申請(我在2025年有成功申請過，2026年也成功免費續訂)。
 
 #### DEP OAuth Token
 
