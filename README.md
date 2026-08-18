@@ -102,10 +102,12 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 5. 透過 [identity.apple.com/pushcert](https://identity.apple.com/pushcert/) 可以搭配這個 `push.req` 檔案來產生 pem 憑證，請下載這個 pem 憑證檔案
 6. 此時資料夾中的 `push.key` 檔案為私鑰，pem 檔案為配對的憑證，在 nanomdm-woofweb 中可以上傳這兩個檔案，來進行 APNs 推播使用
 
-> ⚠️ **重要，這個資料夾的資料務必保留好！**
+> ⚠️ **重要，這個資料夾的檔案請保留好！**  
+> ⚠️ **務必在到期日之前更新apple push cert，一旦過期，就得重新產生全新apple push cert，所有裝置都必須重新註冊**  
+> ⚠️ **更新時選renew才不會變更Topic，一旦變更Topic，所有裝置都必須重新註冊**  
 >
-> pem 效期只有一年，屆時需要再利用 `push.req` 重新產生一次 pem 憑證。
-> （`push.req` 不需要更新，可以直接用舊的，應該吧？）
+> pem 效期只有一年，到期前需要再重跑一次完整的mdmctl流程取得 `push.req` 再重新產生一次 pem 憑證。
+> （`push.req`上傳後，Vendor會是[Jesse Peterson]，這是因為作者免費開放給大家使用他的訂閱方案 ）
 
 ---
 
