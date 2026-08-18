@@ -41,6 +41,8 @@
       <a href="{{ url_for('account_management_page') }}" class="{{ 'active' if active == 'account_management' else '' }}">帳號管理</a>
       <a href="{{ url_for('system_logs_page') }}" class="{{ 'active' if active == 'system_logs' else '' }}">系統紀錄</a>
       <a href="{{ url_for('system_status_page') }}" class="{{ 'active' if active == 'system_status' else '' }}">系統狀態</a>
+      <div class="sidebar-divider"></div>
+      <a href="{{ url_for('version_page') }}" class="{{ 'active' if active == 'version' else '' }}">版本與更新</a>
     </nav>
 
     <main class="main-content">

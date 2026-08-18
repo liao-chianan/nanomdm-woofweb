@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>版本與更新</h2>
+
+  <div id="version-unknown-box" style="display:none; background:#fdeaea; border:1px solid #f5c2c2; border-radius:6px; padding:14px; margin-bottom:14px;">
+    <p style="margin:0 0 10px 0; font-size:13px; color:#7a271a;">
+      目前找不到版本記錄(通常是這個功能上線之前就已經安裝好的環境)。請先確認目前實際安裝的版本,才能正確比對差異。
+      如果是透過官方安裝腳本裝的、還沒手動更新過,通常是最初的安裝版本。
+    </p>
+    <div class="field-row">
+      <label>目前實際版本</label>
+      <input type="text" id="version-manual-input" placeholder="例如 v0.8" style="width:160px;">
+    </div>
+    <button id="version-manual-save-btn" type="button" style="font-size:12px;">確認設定</button>
+  </div>
+
+  <table class="kv-table">
+    <tr><td class="k">目前版本</td><td id="version-current-display">載入中...</td></tr>
+  </table>
+
+  <button id="version-check-btn" type="button" style="margin-top:14px;">檢測更新</button>
+
+  <div id="version-check-result" style="margin-top:14px; display:none;">
+    <div style="background:#f8f9fb; border-radius:6px; padding:14px;">
+      <p id="version-check-summary" style="margin:0 0 8px 0; font-weight:600;"></p>
+      <div id="version-release-notes" style="font-size:13px; color:#374151; white-space:pre-wrap; margin-bottom:10px;"></div>
+      <button id="version-update-btn" type="button" style="display:none;">更新到此版本</button>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>
+    所有可用版本(降版用)
+    <button id="version-list-refresh-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
+  </h2>
+  <p style="color:#6b7280; font-size:13px; margin:6px 0;">
+    如果更新之後發現問題,可以在這裡選擇一個先前的版本切換回去。切換方式(套用哪些檔案)跟「更新」完全相同,只是目標版本比較舊。
+  </p>
+  <table class="data-table" id="version-list-table">
+    <thead>
+      <tr><th>版本</th><th>發布時間</th><th>版本說明</th><th>操作</th></tr>
+    </thead>
+    <tbody id="version-list-tbody">
+      <tr><td colspan="4">載入中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="modal-overlay hidden" id="version-diff-modal">
+  <div class="modal-box" style="width:700px;">
+    <span class="modal-close" onclick="closeModal('version-diff-modal')">✕</span>
+    <h3>確認套用版本 <span id="version-diff-target"></span></h3>
+    <p style="font-size:13px; color:#6b7280;">
+      目前版本:<strong id="version-diff-current"></strong> → 目標版本:<strong id="version-diff-target-2"></strong>
+    </p>
+    <p style="font-size:13px; color:#374151;">以下檔案會被覆蓋或新增/刪除(執行前會自動備份現有內容):</p>
+    <div id="version-diff-file-list" style="max-height:300px; overflow-y:auto; background:#f8f9fb; border-radius:6px; padding:10px; margin-bottom:10px;"></div>
+    <p style="font-size:12px; color:#9ca3af;" id="version-diff-empty-hint"></p>
+    <p style="font-size:13px; color:#b42318; font-weight:600;">⚠️ 相關服務會自動重啟,執行過程中網頁介面可能會短暫無法連線。</p>
+    <div class="field-row"><label>請輸入您目前登入的密碼以確認</label><input type="password" id="version-apply-password-input"></div>
+    <button id="version-apply-confirm-btn" type="button" style="margin-top:10px;">確認執行</button>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/version.js') }}?v={{ static_version }}"></script>
+{% endblock %}

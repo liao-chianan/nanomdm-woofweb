@@ -98,6 +98,22 @@ DEFAULT_CONFIG = {
         "auto_enabled": False,
         "check_interval_seconds": 86400
     },
+    "update": {
+        "github_owner": "liao-chianan",
+        "github_repo": "nanomdm-woofweb",
+        "repo_subfolder": "nanomdm-woofweb",
+        "version_file": "/opt/nanomdm-webui/VERSION",
+        "eligible_extensions": [".py", ".sh", ".css", ".js", ".html"],
+        "path_map": {
+            "nanomdm-webui": "/opt/nanomdm-webui",
+            "nanomdm-deployment": "/opt/nanomdm-deployment"
+        },
+        "service_map": {
+            "nanomdm-webui": "nanomdm-webui.service",
+            "webhook-server.py": "webhook-automation.service",
+            "enroll-server.py": "enroll-server.service"
+        }
+    },
     "nanomdm_docker": {
         "container_name": "nanomdm-server",
         "log_tail_lines": 5000

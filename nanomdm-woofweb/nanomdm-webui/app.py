@@ -7,6 +7,7 @@ import os
 import re
 import requests
 import shutil
+import subprocess
 import threading
 import time
 
@@ -23,6 +24,7 @@ import utils_profiles
 import utils_depprofile
 import utils_asm
 import utils_sysstatus
+import utils_version
 import utils_certs
 import utils_auth
 import utils_logging
@@ -3702,6 +3704,200 @@ def _nanomdm_cleanup_scheduler_loop():
 def start_nanomdm_cleanup_scheduler():
     t = threading.Thread(target=_nanomdm_cleanup_scheduler_loop, daemon=True)
     t.start()
+
+
+# ---------------------------------------------------------------------------
+# 版本與更新
+# ---------------------------------------------------------------------------
+@app.route("/version")
+@login_required
+def version_page():
+    return render_template("version.html", active="version")
+
+
+def _get_github_token():
+    """從.env讀取選填的GITHUB_TOKEN。有設定的話,GitHub API的請求速率限制
+    會從未登入的60次/小時提升到5000次/小時(這個限制實測過真的會遇到,不是純理論)。
+    """
+    env = get_env_dict()
+    return env.get("GITHUB_TOKEN", "") or None
+
+
+@app.route("/api/version/current")
+@login_required
+def api_version_current():
+    cfg = CFG["update"]
+    current = utils_version.get_current_version(cfg["version_file"])
+    return jsonify({"ok": True, "current_version": current})
+
+
+@app.route("/api/version/set-current", methods=["POST"])
+@login_required
+def api_version_set_current():
+    """手動設定目前版本。用在這個功能上線之前就已經安裝好的環境(找不到版本記錄檔),
+    需要使用者自己確認一次目前實際是哪個版本,之後才能正確比對差異。
+    """
+    data = request.json or {}
+    tag = (data.get("tag") or "").strip()
+    if not tag:
+        return jsonify({"ok": False, "message": "請提供版本標籤"}), 400
+    utils_version.set_current_version(CFG["update"]["version_file"], tag)
+    log_activity_entry("系統維護-手動設定目前版本", True, detail=f"設定為 {tag}")
+    return jsonify({"ok": True, "current_version": tag})
+
+
+@app.route("/api/version/tags")
+@login_required
+def api_version_tags():
+    cfg = CFG["update"]
+    token = _get_github_token()
+    tags, err = utils_version.fetch_github_tags(cfg["github_owner"], cfg["github_repo"], github_token=token)
+    if tags is None:
+        return jsonify({"ok": False, "message": err}), 500
+
+    releases_map = utils_version.fetch_github_releases_map(cfg["github_owner"], cfg["github_repo"], github_token=token)
+    tags_sorted = sorted(tags, key=lambda t: utils_version.version_sort_key(t["name"]), reverse=True)
+    for t in tags_sorted:
+        release_info = releases_map.get(t["name"])
+        t["release_notes"] = release_info["body"] if release_info else None
+        t["published_at"] = release_info["published_at"] if release_info else None
+
+    return jsonify({"ok": True, "tags": tags_sorted})
+
+
+@app.route("/api/version/check-update")
+@login_required
+def api_version_check_update():
+    cfg = CFG["update"]
+    token = _get_github_token()
+    tags, err = utils_version.fetch_github_tags(cfg["github_owner"], cfg["github_repo"], github_token=token)
+    if tags is None:
+        return jsonify({"ok": False, "message": err}), 500
+    if not tags:
+        return jsonify({"ok": False, "message": "GitHub 上目前沒有任何版本標籤"}), 404
+
+    tags_sorted = sorted(tags, key=lambda t: utils_version.version_sort_key(t["name"]), reverse=True)
+    latest = tags_sorted[0]["name"]
+
+    current = utils_version.get_current_version(cfg["version_file"])
+
+    releases_map = utils_version.fetch_github_releases_map(cfg["github_owner"], cfg["github_repo"], github_token=token)
+    latest_notes = releases_map.get(latest, {}).get("body")
+
+    return jsonify({
+        "ok": True,
+        "current_version": current,
+        "latest_version": latest,
+        "update_available": bool(current) and (current != latest),
+        "release_notes": latest_notes,
+    })
+
+
+@app.route("/api/version/diff")
+@login_required
+def api_version_diff():
+    target_tag = request.args.get("target_tag", "").strip()
+    if not target_tag:
+        return jsonify({"ok": False, "message": "缺少 target_tag"}), 400
+
+    cfg = CFG["update"]
+    current = utils_version.get_current_version(cfg["version_file"])
+    if not current:
+        return jsonify({"ok": False, "message": "目前版本未知,請先在頁面上手動設定目前版本"}), 400
+    if current == target_tag:
+        return jsonify({"ok": True, "current_version": current, "target_version": target_tag, "files": []})
+
+    token = _get_github_token()
+    files, err = utils_version.compare_versions(
+        cfg["github_owner"], cfg["github_repo"], current, target_tag, cfg, github_token=token,
+    )
+    if files is None:
+        return jsonify({"ok": False, "message": err}), 500
+
+    return jsonify({"ok": True, "current_version": current, "target_version": target_tag, "files": files})
+
+
+def _delayed_restart_self():
+    """延遲重啟nanomdm-webui.service自己。故意在背景執行緒裡延遲幾秒才動手,
+    確保這次更新請求的HTTP回應能先確實送到瀏覽器,不會因為服務被重啟中斷連線,
+    讓使用者看不到「更新成功」的回應。
+    """
+    def _do_restart():
+        time.sleep(2)
+        subprocess.run(["systemctl", "restart", "nanomdm-webui.service"])
+    t = threading.Thread(target=_do_restart, daemon=True)
+    t.start()
+
+
+@app.route("/api/version/apply", methods=["POST"])
+@login_required
+def api_version_apply():
+    data = request.json or {}
+    password = data.get("password", "")
+    target_tag = (data.get("target_tag") or "").strip()
+
+    if not verify_current_user_password(password):
+        log_activity_entry("系統維護-版本更新", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    if not target_tag:
+        return jsonify({"ok": False, "message": "缺少 target_tag"}), 400
+
+    cfg = CFG["update"]
+    current = utils_version.get_current_version(cfg["version_file"])
+    if not current:
+        return jsonify({"ok": False, "message": "目前版本未知,請先在頁面上手動設定目前版本"}), 400
+
+    token = _get_github_token()
+    files, err = utils_version.compare_versions(
+        cfg["github_owner"], cfg["github_repo"], current, target_tag, cfg, github_token=token,
+    )
+    if files is None:
+        return jsonify({"ok": False, "message": f"比對版本失敗: {err}"}), 500
+    if not files:
+        return jsonify({"ok": False, "message": "沒有任何符合條件的檔案需要更新,目前已經是這個版本的內容"}), 400
+
+    backup_dir = "/opt/nanomdm-webui/.update_backups"
+    results, overall_ok, this_backup_dir = utils_version.apply_version_update(
+        cfg["github_owner"], cfg["github_repo"], target_tag, files, cfg, backup_dir, github_token=token,
+    )
+
+    failed_files = [r for r in results if not r["ok"]]
+    if not failed_files:
+        utils_version.set_current_version(cfg["version_file"], target_tag)
+
+    changed_local_paths = [f["local_path"] for f in files]
+    services_to_restart = utils_version.determine_services_to_restart(changed_local_paths, cfg)
+
+    # nanomdm-webui.service重啟自己放到最後、用延遲執行緒處理,其他服務可以直接同步重啟
+    restarted = []
+    self_restart_needed = False
+    for svc in services_to_restart:
+        if svc == "nanomdm-webui.service":
+            self_restart_needed = True
+            continue
+        restart_ok, restart_err = restart_service_and_log("systemd", svc, f"版本更新後重啟(更新到{target_tag})")
+        restarted.append({"service": svc, "ok": restart_ok, "error": restart_err})
+
+    log_activity_entry(
+        "系統維護-版本更新", overall_ok and not failed_files,
+        detail=f"從 {current} 更新到 {target_tag}, 檔案數={len(files)}, 失敗數={len(failed_files)}, "
+               f"重啟服務={services_to_restart}, 備份位置={this_backup_dir}",
+    )
+
+    if self_restart_needed:
+        _delayed_restart_self()
+
+    return jsonify({
+        "ok": overall_ok and not failed_files,
+        "results": results,
+        "services_restarted": services_to_restart,
+        "self_restarting": self_restart_needed,
+        "backup_dir": this_backup_dir,
+        "message": (
+            f"更新完成,已套用 {len(files) - len(failed_files)}/{len(files)} 個檔案。"
+            + (f" webui 服務即將自動重啟,幾秒後請重新整理頁面。" if self_restart_needed else "")
+        ),
+    })
 
 
 @app.route("/api/devices/status-cache")
