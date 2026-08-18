@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>
+    所有群組
+    <button id="new-group-btn" type="button" style="float:right; font-size:12px;">新增群組</button>
+  </h2>
+
+  <div id="vpp-missing-banner" class="hidden" style="background:#fdeee0; color:#b45309; padding:10px 14px; border-radius:6px; font-size:13px; margin-bottom:14px;">
+    尚未產生過 App 授權快取(vpp_license.csv),無法比對群組綁定的軟體資訊。
+    請先到 <a href="{{ url_for('asm_page') }}" style="color:#b45309; text-decoration:underline;">ASM 軟體資訊</a> 頁執行一次查詢。
+  </div>
+
+  <table class="data-table" id="groups-table">
+    <thead>
+      <tr>
+        <th>群組名稱</th>
+        <th>描述</th>
+        <th>裝置數量</th>
+        <th>綁定的軟體數量</th>
+        <th>註冊檔</th>
+        <th>描述檔</th>
+        <th>群組命令</th>
+        <th>編輯</th>
+        <th>再製</th>
+        <th>刪除</th>
+      </tr>
+    </thead>
+    <tbody id="groups-tbody">
+      <tr><td colspan="10">載入中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- 新增/編輯群組 Modal -->
+<div class="modal-overlay hidden" id="group-edit-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('group-edit-modal')">✕</span>
+    <h3 id="group-edit-title">新增群組</h3>
+    <div class="field-row">
+      <label>群組名稱(不可包含逗號、雙引號或控制字元,長度 1~64 字元)</label>
+      <input type="text" id="group-edit-name" maxlength="64">
+    </div>
+    <div class="field-row">
+      <label>描述</label>
+      <input type="text" id="group-edit-description">
+    </div>
+    <div id="group-edit-new-files-section">
+      <div class="field-row">
+        <label>使用的註冊檔(enroll json) <span style="color:#d64545;">*必選</span></label>
+        <select id="group-edit-enroll-select" style="width:100%;"></select>
+        <p id="group-edit-enroll-empty-hint" class="hidden" style="color:#b45309; font-size:12px; margin-top:4px;">
+          目前沒有可用的註冊檔,請先到「ADE 註冊設定」頁面新增一份。
+        </p>
+      </div>
+      <div class="field-row">
+        <label>使用的描述檔(mobileconfig) <span style="color:#d64545;">*必選</span></label>
+        <select id="group-edit-mobileconfig-select" style="width:100%;"></select>
+        <p id="group-edit-mobileconfig-empty-hint" class="hidden" style="color:#b45309; font-size:12px; margin-top:4px;">
+          目前沒有可用的描述檔,請先到「群組描述檔」頁面新增一份。
+        </p>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('group-edit-modal')" type="button">取消</button>
+      <button id="group-edit-save-btn" type="button">儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 複製群組 Modal -->
+<div class="modal-overlay hidden" id="group-duplicate-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('group-duplicate-modal')">✕</span>
+    <h3>複製群組 - <span id="group-duplicate-source-label"></span></h3>
+    <p style="color:#6b7280; font-size:13px;">
+      會一併複製綁定的軟體清單、註冊檔(enroll json)、描述檔(mobileconfig),並依新群組名稱自動命名複製出來的檔案。
+    </p>
+    <div class="field-row">
+      <label>新群組名稱</label>
+      <input type="text" id="group-duplicate-new-name" maxlength="64">
+    </div>
+    <div class="field-row">
+      <label>描述(留空則沿用來源群組的描述)</label>
+      <input type="text" id="group-duplicate-new-description">
+    </div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('group-duplicate-modal')" type="button">取消</button>
+      <button id="group-duplicate-confirm-btn" type="button">確認複製</button>
+    </div>
+  </div>
+</div>
+
+<!-- 群組裝置清單 Modal (呈現方式比照「所有裝置與命令」) -->
+<div class="modal-overlay hidden" id="group-devices-modal">
+  <div class="modal-box" style="width:1200px;">
+    <span class="modal-close" onclick="closeModal('group-devices-modal')">✕</span>
+    <h3>群組裝置清單 - <span id="group-devices-modal-title"></span></h3>
+    <p id="group-devices-count-info" style="color:#374151; font-size:13px; margin-bottom:12px;"></p>
+    <table class="data-table" id="group-devices-table">
+      <colgroup>
+        <col style="width:50px;">
+        <col style="width:180px;">
+        <col style="width:120px;">
+        <col style="width:110px;">
+        <col style="width:120px;">
+        <col style="width:60px;">
+        <col style="width:120px;">
+        <col style="width:170px;">
+        <col style="width:150px;">
+        <col style="width:120px;">
+        <col style="width:100px;">
+        <col style="width:140px;">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>流水號</th>
+          <th>裝置名稱</th>
+          <th>群組</th>
+          <th>裝置序號</th>
+          <th>WIFI MAC</th>
+          <th>電量</th>
+          <th>容量</th>
+          <th>作業系統</th>
+          <th>IP 位址</th>
+          <th>最後同步</th>
+          <th>佈署 ID</th>
+          <th>派送命令</th>
+        </tr>
+      </thead>
+      <tbody id="group-devices-tbody">
+        <tr><td colspan="12">載入中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 群組軟體清單 Modal -->
+<div class="modal-overlay hidden" id="group-apps-modal">
+  <div class="modal-box" style="width:720px;">
+    <span class="modal-close" onclick="closeModal('group-apps-modal')">✕</span>
+    <h3>群組軟體清單 - <span id="group-apps-modal-title"></span></h3>
+
+    <table class="data-table" id="group-apps-table">
+      <thead>
+        <tr>
+          <th>Adam ID</th>
+          <th>Bundle ID</th>
+          <th>軟體名稱</th>
+          <th>總數量</th>
+          <th>剩餘量</th>
+          <th>移除</th>
+        </tr>
+      </thead>
+      <tbody id="group-apps-tbody">
+        <tr><td colspan="6">載入中...</td></tr>
+      </tbody>
+    </table>
+
+    <div style="margin-top:16px; border-top:1px solid var(--border-color); padding-top:14px;">
+      <div class="field-row">
+        <label>加入 App(僅列出 vpp_license.csv 快取中尚未加入這個群組的軟體)</label>
+        <select id="group-apps-add-select" style="width:100%;"></select>
+      </div>
+      <button id="group-apps-add-btn" type="button">加入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 指令回應歷史 Modal -->
+<div class="modal-overlay hidden" id="history-modal">
+  <div class="modal-box" style="width:680px;">
+    <span class="modal-close" onclick="closeModal('history-modal')">✕</span>
+    <h3>指令回應歷史 - <span id="history-modal-target"></span></h3>
+    <div id="history-modal-body">載入中...</div>
+  </div>
+</div>
+
+<!-- 派送命令 Modal (與所有裝置與命令頁共用同一套邏輯,也支援群組批次派送) -->
+<div class="modal-overlay hidden" id="command-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('command-modal')">✕</span>
+    <h3>派送命令</h3>
+    <p style="color:#6b7280; font-size:13px;">目標: <strong id="command-modal-target"></strong></p>
+    <div class="field-row">
+      <label>選擇命令</label>
+      <select id="command-select" style="width:100%;"></select>
+    </div>
+    <div id="command-fields-container"></div>
+    <div id="command-result-container" style="margin-top:14px; max-height:220px; overflow-y:auto;"></div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('command-modal')" type="button">取消</button>
+      <button id="command-send-btn" type="button">送出</button>
+    </div>
+  </div>
+</div>
+
+<!-- 裝置詳細資訊 Modal -->
+<div class="modal-overlay hidden" id="details-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('details-modal')">✕</span>
+    <h3 id="details-modal-title">裝置詳細資訊</h3>
+    <div id="details-modal-body">載入中...</div>
+  </div>
+</div>
+
+<!-- 遺失定位地圖 Modal -->
+<div class="modal-overlay hidden" id="location-map-modal">
+  <div class="modal-box" style="width:640px;">
+    <span class="modal-close" onclick="closeModal('location-map-modal')">✕</span>
+    <h3 id="location-map-title">裝置定位</h3>
+    <div id="location-map-container" style="width:100%; height:420px;"></div>
+    <p id="location-map-info" style="color:#9ca3af; font-size:12px; margin-top:8px;"></p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  window.COMMAND_DEFS = {{ command_defs | tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/groups.js') }}?v={{ static_version }}"></script>
+{% endblock %}

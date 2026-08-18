@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>
+    憑證狀態檢視
+    <button id="refresh-cert-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新檢查</button>
+  </h2>
+  <p style="color:#6b7280; font-size:13px; margin-bottom:14px;">
+    即時檢查系統內所有憑證/Token 的到期狀態,包含 nginx、SCEP 根 CA、APNs Push 憑證、DEP OAuth Token、VPP Content Token、NanoAXM 憑證。
+  </p>
+
+  <table class="data-table" id="cert-status-table">
+    <thead>
+      <tr>
+        <th>憑證名稱</th>
+        <th>實體位置/來源</th>
+        <th>到期日</th>
+        <th>狀態</th>
+      </tr>
+    </thead>
+    <tbody id="cert-status-tbody">
+      <tr><td colspan="4">載入中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>憑證說明與更新方法</h2>
+  <div id="cert-status-details">載入中...</div>
+</div>
+
+<!-- 通用進度顯示 Modal (nginx續期、SCEP CA重新產生等SSE串流操作共用) -->
+<div class="modal-overlay hidden" id="cert-progress-modal">
+  <div class="modal-box" style="width:640px;">
+    <span class="modal-close" onclick="closeModal('cert-progress-modal')">✕</span>
+    <h3 id="cert-progress-title">處理中</h3>
+    <div id="cert-progress-log" style="background:#f8f9fb; border-radius:6px; padding:12px; max-height:400px; overflow-y:auto; font-size:13px; line-height:1.8;"></div>
+  </div>
+</div>
+
+<!-- SCEP 根 CA 重新產生 Modal -->
+<div class="modal-overlay hidden" id="scep-regen-modal">
+  <div class="modal-box" style="width:560px;">
+    <span class="modal-close" onclick="closeModal('scep-regen-modal')">✕</span>
+    <h3 style="color:#b42318;">⚠️ 重新產生 SCEP 根 CA</h3>
+    <div style="background:#fdeaea; border:1px solid #f5c2c2; border-radius:6px; padding:12px; margin-bottom:14px; font-size:13px; color:#7a271a; line-height:1.7;">
+      這是<strong>不可逆</strong>的操作,本質上是建立一張全新的 CA,不是延長現有 CA 的效期。
+      執行後,<strong>所有已註冊裝置的身份憑證信任鏈都會失效</strong>,必須全部清除並重新註冊才能恢復管理。
+      執行前會自動備份現有的 ca.pem/ca.key。
+    </div>
+    <p id="scep-current-info" style="color:#6b7280; font-size:12px; margin-bottom:10px;">載入目前 CA 資訊中...</p>
+    <div class="field-row"><label>簽發者名稱 (Common Name)</label><input type="text" id="scep-cn-input"></div>
+    <div class="field-row"><label>組織名稱 (Organization)</label><input type="text" id="scep-org-input"></div>
+    <div class="field-row"><label>部門 (Organizational Unit)</label><input type="text" id="scep-ou-input"></div>
+    <div class="field-row"><label>國別代碼 (Country, 例如 TW)</label><input type="text" id="scep-country-input" maxlength="2"></div>
+    <div class="field-row"><label>效期(年)</label><input type="text" id="scep-years-input" value="15"></div>
+    <div class="field-row"><label>請再次輸入您目前登入的密碼以確認</label><input type="password" id="scep-password-input"></div>
+    <button id="scep-regen-confirm-btn" class="danger" type="button" style="margin-top:10px;">確認重新產生(不可逆)</button>
+  </div>
+</div>
+
+<!-- APNs Push 憑證上傳 Modal -->
+<div class="modal-overlay hidden" id="apns-upload-modal">
+  <div class="modal-box" style="width:560px;">
+    <span class="modal-close" onclick="closeModal('apns-upload-modal')">✕</span>
+    <h3>上傳 APNs Push 憑證</h3>
+    <p id="apns-current-topics" style="color:#6b7280; font-size:12px; margin-bottom:10px;">載入目前憑證資訊中...</p>
+    <p style="color:#6b7280; font-size:12px; margin-bottom:10px;">
+      請先到 identity.apple.com/pushcert 完成申請/續簽,下載回來的憑證(.pem)與私鑰在這裡上傳。
+      如果私鑰是加密狀態(有密碼保護),系統會自動偵測並在下方欄位詢問密碼,不需要自己先手動解密。
+    </p>
+    <div class="field-row"><label>憑證檔案 (.pem)</label><input type="file" id="apns-cert-file-input" onchange="checkApnsTopicOnFileSelect()"></div>
+    <div class="field-row"><label>私鑰檔案</label><input type="file" id="apns-key-file-input"></div>
+    <div class="field-row" id="apns-key-passphrase-row" style="display:none;">
+      <label>私鑰密碼(僅私鑰為加密狀態時需要)</label>
+      <input type="password" id="apns-key-passphrase-input">
+    </div>
+    <div id="apns-topic-warning" style="display:none; background:#fdeaea; border:1px solid #f5c2c2; border-radius:6px; padding:12px; margin-bottom:10px; font-size:13px; color:#7a271a; line-height:1.7;"></div>
+    <div class="field-row"><label>請再次輸入您目前登入的密碼以確認</label><input type="password" id="apns-password-input"></div>
+    <div class="field-row" id="apns-confirm-password-row" style="display:none;">
+      <label style="color:#b42318;">再次確認密碼(topic 即將變更,請重新輸入密碼確認)</label>
+      <input type="password" id="apns-confirm-password-input">
+    </div>
+    <button id="apns-upload-confirm-btn" type="button" style="margin-top:10px;">上傳並更新</button>
+  </div>
+</div>
+
+<!-- DEP Token 上傳 Modal -->
+<div class="modal-overlay hidden" id="dep-upload-modal">
+  <div class="modal-box" style="width:560px;">
+    <span class="modal-close" onclick="closeModal('dep-upload-modal')">✕</span>
+    <h3>上傳 DEP Token</h3>
+    <p style="color:#6b7280; font-size:12px; margin-bottom:10px;">
+      請選擇從 Apple School/Business Manager 下載回來的 .p7m 檔案,上傳後會自動解密並存入 nanodep,不需要重啟服務。
+    </p>
+    <div class="field-row"><label>Token 檔案 (.p7m)</label><input type="file" id="dep-token-file-input"></div>
+    <button id="dep-upload-confirm-btn" type="button" style="margin-top:10px;">上傳並匯入</button>
+  </div>
+</div>
+
+<!-- NanoAXM 憑證更新 Modal -->
+<div class="modal-overlay hidden" id="nanoaxm-update-modal">
+  <div class="modal-box" style="width:560px;">
+    <span class="modal-close" onclick="closeModal('nanoaxm-update-modal')">✕</span>
+    <h3>更新 NanoAXM 憑證</h3>
+    <p style="color:#6b7280; font-size:12px; margin-bottom:10px;">
+      請到 <a href="https://school.apple.com/#/main/preferences/apiaccounts" target="_blank">school.apple.com 偏好設定 → API</a>
+      建立/取得新的 API 帳號資訊(Client ID、Key ID、私鑰,私鑰僅能下載一次)。
+    </p>
+    <p style="color:#b42318; font-size:12px; font-weight:600; margin-bottom:10px;">⚠️ 不需要更新,僅在更換API時使用。</p>
+    <div class="field-row"><label>Client ID(用戶端ID)</label><input type="text" id="nanoaxm-client-id-input"></div>
+    <div class="field-row"><label>Key ID(密鑰ID)</label><input type="text" id="nanoaxm-key-id-input"></div>
+    <div class="field-row"><label>私鑰檔案 (.pem)</label><input type="file" id="nanoaxm-private-key-input"></div>
+    <div class="field-row"><label>請再次輸入您目前登入的密碼以確認</label><input type="password" id="nanoaxm-password-input"></div>
+    <button id="nanoaxm-update-confirm-btn" type="button" style="margin-top:10px;">更新</button>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/cert_status.js') }}?v={{ static_version }}"></script>
+{% endblock %}

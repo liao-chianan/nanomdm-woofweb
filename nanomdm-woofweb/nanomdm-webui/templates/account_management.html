@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>
+    管理者帳號
+    <button id="add-account-btn" type="button" style="float:right; font-size:12px;">新增帳號</button>
+  </h2>
+  <p style="color:#6b7280; font-size:13px; margin-bottom:14px;">
+    目前登入中的帳號無法刪除自己;系統至少需要保留一組帳號,不能刪到剩 0 個。
+  </p>
+  <table class="data-table" id="accounts-table">
+    <thead>
+      <tr>
+        <th>帳號</th>
+        <th>建立時間</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="accounts-tbody">
+      <tr><td colspan="3">載入中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>IP 存取限制 (CIDR)</h2>
+  <p style="color:#6b7280; font-size:13px; margin-bottom:6px;">
+    設定允許連線的 IP 範圍(CIDR 格式,例如 <code>192.168.1.0/24</code> 或單一 IP <code>203.0.113.5</code>)。
+    <strong>清單留空代表不限制</strong>,任何來源都可以連線。
+  </p>
+  <p style="color:#b45309; font-size:13px; margin-bottom:14px;">
+    ⚠️ 存檔前系統會自動檢查:新規則一定要包含你目前這個請求的 IP,否則會拒絕儲存,避免你把自己鎖在外面。
+  </p>
+  <div style="font-size:13px; color:#374151; margin-bottom:14px;">
+    你目前的來源 IP: <strong id="your-ip-display">載入中...</strong>
+  </div>
+
+  <div id="ip-rules-container"></div>
+  <button id="add-ip-rule-btn" class="secondary" type="button" style="font-size:12px; margin-top:6px;">+ 新增規則</button>
+
+  <div style="margin-top:16px; border-top:1px solid var(--border-color); padding-top:14px;">
+    <button id="save-ip-rules-btn" type="button">儲存 IP 白名單</button>
+  </div>
+</div>
+
+<!-- 新增帳號 Modal -->
+<div class="modal-overlay hidden" id="add-account-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('add-account-modal')">✕</span>
+    <h3>新增管理者帳號</h3>
+    <div class="field-row">
+      <label>帳號名稱</label>
+      <input type="text" id="new-account-username">
+    </div>
+    <div class="field-row">
+      <label>密碼(至少 8 碼)</label>
+      <input type="password" id="new-account-password">
+    </div>
+    <div class="field-row">
+      <label>再輸入一次密碼</label>
+      <input type="password" id="new-account-password-confirm">
+    </div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('add-account-modal')" type="button">取消</button>
+      <button id="add-account-confirm-btn" type="button">新增</button>
+    </div>
+  </div>
+</div>
+
+<!-- 改密碼 Modal -->
+<div class="modal-overlay hidden" id="change-password-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('change-password-modal')">✕</span>
+    <h3>修改密碼 - <span id="change-password-username-label"></span></h3>
+    <div class="field-row">
+      <label>新密碼(至少 8 碼)</label>
+      <input type="password" id="change-password-new">
+    </div>
+    <div class="field-row">
+      <label>再輸入一次新密碼</label>
+      <input type="password" id="change-password-confirm">
+    </div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('change-password-modal')" type="button">取消</button>
+      <button id="change-password-confirm-btn" type="button">確認修改</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/account_management.js') }}?v={{ static_version }}"></script>
+{% endblock %}

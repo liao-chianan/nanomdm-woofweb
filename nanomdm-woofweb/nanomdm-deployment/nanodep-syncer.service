@@ -1,0 +1,16 @@
+[Unit]
+Description=NanoDEP Device Syncer
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nanomdm-deployment/nanodep-release/tools
+EnvironmentFile=/opt/nanomdm-deployment/.env
+ExecStart=/opt/nanomdm-deployment/nanodep-release/depsyncer-linux-amd64 -storage=mysql -storage-dsn=nanodep:${NANODEP_DB_PASSWORD}@tcp(127.0.0.1:3306)/nanodep -duration=1800 ${NANODEP_NAME}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

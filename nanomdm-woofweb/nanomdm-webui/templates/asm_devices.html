@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>
+    ASM 所有裝置
+    <span style="float:right; display:flex; gap:8px;">
+      <button id="export-asm-btn" class="secondary" type="button" style="font-size:12px;">匯出可編輯CSV</button>
+      <button id="import-asm-btn" class="secondary" type="button" style="font-size:12px;">匯入CSV</button>
+      <input type="file" id="import-asm-file-input" accept=".csv" class="hidden">
+      <button id="refresh-asm-btn" type="button" style="font-size:12px;">立即同步裝置</button>
+    </span>
+  </h2>
+  <p style="color:#6b7280; font-size:13px; margin-bottom:6px;">
+    每 30 分鐘自動背景同步一次到本地 CSV 快取,以下表格顯示的是最近一次同步的結果。
+    可以匯出 CSV 離線修改「指派的MDM伺服器」欄位,改完重新上傳,系統會自動比對差異並改派。
+  </p>
+  <div id="asm-last-sync" style="font-size:13px; color:#6b7280; margin-bottom:14px;">載入中...</div>
+
+  <table class="data-table" id="asm-servers-table">
+    <thead>
+      <tr>
+        <th>id</th>
+        <th>serverName</th>
+        <th>serverType</th>
+        <th>status</th>
+        <th>裝置數量</th>
+      </tr>
+    </thead>
+    <tbody id="asm-servers-tbody">
+      <tr><td colspan="5">載入中...</td></tr>
+    </tbody>
+  </table>
+
+  <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border-color); font-size:14px;">
+    未指派的裝置數量:
+    <span class="serial-link" id="unassigned-count-link" data-action="unassigned">-</span>
+  </div>
+</div>
+
+<div class="panel hidden" id="asm-refresh-progress-panel">
+  <h2>即時重新整理進度</h2>
+  <div id="asm-refresh-progress-body"></div>
+</div>
+
+<!-- Server 詳細資訊 Modal -->
+<div class="modal-overlay hidden" id="asm-server-detail-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('asm-server-detail-modal')">✕</span>
+    <h3 id="asm-server-detail-title">MDM Server 詳細資訊</h3>
+    <div id="asm-server-detail-body">載入中...</div>
+  </div>
+</div>
+
+<!-- 裝置清單 + 改派 Modal (共用於「特定伺服器底下的裝置」與「未指派裝置」兩種情境) -->
+<div class="modal-overlay hidden" id="asm-device-list-modal">
+  <div class="modal-box" style="width:800px;">
+    <span class="modal-close" onclick="closeModal('asm-device-list-modal')">✕</span>
+    <h3 id="asm-device-list-title">裝置清單</h3>
+
+    <table class="data-table" id="asm-device-list-table">
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="asm-select-all"></th>
+          <th>序號</th>
+          <th>型號</th>
+          <th>顏色</th>
+          <th>狀態</th>
+        </tr>
+      </thead>
+      <tbody id="asm-device-list-tbody"></tbody>
+    </table>
+
+    <div style="margin-top:16px; border-top:1px solid var(--border-color); padding-top:14px; display:flex; align-items:center; gap:10px;">
+      <label style="font-size:13px;">改派選取的裝置到:</label>
+      <select id="asm-target-server-select" style="flex:1;"></select>
+      <button id="asm-reassign-btn" type="button">改派</button>
+    </div>
+
+    <div id="asm-reassign-progress" style="margin-top:12px;"></div>
+  </div>
+</div>
+
+<!-- 匯入預覽/套用 Modal -->
+<div class="modal-overlay hidden" id="asm-import-modal">
+  <div class="modal-box" style="width:820px;">
+    <span class="modal-close" onclick="closeModal('asm-import-modal')">✕</span>
+    <h3>匯入改派預覽</h3>
+    <p style="color:#6b7280; font-size:13px;">
+      比對上傳的 CSV 與目前快取的差異,只有「指派的MDM伺服器」欄位有變更的裝置會列在這裡。
+      灰色的項目無法套用(例如伺服器名稱打錯),送出時會自動略過。
+    </p>
+    <table class="data-table" id="asm-import-preview-table">
+      <thead>
+        <tr>
+          <th>序號</th>
+          <th>目前伺服器</th>
+          <th>目標伺服器</th>
+          <th>狀態</th>
+        </tr>
+      </thead>
+      <tbody id="asm-import-preview-tbody"></tbody>
+    </table>
+    <div class="modal-actions" style="justify-content:flex-start;">
+      <button id="asm-import-apply-btn" type="button">套用改派</button>
+    </div>
+    <div id="asm-import-apply-progress" style="margin-top:12px;"></div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/asm_devices.js') }}?v={{ static_version }}"></script>
+{% endblock %}

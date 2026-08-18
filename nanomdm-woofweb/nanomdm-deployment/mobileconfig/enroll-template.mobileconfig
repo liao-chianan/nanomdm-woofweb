@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadContent</key>
+			<dict>
+				<!-- Challenge 必須跟 .env 裡的 SCEP_CHALLENGE 完全一致,這是SCEP伺服器驗證裝置身分的共用密鑰 -->
+				<key>Challenge</key>
+				<string>REPLACE_WITH_YOUR_SCEP_CHALLENGE</string>
+				<key>Key Type</key>
+				<string>RSA</string>
+				<key>Key Usage</key>
+				<integer>5</integer>
+				<key>Keysize</key>
+				<integer>2048</integer>
+				<key>Subject</key>
+				<array>
+					<array>
+						<array>
+							<string>O</string>
+							<string>YOUR_ORG_ABBREVIATION</string>
+						</array>
+					</array>
+					<array>
+						<array>
+							<string>CN</string>
+							<string>__SERIAL_PLACEHOLDER__</string>
+						</array>
+					</array>
+				</array>
+				<!-- 換成你的實際網域 -->
+				<key>URL</key>
+				<string>https://YOUR_DOMAIN_HERE/scep</string>
+			</dict>
+			<key>PayloadDescription</key>
+			<string>取得裝置身份憑證</string>
+			<key>PayloadDisplayName</key>
+			<string>SCEP</string>
+			<key>PayloadIdentifier</key>
+			<string>tw.edu.example.nanomdm.enroll.scep</string>
+			<key>PayloadType</key>
+			<string>com.apple.security.scep</string>
+			<key>PayloadUUID</key>
+			<string>F507DFF8-6718-4056-A80B-EC08DA3C4128</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>AccessRights</key>
+			<integer>8191</integer>
+			<key>CheckOutWhenRemoved</key>
+			<true/>
+			<key>IdentityCertificateUUID</key>
+			<string>F507DFF8-6718-4056-A80B-EC08DA3C4128</string>
+			<key>PayloadDescription</key>
+			<string>連線至 MDM 伺服器</string>
+			<key>PayloadDisplayName</key>
+			<string>MDM</string>
+			<key>PayloadIdentifier</key>
+			<string>tw.edu.example.nanomdm.enroll.mdm</string>
+			<key>PayloadType</key>
+			<string>com.apple.mdm</string>
+			<key>PayloadUUID</key>
+			<string>92F593BC-F153-4A26-8EA2-BA953A329A91</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<!-- 換成你的實際網域 -->
+			<key>ServerURL</key>
+			<string>https://YOUR_DOMAIN_HERE/mdm</string>
+			<key>SignMessage</key>
+			<true/>
+			<!-- 上傳APNs Push憑證後,系統會自動同步這個欄位,這裡先放一個明顯的佔位值 -->
+			<key>Topic</key>
+			<string>REPLACE_WITH_YOUR_APNS_TOPIC</string>
+		</dict>
+	</array>
+	<key>PayloadDescription</key>
+	<string>YOUR_SCHOOL_NAME 設備 (你的聯絡電話)</string>
+	<key>PayloadDisplayName</key>
+	<string>New Device MDM Enrollment</string>
+	<key>PayloadIdentifier</key>
+	<string>tw.edu.example.nanomdm.enroll</string>
+	<key>PayloadOrganization</key>
+	<string>YOUR_SCHOOL_NAME</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>5091F98C-9CB2-4322-9B15-380EF1B75DB9</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>

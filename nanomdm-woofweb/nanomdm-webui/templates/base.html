@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>NanoMDM 管理介面{% block title_suffix %}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v={{ static_version }}">
+</head>
+<body>
+  <div class="app-grid">
+    <header class="topbar">
+      <div class="brand">
+        <img src="{{ url_for('api_logo_image') }}?v={{ static_version }}" class="brand-logo" alt="LOGO">
+        <span>{{ branding.site_label }}</span>
+      </div>
+      <div class="dep-info-block">
+        <div class="dep-info-line" id="dep-info-line1">
+          <span class="status-light" id="dep-status-light"></span>
+          <span>[ASM連線狀態]</span>
+          <span id="dep-info-line1-text">載入中...</span>
+        </div>
+        <div class="dep-info-line dep-info-line2" id="dep-info-line2"></div>
+      </div>
+      <div class="user-area">
+        <span class="username">👤 {{ session.get('username', '') }}</span>
+        <a class="logout-btn" href="{{ url_for('logout') }}">登出</a>
+      </div>
+    </header>
+
+    <nav class="sidebar">
+      <a href="{{ url_for('env_page') }}" class="{{ 'active' if active == 'env' else '' }}">系統環境參數</a>
+      <a href="{{ url_for('cert_status_page') }}" class="{{ 'active' if active == 'cert_status' else '' }}">憑證狀態檢視</a>
+      <a href="{{ url_for('groups_page') }}" class="{{ 'active' if active == 'groups' else '' }}">群組一覽</a>
+      <a href="{{ url_for('dep_profiles_page') }}" class="{{ 'active' if active == 'dep_profiles' else '' }}">群組註冊檔</a>
+      <a href="{{ url_for('profiles_page') }}" class="{{ 'active' if active == 'profiles' else '' }}">群組描述檔</a>
+      <a href="{{ url_for('devices_page') }}" class="{{ 'active' if active == 'devices' else '' }}">裝置與命令</a>
+      <a href="{{ url_for('device_enrollment_status_page') }}" class="{{ 'active' if active == 'device_enrollment_status' else '' }}">裝置註冊狀態</a>
+      <div class="sidebar-divider"></div>
+      <a href="{{ url_for('asm_page') }}" class="{{ 'active' if active == 'asm' else '' }}">ASM 軟體資訊</a>
+      <a href="{{ url_for('asm_devices_page') }}" class="{{ 'active' if active == 'asm_devices' else '' }}">ASM 所有裝置</a>
+      <div class="sidebar-divider"></div>
+      <a href="{{ url_for('account_management_page') }}" class="{{ 'active' if active == 'account_management' else '' }}">帳號管理</a>
+      <a href="{{ url_for('system_logs_page') }}" class="{{ 'active' if active == 'system_logs' else '' }}">系統紀錄</a>
+      <a href="{{ url_for('system_status_page') }}" class="{{ 'active' if active == 'system_status' else '' }}">系統狀態</a>
+    </nav>
+
+    <main class="main-content">
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="debugbar">
+      <div class="debugbar-header">
+        <label>
+          <input type="checkbox" id="debug-toggle" checked>
+          Debug 輸出(系統回應)
+        </label>
+        <button class="clear-debug-btn" id="clear-debug-btn" type="button">清除</button>
+      </div>
+      <div class="debugbar-body" id="debugbar-body"></div>
+    </footer>
+  </div>
+
+  <script>window.APP_ROOT = "{{ request.script_root }}";</script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v={{ static_version }}"></script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>

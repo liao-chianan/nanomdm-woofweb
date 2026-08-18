@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div style="display:flex; gap:20px; align-items:flex-start;">
+
+  <div class="panel" style="width:360px; flex-shrink:0;">
+    <h2>
+      註冊 Profile 清單
+      <button id="new-dep-profile-btn" type="button" style="float:right; font-size:12px;">新增</button>
+    </h2>
+    <div id="dep-profiles-list-container">載入中...</div>
+  </div>
+
+  <div class="panel" style="flex:1; min-width:0;">
+    <h2 id="dep-editor-title">請從左側選擇一個範本,或按「新增」</h2>
+
+    <div id="dep-editor-container" class="hidden">
+      <div id="dep-protected-notice" class="hidden" style="background:#fdeee0; color:#b45309; padding:10px 14px; border-radius:6px; font-size:13px; margin-bottom:14px;">
+        ⚠️ 這是系統預設檔案,套用給所有還沒被明確指派群組的新裝置。可以編輯內容,但不能刪除、也不能指派給特定群組。
+      </div>
+
+      <div class="field-row">
+        <label>檔名(必須以 .json 結尾,只能使用英文、數字、- 、_ )</label>
+        <input type="text" id="dep-profile-filename" placeholder="例如 classroom-a-enroll.json">
+      </div>
+
+      <div id="dep-assign-section" class="hidden" style="background:#f8f9fb; border:1px solid var(--border-color); border-radius:6px; padding:12px 14px; margin-bottom:14px;">
+        <div style="font-size:13px; color:#6b7280; margin-bottom:8px;">
+          目前配對群組: <strong id="dep-current-group-label">-</strong>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <select id="dep-assign-group-select" style="flex:1;"></select>
+          <button id="dep-assign-btn" class="secondary" type="button">指派</button>
+        </div>
+        <p style="color:#9ca3af; font-size:12px; margin:6px 0 0 0;">一個註冊檔只能配對一個群組;下拉選單只會列出還沒被其他檔案佔用的群組。</p>
+      </div>
+
+      <div id="dep-fields-container"></div>
+
+      <h3 style="margin-top:20px; border-top:1px solid var(--border-color); padding-top:14px;">
+        Setup Assistant 跳過項目 (勾選 = 註冊時不顯示這個畫面)
+      </h3>
+      <div id="skip-items-container" style="display:grid; grid-template-columns:repeat(2, 1fr); gap:4px;"></div>
+
+      <div id="dep-status-container" style="margin-top:14px; font-size:13px; color:#6b7280;"></div>
+      <div id="dep-apply-result-container" style="margin-top:10px;"></div>
+
+      <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
+        <button id="dep-save-btn" class="secondary" type="button">儲存(僅本地,不會影響 Apple)</button>
+        <button id="dep-duplicate-btn" class="secondary" type="button">再製</button>
+        <button id="dep-apply-btn" type="button">套用 (實際更新到 Apple/nanodep)</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 再製 Modal -->
+<div class="modal-overlay hidden" id="dep-duplicate-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('dep-duplicate-modal')">✕</span>
+    <h3>再製註冊 Profile</h3>
+    <div class="field-row">
+      <label>新檔名(必須以 .json 結尾)</label>
+      <input type="text" id="dep-duplicate-new-filename" placeholder="例如 classroom-b-enroll.json">
+    </div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('dep-duplicate-modal')" type="button">取消</button>
+      <button id="dep-duplicate-confirm-btn" type="button">確認複製</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/dep_profiles.js') }}?v={{ static_version }}"></script>
+{% endblock %}

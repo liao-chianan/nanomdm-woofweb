@@ -1,0 +1,86 @@
+services:
+  nanoaxm:
+    # 使用自己fork並pin住版本的image,避免官方更新導致相容性問題
+    # (原始版本標籤為 ghcr.io/micromdm/nanoaxm:latest)
+    image: ghcr.io/liao-chianan/nanoaxm:2026-08-pinned
+    container_name: nanoaxm-server
+    restart: unless-stopped
+    command:
+      - -api=${NANOAXM_API_KEY}
+      - -storage=mysql
+      - -storage-dsn=nanoaxm:${NANOAXM_DB_PASSWORD}@tcp(mysql:3306)/nanoaxm
+    ports:
+      - "127.0.0.1:9005:9005"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  nanodep:
+    # 使用自己fork並pin住版本的image(原始版本標籤為 ghcr.io/micromdm/nanodep:latest)
+    image: ghcr.io/liao-chianan/nanodep:2026-08-pinned
+    container_name: nanodep-server
+    restart: unless-stopped
+    command:
+      - -api=${NANODEP_API_KEY}
+      - -storage=mysql
+      - -storage-dsn=nanodep:${NANODEP_DB_PASSWORD}@tcp(mysql:3306)/nanodep
+    ports:
+      - "127.0.0.1:9001:9001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  nanomdm:
+    # 使用自己fork並pin住版本的image(原始版本標籤為 ghcr.io/micromdm/nanomdm:latest)
+    image: ghcr.io/liao-chianan/nanomdm:2026-08-pinned
+    container_name: nanomdm-server
+    restart: unless-stopped
+    command:
+      - -api=${NANOMDM_API_KEY}
+      - -storage=mysql
+      - -storage-dsn=nanomdm:${NANOMDM_DB_PASSWORD}@tcp(mysql:3306)/nanomdm
+      - -ca=/ca-certs/ca.pem
+      # 換成你自己的網域,或是留意這裡也可以考慮改成讀取.env的WEBHOOK_URL變數
+      - -webhook-url=https://YOUR_DOMAIN_HERE/webhook
+    volumes:
+      - ./scep-depot/ca.pem:/ca-certs/ca.pem:ro
+    ports:
+      - "127.0.0.1:9000:9000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.0
+    container_name: nanomdm-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: nanomdm
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scep:
+    # 使用自己fork並pin住版本的image(原始為本機build的local/scep:latest)
+    image: ghcr.io/liao-chianan/scep:2026-08-pinned
+    container_name: nanomdm-scep
+    restart: unless-stopped
+    command:
+      - -challenge=${SCEP_CHALLENGE}
+      - -capass=${SCEP_CA_PASSWORD}
+      - -depot=/depot
+      - -port=8080
+      # 如果需要調整裝置身分憑證的效期(預設365天),取消下一行註解並填入天數
+      # - -crtvalid=3650
+    volumes:
+      - ./scep-depot:/depot
+    ports:
+      - "127.0.0.1:8090:8080"

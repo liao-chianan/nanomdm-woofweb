@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>
+    裝置註冊狀態
+    <span style="float:right; display:flex; gap:8px;">
+      <button id="export-all-enrollment-btn" class="secondary" type="button" style="font-size:12px;">匯出所有裝置CSV</button>
+      <button id="export-unassigned-enrollment-btn" class="secondary" type="button" style="font-size:12px;">匯出未命名/無群組裝置CSV</button>
+      <button id="import-enrollment-btn" class="secondary" type="button" style="font-size:12px;">匯入CSV</button>
+      <input type="file" id="import-enrollment-file-input" accept=".csv" class="hidden">
+      <button id="refresh-enrollment-status-btn" type="button" style="font-size:12px;">重新整理(即時查詢Apple)</button>
+    </span>
+  </h2>
+  <p style="color:#6b7280; font-size:13px; margin-bottom:14px;">
+    即時從 Apple DEP 抓取所有已加入 ASM 的裝置清單,跟本地 devices.csv、nanomdm 註冊紀錄交叉比對。
+    因為是即時查詢 Apple API,可能需要幾秒鐘。裝置的群組一旦變更,系統會自動套用新群組配對的註冊檔(DEP 重新指派)與描述檔(推送 mobileconfig)。
+  </p>
+
+  <div style="display:flex; gap:16px; align-items:center; margin-bottom:14px; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:6px;">
+      <label style="font-size:13px; color:#6b7280;">篩選群組:</label>
+      <select id="enrollment-filter-group" style="min-width:160px;"></select>
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; flex:1; min-width:220px;">
+      <label style="font-size:13px; color:#6b7280;">搜尋序號/裝置名稱:</label>
+      <input type="text" id="enrollment-filter-search" placeholder="輸入序號或裝置名稱..." style="flex:1;">
+    </div>
+    <div id="enrollment-filter-count" style="font-size:12px; color:#9ca3af;"></div>
+  </div>
+
+  <table class="data-table" id="enrollment-status-table">
+    <colgroup>
+      <col style="width:100px;">
+      <col style="width:110px;">
+      <col style="width:100px;">
+      <col style="width:32ch;">
+      <col style="width:180px;">
+      <col style="width:110px;">
+      <col style="width:100px;">
+      <col style="width:110px;">
+      <col style="width:90px;">
+      <col style="width:90px;">
+    </colgroup>
+    <thead>
+      <tr>
+        <th>序號</th>
+        <th>WIFI MAC</th>
+        <th>型號</th>
+        <th>裝置名稱</th>
+        <th>群組</th>
+        <th>DEP profile_uuid</th>
+        <th>對應範本</th>
+        <th>MDM UUID</th>
+        <th>指派狀態</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="enrollment-status-tbody">
+      <tr><td colspan="10">尚未載入,請按「重新整理」開始查詢</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- 匯入預覽 Modal -->
+<div class="modal-overlay hidden" id="enrollment-import-modal">
+  <div class="modal-box" style="width:820px;">
+    <span class="modal-close" onclick="closeModal('enrollment-import-modal')">✕</span>
+    <h3>匯入變更預覽</h3>
+    <p style="color:#6b7280; font-size:13px;">
+      已比對 DEP profile_uuid 與 MDM UUID 是否跟目前狀態一致,不一致的項目會被自動排除、不會套用。
+    </p>
+    <div id="enrollment-import-mismatches" style="margin-bottom:10px;"></div>
+    <table class="data-table" id="enrollment-import-preview-table">
+      <thead>
+        <tr>
+          <th>序號</th>
+          <th>裝置名稱變更</th>
+          <th>群組變更</th>
+        </tr>
+      </thead>
+      <tbody id="enrollment-import-preview-tbody"></tbody>
+    </table>
+    <div class="modal-actions" style="justify-content:flex-start;">
+      <button id="enrollment-import-apply-btn" type="button">套用變更</button>
+    </div>
+    <div id="enrollment-import-apply-progress" style="margin-top:12px; max-height:300px; overflow-y:auto;"></div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/device_enrollment_status.js') }}?v={{ static_version }}"></script>
+{% endblock %}

@@ -1,0 +1,16 @@
+[Unit]
+Description=NanoMDM Web UI
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/nanomdm-webui
+ExecStart=/opt/nanomdm-webui/venv/bin/python3 app.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

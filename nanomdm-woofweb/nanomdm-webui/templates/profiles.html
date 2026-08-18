@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div style="display:flex; gap:20px; align-items:flex-start;">
+
+  <div class="panel" style="width:340px; flex-shrink:0;">
+    <h2>
+      描述檔清單
+      <button id="new-profile-btn" type="button" style="float:right; font-size:12px;">新增描述檔</button>
+    </h2>
+    <div id="profiles-list-container">載入中...</div>
+  </div>
+
+  <div class="panel" style="flex:1; min-width:0;">
+    <h2 id="editor-title">請從左側選擇一個描述檔,或按「新增描述檔」</h2>
+
+    <div id="editor-container" class="hidden">
+      <div id="profile-protected-notice" class="hidden" style="background:#fdeee0; color:#b45309; padding:10px 14px; border-radius:6px; font-size:13px; margin-bottom:14px;"></div>
+
+      <div class="field-row">
+        <label>檔名(必須以 .mobileconfig 結尾,只能使用英文、數字、- 、_ )</label>
+        <input type="text" id="profile-filename" placeholder="例如 classroom-a.mobileconfig">
+      </div>
+
+      <div id="profile-assign-section" class="hidden" style="background:#f8f9fb; border:1px solid var(--border-color); border-radius:6px; padding:12px 14px; margin-bottom:14px;">
+        <div style="font-size:13px; color:#6b7280; margin-bottom:8px;">
+          目前配對群組: <strong id="profile-current-group-label">-</strong>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <select id="profile-assign-group-select" style="flex:1;"></select>
+          <button id="profile-assign-btn" class="secondary" type="button">指派</button>
+        </div>
+        <p style="color:#9ca3af; font-size:12px; margin:6px 0 0 0;">一個描述檔只能配對一個群組;下拉選單只會列出還沒被其他檔案佔用的群組。</p>
+      </div>
+
+      <div id="top-level-fields-container"></div>
+
+      <h3 style="margin-top:20px; border-top:1px solid var(--border-color); padding-top:14px;">Payload 選項</h3>
+      <div id="payloads-container"></div>
+
+      <div id="profile-warnings-container" style="margin-top:14px;"></div>
+      <div id="profile-apply-progress-container" style="margin-top:10px; max-height:300px; overflow-y:auto;"></div>
+
+      <div class="modal-actions" style="justify-content:flex-start; gap:10px;">
+        <button id="validate-profile-btn" class="secondary" type="button">驗證格式</button>
+        <button id="save-profile-btn" type="button">儲存</button>
+        <button id="duplicate-profile-btn" class="secondary" type="button">再製</button>
+        <button id="download-profile-btn" class="secondary hidden" type="button">下載</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 再製 Modal -->
+<div class="modal-overlay hidden" id="profile-duplicate-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('profile-duplicate-modal')">✕</span>
+    <h3>再製描述檔</h3>
+    <div class="field-row">
+      <label>新檔名(必須以 .mobileconfig 結尾)</label>
+      <input type="text" id="profile-duplicate-new-filename" placeholder="例如 classroom-b.mobileconfig">
+    </div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('profile-duplicate-modal')" type="button">取消</button>
+      <button id="profile-duplicate-confirm-btn" type="button">確認複製</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/profiles.js') }}?v={{ static_version }}"></script>
+{% endblock %}

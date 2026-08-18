@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>登入 - {{ branding.site_label }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v={{ static_version }}">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-box" method="post">
+      <h1>{{ branding.site_label }}</h1>
+      {% if error %}
+        <div class="login-error">{{ error }}</div>
+      {% endif %}
+      <div class="field-row">
+        <label>帳號</label>
+        <input type="text" name="username" autofocus required>
+      </div>
+      <div class="field-row">
+        <label>密碼</label>
+        <input type="password" name="password" required>
+      </div>
+      <button type="submit" style="width:100%;">登入</button>
+    </form>
+  </div>
+</body>
+</html>

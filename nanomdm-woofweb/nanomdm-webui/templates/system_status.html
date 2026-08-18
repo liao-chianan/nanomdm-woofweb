@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>
+    系統狀態
+    <button id="refresh-system-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
+  </h2>
+  <div id="system-status-container">載入中...</div>
+</div>
+
+<div class="panel">
+  <h2>Docker 容器狀態</h2>
+  <table class="data-table" id="docker-table">
+    <thead>
+      <tr>
+        <th>容器名稱</th>
+        <th>用途</th>
+        <th>映像檔</th>
+        <th>狀態</th>
+        <th>連接埠</th>
+        <th>建立時間</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="docker-tbody">
+      <tr><td colspan="7">載入中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>systemd 服務狀態</h2>
+  <table class="data-table" id="systemd-table">
+    <thead>
+      <tr>
+        <th>服務名稱</th>
+        <th>用途</th>
+        <th>狀態</th>
+        <th>連接埠</th>
+        <th>啟動時間</th>
+        <th>PID</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="systemd-tbody">
+      <tr><td colspan="7">載入中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>
+    資料庫狀態
+    <button id="refresh-mysql-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
+  </h2>
+  <div id="mysql-status-container">載入中...</div>
+</div>
+
+<div class="panel">
+  <h2>
+    靜態檔案檢視
+    <button id="refresh-static-files-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
+  </h2>
+  <div id="static-files-container">載入中...</div>
+</div>
+
+<!-- Log 檢視 Modal -->
+<div class="modal-overlay hidden" id="log-viewer-modal">
+  <div class="modal-box" style="width:900px;">
+    <span class="modal-close" onclick="closeModal('log-viewer-modal')">✕</span>
+    <h3 id="log-viewer-title">Log 檢視</h3>
+    <pre id="log-viewer-content" style="background:#0d1117; color:#c9d1d9; padding:14px; border-radius:6px; max-height:500px; overflow-y:auto; font-size:12px; white-space:pre-wrap; word-break:break-all;">載入中...</pre>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/system_status.js') }}?v={{ static_version }}"></script>
+{% endblock %}

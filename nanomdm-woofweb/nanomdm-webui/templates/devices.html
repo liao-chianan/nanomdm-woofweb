@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="panel">
+  <h2>所有裝置與命令
+    <span style="float:right; display:flex; align-items:center; gap:10px;">
+      <span id="devices-status-sync-info" style="font-size:12px; color:#9ca3af;"></span>
+      <button class="secondary" id="sync-status-btn" type="button" style="font-size:12px;">立即同步更新</button>
+      <button class="secondary" id="refresh-devices-btn" type="button" style="font-size:12px;">重新整理</button>
+    </span>
+  </h2>
+  <p style="color:#6b7280; font-size:13px; margin-bottom:14px;">
+    此處顯示的是<strong>已經完成 MDM 註冊</strong>的裝置(資料來自 nanomdm 的 enrollments 紀錄)。
+    尚未註冊、或還在 ASM 待註冊的裝置請到「裝置註冊狀態」頁查看。
+    電量/容量/系統版本這幾欄是背景排程每 10 分鐘向裝置查詢一次的結果(MDM 是推播式架構,不是即時抓取,
+    裝置離線時資料不會更新),按「立即同步更新」可以馬上重新查詢一次。
+  </p>
+
+  <div style="display:flex; gap:16px; align-items:center; margin-bottom:14px; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:6px;">
+      <label style="font-size:13px; color:#6b7280;">篩選群組:</label>
+      <select id="devices-filter-group" style="min-width:160px;"></select>
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; flex:1; min-width:220px;">
+      <label style="font-size:13px; color:#6b7280;">搜尋序號/裝置名稱:</label>
+      <input type="text" id="devices-filter-search" placeholder="輸入序號或裝置名稱..." style="flex:1;">
+    </div>
+    <div id="devices-filter-count" style="font-size:12px; color:#9ca3af;"></div>
+  </div>
+
+  <table class="data-table" id="devices-table">
+    <colgroup>
+      <col style="width:60px;">
+      <col style="width:240px;">
+      <col style="width:150px;">
+      <col style="width:130px;">
+      <col style="width:140px;">
+      <col style="width:70px;">
+      <col style="width:140px;">
+      <col style="width:200px;">
+      <col style="width:170px;">
+      <col style="width:140px;">
+      <col style="width:120px;">
+      <col style="width:160px;">
+    </colgroup>
+    <thead>
+      <tr>
+        <th>流水號</th>
+        <th>裝置名稱</th>
+        <th>群組</th>
+        <th>裝置序號</th>
+        <th>WIFI MAC</th>
+        <th>電量</th>
+        <th>容量</th>
+        <th>作業系統</th>
+        <th>IP 位址</th>
+        <th>最後同步</th>
+        <th>佈署 ID</th>
+        <th>派送命令</th>
+      </tr>
+    </thead>
+    <tbody id="devices-tbody">
+      <tr><td colspan="12">載入中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- 裝置詳細資訊 Modal -->
+<div class="modal-overlay hidden" id="details-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('details-modal')">✕</span>
+    <h3 id="details-modal-title">裝置詳細資訊</h3>
+    <div id="details-modal-body">載入中...</div>
+  </div>
+</div>
+
+<!-- 遺失定位地圖 Modal -->
+<div class="modal-overlay hidden" id="location-map-modal">
+  <div class="modal-box" style="width:640px;">
+    <span class="modal-close" onclick="closeModal('location-map-modal')">✕</span>
+    <h3 id="location-map-title">裝置定位</h3>
+    <div id="location-map-container" style="width:100%; height:420px;"></div>
+    <p id="location-map-info" style="color:#9ca3af; font-size:12px; margin-top:8px;"></p>
+  </div>
+</div>
+
+<!-- 指令回應歷史 Modal -->
+<div class="modal-overlay hidden" id="history-modal">
+  <div class="modal-box" style="width:680px;">
+    <span class="modal-close" onclick="closeModal('history-modal')">✕</span>
+    <h3>指令回應歷史 - <span id="history-modal-target"></span></h3>
+    <div id="history-modal-body">載入中...</div>
+  </div>
+</div>
+
+<!-- 派送命令 Modal -->
+<div class="modal-overlay hidden" id="command-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('command-modal')">✕</span>
+    <h3>派送命令</h3>
+    <p style="color:#6b7280; font-size:13px;">目標裝置: <strong id="command-modal-target"></strong></p>
+
+    <div class="field-row">
+      <label>選擇命令</label>
+      <select id="command-select" style="width:100%;"></select>
+    </div>
+
+    <div id="command-fields-container"></div>
+
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('command-modal')" type="button">取消</button>
+      <button id="command-send-btn" type="button">送出</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  window.COMMAND_DEFS = {{ command_defs | tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/devices.js') }}?v={{ static_version }}"></script>
+{% endblock %}

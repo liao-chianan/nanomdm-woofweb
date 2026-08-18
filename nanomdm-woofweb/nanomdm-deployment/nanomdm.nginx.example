@@ -1,0 +1,73 @@
+server {
+    server_name <你的站台domain name>;
+	
+    location /miniweb {
+    return 301 /miniweb/;
+    }
+    
+    location /miniweb/ {
+        proxy_pass http://127.0.0.1:5566/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /miniweb;
+    
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+    location /scep {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    #auto enrollment
+    location = /enroll {
+    #check-opst-body
+    proxy_pass http://127.0.0.1:8091;
+    proxy_set_header Host $host;
+    }
+    
+    #auto change device name and push profile
+    location = /webhook {
+    proxy_pass http://127.0.0.1:8092;
+    proxy_set_header Host $host;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+    
+    
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/<你的站台domain name>/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/<你的站台domain name>/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+    
+    client_max_body_size 100M;
+
+
+}
+server {
+    if ($host = <你的站台domain name>) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    server_name <你的站台domain name>;
+    return 404; # managed by Certbot
+
+
+}

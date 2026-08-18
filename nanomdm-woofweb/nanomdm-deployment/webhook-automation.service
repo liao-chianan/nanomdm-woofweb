@@ -1,0 +1,16 @@
+[Unit]
+Description=NanoMDM Webhook Automation Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nanomdm-deployment
+EnvironmentFile=/opt/nanomdm-deployment/.env
+ExecStart=/usr/bin/python3 /opt/nanomdm-deployment/webhook-server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

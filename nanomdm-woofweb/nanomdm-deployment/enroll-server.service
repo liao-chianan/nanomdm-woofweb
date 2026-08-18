@@ -1,0 +1,13 @@
+[Unit]
+Description=NanoMDM Dynamic Enrollment Profile Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nanomdm-deployment
+ExecStart=/usr/bin/python3 /opt/nanomdm-deployment/enroll-server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
