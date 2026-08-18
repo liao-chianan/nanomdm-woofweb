@@ -232,11 +232,21 @@ async function openCommandHistory(enrollmentId, serial) {
     } else {
       detailHtml = `<p style="color:#6b7280; font-size:13px;">(沒有額外回應內容)</p>`;
     }
+    let appInfoHtml = "";
+    if (row.app_info) {
+      if (row.app_info.name && row.app_info.bundle_id) {
+        appInfoHtml = ` <span style="color:#374151; font-weight:normal;">— ${escapeHtml(row.app_info.name)} (${escapeHtml(row.app_info.bundle_id)})</span>`;
+      } else if (row.app_info.bundle_id) {
+        appInfoHtml = ` <span style="color:#6b7280; font-weight:normal;">— ${escapeHtml(row.app_info.bundle_id)}(VPP清單裡查無軟體名稱)</span>`;
+      } else if (row.app_info.adam_id) {
+        appInfoHtml = ` <span style="color:#6b7280; font-weight:normal;">— adamId ${escapeHtml(String(row.app_info.adam_id))}(VPP清單裡查無對照資訊,請確認VPP授權清單是否已同步)</span>`;
+      }
+    }
     html += `
       <div style="border-bottom:1px solid var(--border-color); padding:10px 0;">
         <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="document.getElementById('${detailId}').classList.toggle('hidden')">
           <div>
-            <strong>${escapeHtml(row.request_type)}</strong>
+            <strong>${escapeHtml(row.request_type)}</strong>${appInfoHtml}
             ${statusBadge(row.status)}
           </div>
           <span style="font-size:12px; color:#6b7280;">${escapeHtml(row.created_at || "")}</span>

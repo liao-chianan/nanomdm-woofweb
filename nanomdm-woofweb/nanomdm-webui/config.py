@@ -93,6 +93,11 @@ DEFAULT_CONFIG = {
         "csv_path": "/opt/nanomdm-deployment/devices-status.csv",
         "refresh_interval_seconds": 600
     },
+    "nanomdm_cleanup": {
+        "retention_days": 60,
+        "auto_enabled": False,
+        "check_interval_seconds": 86400
+    },
     "nanomdm_docker": {
         "container_name": "nanomdm-server",
         "log_tail_lines": 5000

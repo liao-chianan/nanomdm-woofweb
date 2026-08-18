@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import base64
-import copy
 import datetime
 import functools
 import json
@@ -119,8 +118,8 @@ COMMAND_DEFS = {
         "label": "啟用遺失尋找模式(LOST MODE)",
         "danger": False,
         "fields": [
-            {"name": "Message", "label": "螢幕顯示訊息", "type": "text", "default": ""},
-            {"name": "PhoneNumber", "label": "聯絡電話", "type": "text", "default": ""},
+            {"name": "Message", "label": "螢幕顯示訊息", "type": "text", "default": "此設備為雙園國小財產，如有拾獲請聯繫"},
+            {"name": "PhoneNumber", "label": "聯絡電話", "type": "text", "default": "0223061893"},
             {"name": "Footnote", "label": "附註", "type": "text", "default": ""},
         ],
     },
@@ -181,28 +180,6 @@ def login_required(view):
 
 def get_env_dict():
     return utils.parse_env_dict(CFG["paths"]["env_file"])
-
-
-def get_command_defs_for_render():
-    """回傳COMMAND_DEFS的副本,把EnableLostMode的Message/PhoneNumber預設值
-    從.env的SCHOOL_NAME/SCHOOL_PHONE帶入。故意在渲染當下(每次request)才讀取,
-    不是在模組載入COMMAND_DEFS的當下就寫死讀一次,這樣之後透過「系統環境參數」頁面
-    修改SCHOOL_NAME/SCHOOL_PHONE,不需要重啟服務就能立刻反映在畫面上的預設值。
-    用深拷貝,不會動到原始COMMAND_DEFS本身。
-    """
-    defs = copy.deepcopy(COMMAND_DEFS)
-    env = get_env_dict()
-    school_name = env.get("SCHOOL_NAME", "")
-    school_phone = env.get("SCHOOL_PHONE", "")
-
-    lost_mode_fields = defs.get("EnableLostMode", {}).get("fields", [])
-    for field in lost_mode_fields:
-        if field["name"] == "Message" and school_name:
-            field["default"] = f"此設備為 {school_name} 財產，如有拾獲請聯繫"
-        elif field["name"] == "PhoneNumber" and school_phone:
-            field["default"] = school_phone
-
-    return defs
 
 
 def get_nanomdm_conn():
@@ -353,6 +330,183 @@ def api_system_logs():
         return jsonify({"ok": False, "message": f"不支援的紀錄類型: {log_type}"}), 400
 
     return jsonify({"ok": True, "entries": entries, "retention_days": retention_days, "count": len(entries)})
+
+
+def _enrich_command_row_with_app_info(row, vpp_cache_path):
+    """給InstallApplication/RemoveApplication補上App資訊(Bundle ID+軟體名稱),
+    跟單一裝置的回應記錄(/api/devices/command-history)共用同一套邏輯,抽成共用函式
+    避免兩處各自維護一份、容易改一邊漏改另一邊。
+    """
+    request_type = row.get("request_type")
+    if request_type not in ("InstallApplication", "RemoveApplication"):
+        return None
+
+    parsed_command = utils.parse_plist_text(row.get("command"))
+    command_body = (parsed_command or {}).get("Command", {})
+    if request_type == "InstallApplication":
+        adam_id = command_body.get("iTunesStoreID")
+        if not adam_id:
+            return None
+        vpp_info = utils.lookup_vpp_app_info(vpp_cache_path, adam_id=adam_id)
+        return {
+            "adam_id": adam_id,
+            "bundle_id": vpp_info["bundle_id"] if vpp_info else None,
+            "name": vpp_info["name"] if vpp_info else None,
+        }
+    else:  # RemoveApplication
+        identifier = command_body.get("Identifier")
+        if not identifier:
+            return None
+        vpp_info = utils.lookup_vpp_app_info(vpp_cache_path, bundle_id=identifier)
+        return {"bundle_id": identifier, "name": vpp_info["name"] if vpp_info else None}
+
+
+@app.route("/api/system-logs/commands")
+@login_required
+def api_system_logs_commands():
+    search_text = request.args.get("search", "").strip().lower()
+    group_filter = request.args.get("group", "").strip()
+    request_type_filter = request.args.get("request_type", "").strip()
+    status_filter = request.args.get("status", "").strip()
+
+    devices_csv = utils.read_devices_csv(CFG["paths"]["devices_csv"])
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+    mdm_devices, rc0, _out0, err0 = utils.query_devices_from_mysql(CFG["mysql"], db_password)
+    if rc0 != 0:
+        return jsonify({"ok": False, "message": f"查詢裝置清單失敗: {err0}"}), 500
+
+    eid_to_serial = {d["enrollment_id"]: d["serial_number"] for d in mdm_devices}
+
+    # 依裝置名稱/序號文字、群組,先在本地算出符合條件的enrollment_id清單,
+    # 因為這兩項是我們自己webui的概念(devices.csv),nanomdm的資料庫完全不知道
+    enrollment_ids_filter = None
+    if search_text or group_filter:
+        enrollment_ids_filter = []
+        for eid, serial in eid_to_serial.items():
+            info = devices_csv.get(serial, {})
+            name = info.get("device_name", "")
+            group = info.get("group", "")
+            if group_filter and group != group_filter:
+                continue
+            if search_text and search_text not in serial.lower() and search_text not in name.lower():
+                continue
+            enrollment_ids_filter.append(eid)
+
+    rows, rc, err = utils.query_all_command_history(
+        CFG["mysql"], db_password,
+        enrollment_ids=enrollment_ids_filter,
+        request_type=request_type_filter or None,
+        status=status_filter or None,
+        limit=500,
+    )
+    if rc != 0:
+        return jsonify({"ok": False, "message": err}), 500
+
+    vpp_cache_path = CFG["paths"]["vpp_cache_csv"]
+    result_rows = []
+    for row in rows:
+        eid = row.get("id")
+        serial = eid_to_serial.get(eid, "")
+        info = devices_csv.get(serial, {})
+        result_rows.append({
+            "enrollment_id": eid,
+            "serial_number": serial,
+            "device_name": info.get("device_name", ""),
+            "group": info.get("group", ""),
+            "command_uuid": row.get("command_uuid"),
+            "request_type": row.get("request_type"),
+            "status": row.get("status"),  # None代表尚未回應(仍在排隊等待中)
+            "active": row.get("active"),
+            "created_at": row.get("created_at"),
+            "result_updated_at": row.get("result_updated_at"),
+            "raw_result": row.get("result"),
+            "app_info": _enrich_command_row_with_app_info(row, vpp_cache_path),
+        })
+
+    # 篩選選項清單用固定來源(COMMAND_DEFS的所有指令類型、群組清單來自devices.csv實際存在的群組、
+    # 狀態用已知的MDM協定標準值),不是從「目前查詢結果」反推,這樣使用者篩選後,
+    # 下拉選單裡的其他選項不會跟著消失、還是能繼續切換組合篩選條件
+    groups_available = sorted(set(v.get("group", "") for v in devices_csv.values() if v.get("group")))
+
+    return jsonify({
+        "ok": True, "rows": result_rows,
+        "filter_options": {
+            "groups": groups_available,
+            "request_types": sorted(COMMAND_DEFS.keys()),
+            "statuses": ["__pending__", "Acknowledged", "NotNow", "Error", "CommandFormatError", "Idle"],
+        },
+    })
+
+
+@app.route("/api/system-logs/commands/cancel", methods=["POST"])
+@login_required
+def api_system_logs_commands_cancel():
+    data = request.json or {}
+    enrollment_id = data.get("enrollment_id", "")
+    command_uuid = data.get("command_uuid", "")
+    if not enrollment_id or not command_uuid:
+        return jsonify({"ok": False, "message": "缺少enrollment_id或command_uuid"}), 400
+
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+    ok, err = utils.cancel_pending_command(CFG["mysql"], db_password, enrollment_id, command_uuid)
+
+    log_activity_entry(
+        "系統紀錄-取消指令", ok,
+        detail=f"enrollment_id={enrollment_id}, command_uuid={command_uuid}" + (f", error={err}" if not ok else ""),
+    )
+    if not ok:
+        return jsonify({"ok": False, "message": f"取消失敗: {err}"}), 500
+    return jsonify({"ok": True, "message": "已取消這筆指令(裝置不會再收到這筆待處理的指令)"})
+
+
+@app.route("/api/system-logs/commands/resend", methods=["POST"])
+@login_required
+def api_system_logs_commands_resend():
+    data = request.json or {}
+    enrollment_id = data.get("enrollment_id", "")
+    command_uuid = data.get("command_uuid", "")
+    if not enrollment_id or not command_uuid:
+        return jsonify({"ok": False, "message": "缺少enrollment_id或command_uuid"}), 400
+
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+
+    # 重新派送:不是用使用者填的參數重新組一次指令(那樣有轉譯失真的風險),
+    # 而是直接拿原本失敗那筆的完整原始內容,原封不動地再送一次,確保跟原本失敗的
+    # 那次一模一樣。只是send_mdm_command內部會自動配上一組全新的CommandUUID
+    # (沿用舊的UUID會跟資料庫裡的唯一鍵衝突)。
+    rows, rc, err = utils.query_all_command_history(
+        CFG["mysql"], db_password, enrollment_ids=[enrollment_id], limit=500,
+    )
+    if rc != 0:
+        return jsonify({"ok": False, "message": f"查詢原始指令失敗: {err}"}), 500
+
+    target_row = next((r for r in rows if r.get("command_uuid") == command_uuid), None)
+    if not target_row:
+        return jsonify({"ok": False, "message": "找不到這筆指令的原始內容,可能已經被清理"}), 404
+
+    parsed_command = utils.parse_plist_text(target_row.get("command"))
+    command_body = dict((parsed_command or {}).get("Command", {}))
+    request_type = command_body.pop("RequestType", None)
+    if not request_type:
+        return jsonify({"ok": False, "message": "無法解析原始指令內容,無法重新派送"}), 500
+
+    base_url, api_user, api_key = get_nanomdm_conn()
+    try:
+        status_code, result = utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, request_type, command_body)
+        ok = status_code < 400
+    except Exception as e:
+        ok, status_code, result = False, None, str(e)
+
+    log_activity_entry(
+        "系統紀錄-重新派送指令", ok,
+        detail=f"enrollment_id={enrollment_id}, 原command_uuid={command_uuid}, request_type={request_type}, http_status={status_code}",
+    )
+    if not ok:
+        return jsonify({"ok": False, "message": f"重新派送失敗: {result}"}), 500
+    return jsonify({"ok": True, "message": f"已重新派送 {request_type} 指令"})
 
 
 @app.route("/")
@@ -1974,7 +2128,7 @@ def api_device_enrollment_status_import_apply_stream():
 @app.route("/devices")
 @login_required
 def devices_page():
-    return render_template("devices.html", active="devices", command_defs=get_command_defs_for_render())
+    return render_template("devices.html", active="devices", command_defs=COMMAND_DEFS)
 
 
 @app.route("/api/devices")
@@ -2310,6 +2464,8 @@ def api_device_command_history(enrollment_id):
     if rc != 0:
         return jsonify({"ok": False, "message": err}), 500
 
+    vpp_cache_path = CFG["paths"]["vpp_cache_csv"]
+
     result_rows = []
     for row in rows:
         parsed = utils.parse_plist_text(row.get("result"))
@@ -2319,6 +2475,33 @@ def api_device_command_history(enrollment_id):
                 if k in ("Status", "CommandUUID", "UDID"):
                     continue
                 detail[k] = v
+
+        # InstallApplication/RemoveApplication這兩種指令類型,回應內容本身通常不會講
+        # 「是哪個App」,這個資訊要從原始送出的指令內容(command欄位)裡取得,
+        # 再透過VPP快取(adamId/Bundle ID對照軟體名稱)補上使用者看得懂的App資訊。
+        app_info = None
+        request_type = row.get("request_type")
+        if request_type in ("InstallApplication", "RemoveApplication"):
+            parsed_command = utils.parse_plist_text(row.get("command"))
+            command_body = (parsed_command or {}).get("Command", {})
+            if request_type == "InstallApplication":
+                adam_id = command_body.get("iTunesStoreID")
+                if adam_id:
+                    vpp_info = utils.lookup_vpp_app_info(vpp_cache_path, adam_id=adam_id)
+                    app_info = {
+                        "adam_id": adam_id,
+                        "bundle_id": vpp_info["bundle_id"] if vpp_info else None,
+                        "name": vpp_info["name"] if vpp_info else None,
+                    }
+            elif request_type == "RemoveApplication":
+                identifier = command_body.get("Identifier")
+                if identifier:
+                    vpp_info = utils.lookup_vpp_app_info(vpp_cache_path, bundle_id=identifier)
+                    app_info = {
+                        "bundle_id": identifier,
+                        "name": vpp_info["name"] if vpp_info else None,
+                    }
+
         result_rows.append({
             "command_uuid": row.get("command_uuid"),
             "request_type": row.get("request_type"),
@@ -2327,6 +2510,7 @@ def api_device_command_history(enrollment_id):
             "result_updated_at": row.get("result_updated_at"),
             "detail": utils.json_safe(detail),
             "raw_result": row.get("result"),
+            "app_info": app_info,
         })
 
     return jsonify({"ok": True, "rows": result_rows})
@@ -2780,7 +2964,7 @@ def api_dep_profiles_apply():
 @app.route("/groups")
 @login_required
 def groups_page():
-    return render_template("groups.html", active="groups", command_defs=get_command_defs_for_render())
+    return render_template("groups.html", active="groups", command_defs=COMMAND_DEFS)
 
 
 @app.route("/api/groups")
@@ -3325,16 +3509,27 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
     if base_url and api_key:
         _, di_params = build_mdm_command_params("DeviceInformation", {})
         _, aou_params = build_mdm_command_params("AvailableOSUpdates", {})
+
+        # 查一次目前所有裝置有哪些(裝置,指令類型)組合還卡在active=1佇列裡沒被處理完。
+        # 派送每一種查詢指令前,先確認該裝置的這個類型是不是已經pending,是的話跳過這次派送,
+        # 不重複疊加——這是為了修正實際發生過的問題:對長時間離線的裝置每10分鐘無條件
+        # 重新派送同類型查詢指令,導致enrollment_queue/commands資料表無限累積。
+        pending_queries = utils.get_pending_status_query_types(CFG["mysql"], db_password)
+
         for d in devices:
             try:
-                utils.send_mdm_command(base_url, api_user, api_key, d["enrollment_id"], "DeviceInformation", di_params)
-                utils.send_mdm_command(base_url, api_user, api_key, d["enrollment_id"], "AvailableOSUpdates", aou_params)
-                utils.send_mdm_command(base_url, api_user, api_key, d["enrollment_id"], "OSUpdateStatus", {})
+                eid = d["enrollment_id"]
+                if (eid, "DeviceInformation") not in pending_queries:
+                    utils.send_mdm_command(base_url, api_user, api_key, eid, "DeviceInformation", di_params)
+                if (eid, "AvailableOSUpdates") not in pending_queries:
+                    utils.send_mdm_command(base_url, api_user, api_key, eid, "AvailableOSUpdates", aou_params)
+                if (eid, "OSUpdateStatus") not in pending_queries:
+                    utils.send_mdm_command(base_url, api_user, api_key, eid, "OSUpdateStatus", {})
                 # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,
                 # 沒開遺失模式的裝置送DeviceLocation一定會失敗,不用浪費請求
                 old_row = existing_cache_before.get(d["serial_number"], {})
-                if old_row.get("lost_mode_enabled") == "true":
-                    utils.send_mdm_command(base_url, api_user, api_key, d["enrollment_id"], "DeviceLocation", {})
+                if old_row.get("lost_mode_enabled") == "true" and (eid, "DeviceLocation") not in pending_queries:
+                    utils.send_mdm_command(base_url, api_user, api_key, eid, "DeviceLocation", {})
             except Exception:
                 continue  # 個別裝置排入失敗不該影響整批
 
@@ -3387,6 +3582,125 @@ def _devices_status_scheduler_loop():
 
 def start_devices_status_scheduler():
     t = threading.Thread(target=_devices_status_scheduler_loop, daemon=True)
+    t.start()
+
+
+# ---------------------------------------------------------------------------
+# nanomdm 指令歷史清理(commands/command_results/enrollment_queue)
+# ---------------------------------------------------------------------------
+@app.route("/api/cleanup/settings", methods=["GET"])
+@login_required
+def api_cleanup_settings_get():
+    return jsonify({"ok": True, "settings": CFG["nanomdm_cleanup"]})
+
+
+@app.route("/api/cleanup/settings", methods=["POST"])
+@login_required
+def api_cleanup_settings_save():
+    data = request.json or {}
+    retention_days = data.get("retention_days")
+    auto_enabled = data.get("auto_enabled")
+
+    try:
+        retention_days = int(retention_days)
+        if retention_days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "保留天數必須是大於0的整數"}), 400
+
+    CFG["nanomdm_cleanup"]["retention_days"] = retention_days
+    CFG["nanomdm_cleanup"]["auto_enabled"] = bool(auto_enabled)
+    config.save_config(CFG)
+
+    log_activity_entry(
+        "系統維護-清理設定變更", True,
+        detail=f"保留天數={retention_days}, 自動排程={'開啟' if auto_enabled else '關閉'}",
+    )
+    return jsonify({"ok": True, "settings": CFG["nanomdm_cleanup"]})
+
+
+@app.route("/api/cleanup/preview")
+@login_required
+def api_cleanup_preview():
+    retention_days = request.args.get("retention_days", CFG["nanomdm_cleanup"]["retention_days"])
+    try:
+        retention_days = int(retention_days)
+        if retention_days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "保留天數必須是大於0的整數"}), 400
+
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+    result = utils.preview_command_cleanup(CFG["mysql"], db_password, retention_days)
+    if not result["ok"]:
+        return jsonify({"ok": False, "message": f"預覽查詢失敗: {result.get('error')}"}), 500
+    return jsonify(result)
+
+
+@app.route("/api/cleanup/execute", methods=["POST"])
+@login_required
+def api_cleanup_execute():
+    data = request.json or {}
+    password = data.get("password", "")
+    if not verify_current_user_password(password):
+        log_activity_entry("系統維護-手動清理指令歷史", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+
+    retention_days = data.get("retention_days", CFG["nanomdm_cleanup"]["retention_days"])
+    try:
+        retention_days = int(retention_days)
+        if retention_days < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "保留天數必須是大於0的整數"}), 400
+
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+
+    # 執行前先預覽一次,把「預期要刪的數量」記進操作紀錄,讓之後回頭查活動紀錄時
+    # 能看到這次清理實際影響的範圍,不是只留下一句「執行成功」看不出規模
+    preview = utils.preview_command_cleanup(CFG["mysql"], db_password, retention_days)
+    expected_count = preview.get("commands_count", "未知") if preview.get("ok") else "未知"
+
+    result = utils.execute_command_cleanup(CFG["mysql"], db_password, retention_days)
+    ok = result.get("ok", False)
+    log_activity_entry(
+        "系統維護-手動清理指令歷史", ok,
+        detail=f"保留天數={retention_days}, 預期刪除筆數={expected_count}" + (f", error={result.get('error')}" if not ok else ""),
+    )
+
+    if not ok:
+        return jsonify({"ok": False, "message": f"清理失敗: {result.get('error')}"}), 500
+    return jsonify({"ok": True, "message": f"清理完成,已刪除約 {expected_count} 筆指令紀錄(含關聯的回應與佇列紀錄)"})
+
+
+def _nanomdm_cleanup_scheduler_loop():
+    """定期檢查是否有開啟自動清理,開啟的話依照目前設定的保留天數執行清理。
+    刻意每次都重新讀取CFG(不是啟動時的快照),讓使用者透過webui切換開關/保留天數後,
+    不用重啟服務就能在下一次排程時間生效。
+    """
+    while True:
+        try:
+            if CFG["nanomdm_cleanup"].get("auto_enabled"):
+                retention_days = CFG["nanomdm_cleanup"].get("retention_days", 60)
+                env = get_env_dict()
+                db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+                preview = utils.preview_command_cleanup(CFG["mysql"], db_password, retention_days)
+                expected_count = preview.get("commands_count", "未知") if preview.get("ok") else "未知"
+                result = utils.execute_command_cleanup(CFG["mysql"], db_password, retention_days)
+                ok = result.get("ok", False)
+                log_system_activity_entry(
+                    "系統維護-自動清理指令歷史", ok,
+                    detail=f"保留天數={retention_days}, 預期刪除筆數={expected_count}" + (f", error={result.get('error')}" if not ok else ""),
+                )
+        except Exception as e:
+            log_system_activity_entry("系統維護-自動清理指令歷史", False, detail=str(e))
+        time.sleep(CFG["nanomdm_cleanup"].get("check_interval_seconds", 86400))
+
+
+def start_nanomdm_cleanup_scheduler():
+    t = threading.Thread(target=_nanomdm_cleanup_scheduler_loop, daemon=True)
     t.start()
 
 
@@ -3708,4 +4022,5 @@ if __name__ == "__main__":
     start_vpp_scheduler()
     start_asm_devices_scheduler()
     start_devices_status_scheduler()
+    start_nanomdm_cleanup_scheduler()
     app.run(host="0.0.0.0", port=CFG.get("port", 5566), debug=False)

@@ -1001,9 +1001,10 @@ def query_command_history(mysql_cfg, db_password, enrollment_id, limit=30):
         "SELECT JSON_ARRAYAGG(JSON_OBJECT("
         "'command_uuid', command_uuid, 'request_type', request_type, "
         "'status', status, 'result_b64', TO_BASE64(COALESCE(result, '')), "
+        "'command_b64', TO_BASE64(COALESCE(command, '')), "
         "'created_at', DATE_FORMAT(CONVERT_TZ(created_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s'), "
         "'result_updated_at', DATE_FORMAT(CONVERT_TZ(result_updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
-        ")) FROM (SELECT command_uuid, request_type, status, result, created_at, result_updated_at "
+        ")) FROM (SELECT command_uuid, request_type, status, result, command, created_at, result_updated_at "
         f"FROM view_queue WHERE id = '{safe_id}' "
         f"ORDER BY created_at DESC LIMIT {limit_int}) t;"
     )
@@ -1036,7 +1037,15 @@ def query_command_history(mysql_cfg, db_password, enrollment_id, limit=30):
             item["result"] = base64.b64decode(result_b64).decode("utf-8", errors="replace") if result_b64 else None
         except Exception:
             item["result"] = None
+
+        command_b64 = item.pop("command_b64", "") or ""
+        try:
+            item["command"] = base64.b64decode(command_b64).decode("utf-8", errors="replace") if command_b64 else None
+        except Exception:
+            item["command"] = None
+
         rows.append(item)
+    return rows, 0, None
     return rows, 0, None
 
 
@@ -1158,3 +1167,286 @@ def trigger_push(nanomdm_base_url, api_user, api_key, enrollment_id, timeout=15)
     except Exception:
         result_json = {"raw": resp.text}
     return resp.status_code, result_json
+
+
+def get_pending_status_query_types(mysql_cfg, db_password):
+    """查詢目前所有裝置,還有哪些(enrollment_id, request_type)組合有active=1(尚未處理完成)
+    的定期狀態查詢佇列項目。只鎖定裝置狀態排程會用到的這幾種查詢類型,不是全部指令類型,
+    避免不必要地撈出大量不相關的資料。
+
+    回傳一個set,元素是(enrollment_id, request_type)的tuple。用途:讓裝置狀態排程在
+    每次派送新的查詢指令前,先確認「這台裝置的這種指令類型,是不是已經有一筆還卡在佇列裡
+    沒被處理完」,如果有就跳過這次派送,避免對離線/長時間沒上線的裝置無限疊加派送同類型
+    指令,造成enrollment_queue/commands資料表無限累積(這是實際發生過的問題:12台裝置
+    運作一週就累積超過4萬筆active=1的查詢類佇列項目)。
+    """
+    query_types = "'DeviceInformation','AvailableOSUpdates','OSUpdateStatus','DeviceLocation'"
+    sql = (
+        "SELECT q.id AS enrollment_id, c.request_type "
+        "FROM enrollment_queue q JOIN commands c ON q.command_uuid = c.command_uuid "
+        f"WHERE q.active = 1 AND c.request_type IN ({query_types});"
+    )
+    args = [
+        "docker", "exec",
+        mysql_cfg["docker_container"],
+        "mysql",
+        f"-u{mysql_cfg['db_user']}",
+        f"-p{db_password}",
+        "-N", "-B", "--raw",
+        mysql_cfg["db_name"],
+        "-e", sql,
+    ]
+    rc, out, err = run_cmd(args, timeout=20)
+    pending = set()
+    if rc != 0:
+        return pending  # 查詢失敗時回傳空集合,讓呼叫端維持原本行為(照常派送),
+                         # 不要因為這個防重複機制本身查詢失敗,就讓原本的狀態查詢功能整個停擺
+    for line in out.strip().splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        pending.add((parts[0], parts[1]))
+    return pending
+
+
+def _cleanup_safe_where_clause(retention_days):
+    """組出安全的清理條件:夠舊(超過保留天數) 且 沒有任何裝置的佇列還在active=1等它。
+    這個條件是查證過nanomdm的schema跟view_queue的實際查詢邏輯後才確定的:
+    enrollment_queue跟commands之間是INNER JOIN,如果砍掉一筆commands、但它在
+    某台裝置的佇列裡還是active=1(還沒送達/還沒確認),那筆佇列紀錄會連帶被CASCADE
+    砍掉,裝置永遠不會收到這個指令、也不會有任何錯誤訊息。加上NOT IN這個條件,
+    確保只砍「真的沒有任何裝置還在等」的舊指令。
+    """
+    retention_days = int(retention_days)  # 防止SQL injection,確定是整數才拼進SQL
+    return (
+        f"created_at < (NOW() - INTERVAL {retention_days} DAY) "
+        f"AND command_uuid NOT IN (SELECT command_uuid FROM enrollment_queue WHERE active = 1)"
+    )
+
+
+def preview_command_cleanup(mysql_cfg, db_password, retention_days):
+    """預覽清理效果,只查COUNT,不會真的刪除任何資料。
+    回傳dict: {ok, commands_count, command_results_count, enrollment_queue_count,
+               by_request_type: [(request_type, count), ...], error}
+    command_results_count/enrollment_queue_count是「會被cascade一併刪除」的估計筆數,
+    不是這兩個表本身有獨立的刪除條件。
+    """
+    where_clause = _cleanup_safe_where_clause(retention_days)
+
+    def run_query(sql):
+        args = [
+            "docker", "exec",
+            mysql_cfg["docker_container"],
+            "mysql",
+            f"-u{mysql_cfg['db_user']}",
+            f"-p{db_password}",
+            "-N", "-B", "--raw",
+            mysql_cfg["db_name"],
+            "-e", sql,
+        ]
+        return run_cmd(args, timeout=30)
+
+    rc1, out1, err1 = run_query(f"SELECT COUNT(*) FROM commands WHERE {where_clause};")
+    if rc1 != 0:
+        return {"ok": False, "error": err1 or out1}
+    commands_count = int(out1.strip() or 0)
+
+    rc2, out2, err2 = run_query(
+        f"SELECT COUNT(*) FROM command_results WHERE command_uuid IN "
+        f"(SELECT command_uuid FROM commands WHERE {where_clause});"
+    )
+    command_results_count = int(out2.strip() or 0) if rc2 == 0 else None
+
+    rc3, out3, err3 = run_query(
+        f"SELECT COUNT(*) FROM enrollment_queue WHERE command_uuid IN "
+        f"(SELECT command_uuid FROM commands WHERE {where_clause});"
+    )
+    enrollment_queue_count = int(out3.strip() or 0) if rc3 == 0 else None
+
+    rc4, out4, err4 = run_query(
+        f"SELECT request_type, COUNT(*) FROM commands WHERE {where_clause} "
+        f"GROUP BY request_type ORDER BY COUNT(*) DESC;"
+    )
+    by_request_type = []
+    if rc4 == 0:
+        for line in out4.strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) == 2:
+                by_request_type.append({"request_type": parts[0], "count": int(parts[1])})
+
+    return {
+        "ok": True,
+        "commands_count": commands_count,
+        "command_results_count": command_results_count,
+        "enrollment_queue_count": enrollment_queue_count,
+        "by_request_type": by_request_type,
+    }
+
+
+def execute_command_cleanup(mysql_cfg, db_password, retention_days):
+    """實際執行清理:刪除commands裡符合安全條件的紀錄,command_results/enrollment_queue
+    會透過資料庫本身的ON DELETE CASCADE自動一併清除,不需要另外下刪除指令。
+    回傳dict: {ok, deleted_count, error}
+    """
+    where_clause = _cleanup_safe_where_clause(retention_days)
+    sql = f"DELETE FROM commands WHERE {where_clause};"
+
+    args = [
+        "docker", "exec",
+        mysql_cfg["docker_container"],
+        "mysql",
+        f"-u{mysql_cfg['db_user']}",
+        f"-p{db_password}",
+        mysql_cfg["db_name"],
+        "-e", sql,
+    ]
+    rc, out, err = run_cmd(args, timeout=60)
+    if rc != 0:
+        return {"ok": False, "error": err or out}
+
+    # DELETE指令本身的輸出不會直接告訴你刪了幾筆,用mysql client的--verbose也不保證格式穩定,
+    # 改用執行完後另外查一次affected rows的方式不可靠(連線已經結束),這裡改成執行前先跑過一次
+    # preview查詢記錄「預期要刪的數量」,呼叫端(app.py)會自己把這個數字帶入回應,這裡回傳ok即可
+    return {"ok": True}
+
+
+def lookup_vpp_app_info(vpp_cache_path, adam_id=None, bundle_id=None):
+    """從VPP快取CSV裡,用adam_id或bundle_id查出對應的App資訊(Bundle ID + 軟體名稱)。
+    兩個查詢鍵擇一提供即可,adam_id優先(InstallApplication指令用這個);
+    bundle_id是給RemoveApplication這種指令本身就直接帶Bundle ID、不需要查adam_id的情況用。
+    查不到、或VPP快取檔案不存在,回傳None,不影響呼叫端繼續正常運作(只是沒有額外資訊可以補)。
+    """
+    rows, _ = read_vpp_cache_csv(vpp_cache_path)
+    if not rows:
+        return None
+
+    for row in rows:
+        if adam_id and row.get("Adam ID") == str(adam_id):
+            return {"bundle_id": row.get("Bundle ID", ""), "name": row.get("軟體名稱", "")}
+        if bundle_id and row.get("Bundle ID") == bundle_id:
+            return {"bundle_id": row.get("Bundle ID", ""), "name": row.get("軟體名稱", "")}
+    return None
+
+
+def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, request_type=None, status=None, limit=500):
+    """查詢「所有裝置」的指令派送與回應紀錄(不像query_command_history限定單一enrollment)。
+    給[系統紀錄]裡的「指派命令紀錄」彙整表用。
+
+    enrollment_ids: 選填,限定只查這些enrollment_id(用來支援依裝置名稱/序號/群組篩選,
+                     這些條件要先在Python端對照本地devices.csv/groups.json算出符合的
+                     enrollment_id清單,再傳進來,因為nanomdm的資料庫完全不知道群組/裝置名稱
+                     這些我們自己webui才有的概念)。
+    request_type/status: 選填,直接對應到SQL WHERE條件(這兩個nanomdm資料庫本身就有)。
+    limit: 避免一次撈出過多資料(資料庫實際可能有數萬筆歷史紀錄),預設500筆,依created_at
+           時間新到舊排序,只給「最近」的紀錄,不是要看完整歷史用這個。
+
+    回傳 (rows, rc, err)。
+    """
+    try:
+        limit_int = int(limit)
+    except (TypeError, ValueError):
+        limit_int = 500
+
+    where_clauses = []
+    if enrollment_ids is not None:
+        if not enrollment_ids:
+            # 篩選條件算出來是「沒有任何裝置符合」,直接回傳空結果,不用送一個IN ()的SQL
+            # (在部分SQL方言或組合下這樣容易出錯,直接短路處理更保險)
+            return [], 0, None
+        safe_ids = "','".join(eid.replace("'", "''") for eid in enrollment_ids)
+        where_clauses.append(f"id IN ('{safe_ids}')")
+    if request_type:
+        safe_type = request_type.replace("'", "''")
+        where_clauses.append(f"request_type = '{safe_type}'")
+    if status:
+        safe_status = status.replace("'", "''")
+        if status == "__pending__":
+            # 特殊值:代表「尚未有回應(仍在排隊等待中)」,對應status欄位是NULL的情況
+            where_clauses.append("status IS NULL")
+        else:
+            where_clauses.append(f"status = '{safe_status}'")
+
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    sql = (
+        "SELECT JSON_ARRAYAGG(JSON_OBJECT("
+        "'id', id, 'command_uuid', command_uuid, 'request_type', request_type, "
+        "'status', status, 'active', active, "
+        "'result_b64', TO_BASE64(COALESCE(result, '')), "
+        "'command_b64', TO_BASE64(COALESCE(command, '')), "
+        "'created_at', DATE_FORMAT(CONVERT_TZ(created_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s'), "
+        "'result_updated_at', DATE_FORMAT(CONVERT_TZ(result_updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
+        ")) FROM (SELECT id, command_uuid, request_type, status, active, result, command, created_at, result_updated_at "
+        f"FROM view_queue {where_sql} "
+        f"ORDER BY created_at DESC LIMIT {limit_int}) t;"
+    )
+    args = [
+        "docker", "exec",
+        mysql_cfg["docker_container"],
+        "mysql",
+        f"-u{mysql_cfg['db_user']}",
+        f"-p{db_password}",
+        "-N", "-B", "--raw",
+        mysql_cfg["db_name"],
+        "-e", sql,
+    ]
+    rc, out, err = run_cmd(args, timeout=30)
+    if rc != 0:
+        return None, rc, (err or out)
+
+    raw = out.strip()
+    if not raw or raw == "NULL":
+        return [], 0, None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return None, -1, f"JSON 解析失敗: {e}"
+
+    rows = []
+    for item in (data or []):
+        result_b64 = item.pop("result_b64", "") or ""
+        try:
+            item["result"] = base64.b64decode(result_b64).decode("utf-8", errors="replace") if result_b64 else None
+        except Exception:
+            item["result"] = None
+
+        command_b64 = item.pop("command_b64", "") or ""
+        try:
+            item["command"] = base64.b64decode(command_b64).decode("utf-8", errors="replace") if command_b64 else None
+        except Exception:
+            item["command"] = None
+
+        rows.append(item)
+    return rows, 0, None
+
+
+def cancel_pending_command(mysql_cfg, db_password, enrollment_id, command_uuid):
+    """取消一筆「尚未完成」的指令:把enrollment_queue.active設成0,不刪除任何資料。
+    這跟nanomdm自己在裝置正常回應完指令時做的狀態轉換完全一樣(active: 1->0),
+    差別只在於這次是管理者手動觸發,不是等裝置回應觸發。
+    只會影響active目前是1的紀錄,避免對已經處理完的舊紀錄造成任何意外的資料異動。
+    回傳 (ok, error)。
+    """
+    safe_eid = enrollment_id.replace("'", "''")
+    safe_uuid = command_uuid.replace("'", "''")
+    sql = (
+        f"UPDATE enrollment_queue SET active = 0 "
+        f"WHERE id = '{safe_eid}' AND command_uuid = '{safe_uuid}' AND active = 1;"
+    )
+    args = [
+        "docker", "exec",
+        mysql_cfg["docker_container"],
+        "mysql",
+        f"-u{mysql_cfg['db_user']}",
+        f"-p{db_password}",
+        mysql_cfg["db_name"],
+        "-e", sql,
+    ]
+    rc, out, err = run_cmd(args, timeout=20)
+    if rc != 0:
+        return False, (err or out)
+    return True, None

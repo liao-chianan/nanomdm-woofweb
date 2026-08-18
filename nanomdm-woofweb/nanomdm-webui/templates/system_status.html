@@ -65,6 +65,32 @@
   <div id="static-files-container">載入中...</div>
 </div>
 
+<div class="panel">
+  <h2>資料庫維護 — nanomdm 指令歷史清理</h2>
+  <p style="color:#6b7280; font-size:13px; margin:6px 0;">
+    每次派送給裝置的 MDM 指令、裝置的回應紀錄,都會累積在 nanomdm 的資料庫裡。
+    這裡可以設定「多久以前、而且已經沒有任何裝置還在排隊等待的指令」要自動清除,避免資料庫無限成長。
+    只會清除「已經沒人在等」的舊紀錄,絕對不會刪到裝置目前還在排隊等待執行的指令。
+  </p>
+  <div class="field-row">
+    <label>保留天數</label>
+    <input type="number" id="cleanup-retention-days-input" min="1" style="width:100px;" value="60">
+  </div>
+  <div class="field-row">
+    <label><input type="checkbox" id="cleanup-auto-enabled-input" style="width:auto;"> 開啟自動排程清理(每天自動檢查一次)</label>
+  </div>
+  <button id="cleanup-save-settings-btn" class="secondary" type="button" style="font-size:12px;">儲存設定</button>
+  <button id="cleanup-preview-btn" type="button" style="font-size:12px;">預覽清理範圍</button>
+  <div id="cleanup-preview-result" style="margin-top:12px; display:none;">
+    <div style="background:#f8f9fb; border-radius:6px; padding:14px;">
+      <p style="margin:4px 0;">符合條件、可以安全清除的指令紀錄:<strong id="cleanup-preview-commands-count">-</strong> 筆</p>
+      <p style="margin:4px 0; color:#6b7280; font-size:13px;">連帶會一併清除的回應紀錄:約 <span id="cleanup-preview-results-count">-</span> 筆;佇列紀錄:約 <span id="cleanup-preview-queue-count">-</span> 筆</p>
+      <div id="cleanup-preview-breakdown" style="margin-top:8px; font-size:13px;"></div>
+      <button id="cleanup-execute-btn" class="danger" type="button" style="margin-top:10px; font-size:12px;">確認執行清理</button>
+    </div>
+  </div>
+</div>
+
 <!-- Log 檢視 Modal -->
 <div class="modal-overlay hidden" id="log-viewer-modal">
   <div class="modal-box" style="width:900px;">

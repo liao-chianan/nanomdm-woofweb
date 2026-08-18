@@ -276,10 +276,14 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSystemdStatus();
   loadMysqlStatus();
   loadStaticFilesStatus();
+  loadCleanupSettings();
 
   document.getElementById("refresh-system-btn").addEventListener("click", loadSystemStatus);
   document.getElementById("refresh-mysql-btn").addEventListener("click", loadMysqlStatus);
   document.getElementById("refresh-static-files-btn").addEventListener("click", loadStaticFilesStatus);
+  document.getElementById("cleanup-save-settings-btn").addEventListener("click", saveCleanupSettings);
+  document.getElementById("cleanup-preview-btn").addEventListener("click", previewCleanup);
+  document.getElementById("cleanup-execute-btn").addEventListener("click", executeCleanup);
 
   document.getElementById("docker-tbody").addEventListener("click", (e) => {
     const name = e.target.dataset.name;
@@ -298,3 +302,105 @@ document.addEventListener("DOMContentLoaded", () => {
   // 系統資源每10秒自動更新一次(輕量,不影響Docker/systemd/MySQL的手動重新整理)
   setInterval(loadSystemStatus, 10000);
 });
+
+// ---------------------------------------------------------------------------
+// nanomdm 指令歷史清理
+// ---------------------------------------------------------------------------
+async function loadCleanupSettings() {
+  const res = await apiFetch("/api/cleanup/settings");
+  if (!res.ok) return;
+  document.getElementById("cleanup-retention-days-input").value = res.data.settings.retention_days;
+  document.getElementById("cleanup-auto-enabled-input").checked = res.data.settings.auto_enabled;
+}
+
+async function saveCleanupSettings() {
+  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
+  const autoEnabled = document.getElementById("cleanup-auto-enabled-input").checked;
+
+  if (!retentionDays || retentionDays < 1) {
+    alert("保留天數必須是大於0的整數");
+    return;
+  }
+
+  const res = await apiFetchJSON("/api/cleanup/settings", "POST", {
+    retention_days: retentionDays, auto_enabled: autoEnabled,
+  });
+  if (res.ok) {
+    alert("設定已儲存");
+  } else {
+    alert("儲存失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
+async function previewCleanup() {
+  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
+  if (!retentionDays || retentionDays < 1) {
+    alert("保留天數必須是大於0的整數");
+    return;
+  }
+
+  const btn = document.getElementById("cleanup-preview-btn");
+  btn.disabled = true;
+  btn.textContent = "查詢中...";
+
+  const res = await apiFetch(`/api/cleanup/preview?retention_days=${retentionDays}`);
+
+  btn.disabled = false;
+  btn.textContent = "預覽清理範圍";
+
+  if (!res.ok) {
+    alert("預覽失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+
+  const data = res.data;
+  document.getElementById("cleanup-preview-commands-count").textContent = data.commands_count;
+  document.getElementById("cleanup-preview-results-count").textContent =
+    data.command_results_count !== null ? data.command_results_count : "未知";
+  document.getElementById("cleanup-preview-queue-count").textContent =
+    data.enrollment_queue_count !== null ? data.enrollment_queue_count : "未知";
+
+  const breakdownEl = document.getElementById("cleanup-preview-breakdown");
+  if (data.by_request_type && data.by_request_type.length > 0) {
+    breakdownEl.innerHTML = "<strong>依指令類型分類：</strong><br>" +
+      data.by_request_type.map(item => `${escapeHtml(item.request_type)}: ${item.count} 筆`).join("　");
+  } else {
+    breakdownEl.innerHTML = "";
+  }
+
+  document.getElementById("cleanup-preview-result").style.display = "";
+
+  if (data.commands_count === 0) {
+    alert("目前沒有符合條件、可以安全清除的指令紀錄");
+  }
+}
+
+async function executeCleanup() {
+  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
+  const previewCount = document.getElementById("cleanup-preview-commands-count").textContent;
+
+  if (!confirm(`確定要清除這 ${previewCount} 筆指令紀錄嗎?此操作無法復原(不會影響裝置目前排隊等待中的指令)。`)) {
+    return;
+  }
+
+  const password = prompt("請輸入您目前登入的密碼以確認執行清理:");
+  if (!password) return;
+
+  const btn = document.getElementById("cleanup-execute-btn");
+  btn.disabled = true;
+  btn.textContent = "執行中...";
+
+  const res = await apiFetchJSON("/api/cleanup/execute", "POST", {
+    retention_days: retentionDays, password,
+  });
+
+  btn.disabled = false;
+  btn.textContent = "確認執行清理";
+
+  if (res.ok) {
+    alert(res.data.message);
+    document.getElementById("cleanup-preview-result").style.display = "none";
+  } else {
+    alert("清理失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
