@@ -425,6 +425,89 @@ def get_mysql_database_stats(db_configs, timeout=20):
     return all_databases, errors
 
 
+def _query_one_mysql_database_exact(docker_container, db_user, db_password, timeout=30):
+    """查詢單一組帳密能看到的資料庫/資料表的「精確」筆數(不是估計值)。
+    大小(MB)還是沿用information_schema的估計值(這個不像筆數那麼容易造成誤解,
+    保留估計值換取速度即可)。
+
+    做法:先查一次information_schema拿到有哪些表、各自的大小估計,再組一個
+    UNION ALL的單一SQL,對「每一張表」都做真正的COUNT(*),一次查完所有表的精確筆數
+    ——不會逐表分開下docker exec指令(那樣表數量一多,光是docker exec本身的
+    啟動開銷加總起來就會很明顯拖慢速度)。
+    """
+    size_data, err = _query_one_mysql_database(docker_container, db_user, db_password, timeout=timeout)
+    if err:
+        return None, err
+    if not size_data:
+        return [], None
+
+    all_tables = [(db["database"], t["table"]) for db in size_data for t in db["tables"]]
+    if not all_tables:
+        return [], None
+
+    union_parts = [
+        f"SELECT '{schema}' AS schema_name, '{table}' AS table_name, COUNT(*) AS cnt FROM `{schema}`.`{table}`"
+        for schema, table in all_tables
+    ]
+    sql = " UNION ALL ".join(union_parts) + ";"
+
+    args = [
+        "docker", "exec", docker_container, "mysql",
+        f"-u{db_user}", f"-p{db_password}",
+        "-N", "-B", "--raw", "-e", sql,
+    ]
+    rc, out, err2 = run_cmd(args, timeout=timeout)
+    if rc != 0:
+        return None, (err2 or out or "查詢失敗")
+
+    exact_counts = {}
+    for line in out.strip().splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        exact_counts[(parts[0], parts[1])] = int(parts[2]) if parts[2].isdigit() else 0
+
+    databases = {}
+    for db in size_data:
+        db_entry = databases.setdefault(db["database"], {"database": db["database"], "tables": [], "total_rows": 0})
+        for t in db["tables"]:
+            key = (db["database"], t["table"])
+            row_count = exact_counts.get(key, t["rows"])  # 查不到精確值時,退回原本的估計值,不要整個報錯
+            db_entry["tables"].append({
+                "table": t["table"],
+                "purpose": t["purpose"],
+                "rows": row_count,
+                "size_mb": t["size_mb"],
+            })
+            db_entry["total_rows"] += row_count
+
+    return list(databases.values()), None
+
+
+def get_mysql_database_stats_exact(db_configs, timeout=30):
+    """跟get_mysql_database_stats邏輯相同,但筆數是精確COUNT(*),給使用者手動觸發的
+    「重新整理」按鈕用,不是頁面預設載入時自動呼叫(避免每次載入頁面都對大資料表全表掃描)。
+    """
+    all_databases = []
+    errors = []
+    seen_schemas = set()
+
+    for cfg in db_configs:
+        result, err = _query_one_mysql_database_exact(cfg["docker_container"], cfg["db_user"], cfg["db_password"], timeout=timeout)
+        if err:
+            errors.append(f"{cfg.get('label', cfg['db_user'])}: {err}")
+            continue
+        for db in (result or []):
+            if db["database"] in seen_schemas:
+                continue
+            seen_schemas.add(db["database"])
+            all_databases.append(db)
+
+    return all_databases, errors
+
+
 # ---------------------------------------------------------------------------
 # 靜態檔案檢視
 # ---------------------------------------------------------------------------

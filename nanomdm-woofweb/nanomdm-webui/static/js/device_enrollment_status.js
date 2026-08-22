@@ -1,6 +1,28 @@
 const NAME_PATTERN_ES = /^[^\x00-\x1f\x7f,"]{0,64}$/;
 let groupNamesListES = [];
 let allEnrollmentRows = [];
+
+// 裝置註冊狀態的欄位定義,給排序功能用。操作欄位是存檔按鈕不是資料,不列進來。
+const ENROLLMENT_TABLE_COLUMNS = [
+  { key: "serial_number", label: "序號", type: "text" },
+  { key: "wifi_mac", label: "WIFI MAC", type: "text" },
+  { key: "model", label: "型號", type: "text" },
+  { key: "device_name", label: "裝置名稱", type: "text" },
+  { key: "group", label: "群組", type: "text" },
+  { key: "profile_uuid", label: "DEP profile_uuid", type: "text" },
+  { key: "profile_filename", label: "對應範本", type: "text" },
+  { key: "enrollment_id", label: "MDM UUID", type: "text" },
+  { key: "profile_status", label: "指派狀態", type: "text" },
+];
+const enrollmentSorter = createTableSorter();
+
+function renderEnrollmentTableHeader() {
+  const thead = document.getElementById("enrollment-status-thead");
+  const cells = ENROLLMENT_TABLE_COLUMNS
+    .map((col) => `<th style="cursor:pointer;" data-sort-key="${col.key}">${escapeHtml(col.label)}${enrollmentSorter.sortArrow(col.key)}</th>`)
+    .join("");
+  thead.innerHTML = `<tr>${cells}<th>操作</th></tr>`;
+}
 let enrollmentImportChanges = [];
 
 function buildGroupOptionsHtmlES(currentGroup) {
@@ -87,7 +109,7 @@ function applyEnrollmentFilters() {
   const groupFilter = document.getElementById("enrollment-filter-group").value;
   const searchText = document.getElementById("enrollment-filter-search").value.trim().toLowerCase();
 
-  const filtered = allEnrollmentRows.filter((row) => {
+  let filtered = allEnrollmentRows.filter((row) => {
     if (groupFilter === "__none__" && row.group) return false;
     if (groupFilter && groupFilter !== "__none__" && row.group !== groupFilter) return false;
     if (searchText) {
@@ -97,6 +119,9 @@ function applyEnrollmentFilters() {
     return true;
   });
 
+  filtered = enrollmentSorter.sortRows(filtered, ENROLLMENT_TABLE_COLUMNS);
+
+  renderEnrollmentTableHeader();
   const tbody = document.getElementById("enrollment-status-tbody");
   tbody.innerHTML = "";
   if (filtered.length === 0) {
@@ -355,6 +380,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("enrollment-filter-group").addEventListener("change", applyEnrollmentFilters);
   document.getElementById("enrollment-filter-search").addEventListener("input", applyEnrollmentFilters);
+
+  document.getElementById("enrollment-status-thead").addEventListener("click", (e) => {
+    const th = e.target.closest("th");
+    if (!th || !th.dataset.sortKey) return;
+    enrollmentSorter.handleHeaderClick(th.dataset.sortKey);
+    applyEnrollmentFilters();
+  });
 
   document.getElementById("enrollment-status-tbody").addEventListener("click", (e) => {
     const tr = e.target.closest("tr");

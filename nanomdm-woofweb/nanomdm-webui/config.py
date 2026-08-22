@@ -91,7 +91,8 @@ DEFAULT_CONFIG = {
     },
     "devices_status_cache": {
         "csv_path": "/opt/nanomdm-deployment/devices-status.csv",
-        "refresh_interval_seconds": 600
+        "refresh_interval_seconds": 600,
+        "pending_retry_threshold_minutes": 180
     },
     "nanomdm_cleanup": {
         "retention_days": 60,

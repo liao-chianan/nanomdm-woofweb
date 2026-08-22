@@ -1171,20 +1171,30 @@ def trigger_push(nanomdm_base_url, api_user, api_key, enrollment_id, timeout=15)
 
 def get_pending_status_query_types(mysql_cfg, db_password):
     """查詢目前所有裝置,還有哪些(enrollment_id, request_type)組合有active=1(尚未處理完成)
-    的定期狀態查詢佇列項目。只鎖定裝置狀態排程會用到的這幾種查詢類型,不是全部指令類型,
-    避免不必要地撈出大量不相關的資料。
+    的定期狀態查詢佇列項目,以及這筆pending紀錄是什麼時候建立的。只鎖定裝置狀態排程會用到
+    的這幾種查詢類型,不是全部指令類型,避免不必要地撈出大量不相關的資料。
 
-    回傳一個set,元素是(enrollment_id, request_type)的tuple。用途:讓裝置狀態排程在
-    每次派送新的查詢指令前,先確認「這台裝置的這種指令類型,是不是已經有一筆還卡在佇列裡
-    沒被處理完」,如果有就跳過這次派送,避免對離線/長時間沒上線的裝置無限疊加派送同類型
-    指令,造成enrollment_queue/commands資料表無限累積(這是實際發生過的問題:12台裝置
-    運作一週就累積超過4萬筆active=1的查詢類佇列項目)。
+    回傳一個dict,key是(enrollment_id, request_type)的tuple,value是這筆pending紀錄裡
+    「最新一筆」的建立時間字串("%Y-%m-%d %H:%M:%S",已轉換成台灣時區)。用途:讓裝置狀態
+    排程在每次派送新的查詢指令前,先確認「這台裝置的這種指令類型,最近一次送出的那筆,
+    是不是還在等回應」,如果是「最近才送、還在等回應」就跳過這次派送,避免對離線裝置
+    無限疊加派送同類型指令;但如果連最新的那筆pending都已經卡了很久(裝置持續離線超過
+    某個時間門檻),呼叫端可以判斷「這筆多半已經沒有意義了」,重新嘗試送一次新的,不會
+    因為一筆卡住的舊紀錄就永久放棄追蹤這台裝置。
+
+    重要:這裡刻意用MAX(取最新一筆)而不是MIN(取最早一筆)。曾經寫成MIN,結果對於
+    「已經累積了大量從未被解決的極舊pending紀錄」的裝置(例如從好幾週前就開始堆積),
+    MIN永遠會抓到那筆極舊的紀錄,導致「已經超過門檻、該重試」的判斷永遠成立,不管
+    最近是不是才剛送過,完全沒有真的達到「避免短時間內重複」的效果——這是實際發生過、
+    造成裝置每10分鐘還是重複被派送指令的真正原因。
     """
     query_types = "'DeviceInformation','AvailableOSUpdates','OSUpdateStatus','DeviceLocation'"
     sql = (
-        "SELECT q.id AS enrollment_id, c.request_type "
+        "SELECT q.id AS enrollment_id, c.request_type, "
+        "DATE_FORMAT(CONVERT_TZ(MAX(q.created_at), '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS latest_created_at "
         "FROM enrollment_queue q JOIN commands c ON q.command_uuid = c.command_uuid "
-        f"WHERE q.active = 1 AND c.request_type IN ({query_types});"
+        f"WHERE q.active = 1 AND c.request_type IN ({query_types}) "
+        "GROUP BY q.id, c.request_type;"
     )
     args = [
         "docker", "exec",
@@ -1197,32 +1207,52 @@ def get_pending_status_query_types(mysql_cfg, db_password):
         "-e", sql,
     ]
     rc, out, err = run_cmd(args, timeout=20)
-    pending = set()
+    pending = {}
     if rc != 0:
-        return pending  # 查詢失敗時回傳空集合,讓呼叫端維持原本行為(照常派送),
+        return pending  # 查詢失敗時回傳空dict,讓呼叫端維持原本行為(照常派送),
                          # 不要因為這個防重複機制本身查詢失敗,就讓原本的狀態查詢功能整個停擺
     for line in out.strip().splitlines():
         if not line.strip():
             continue
         parts = line.split("\t")
-        if len(parts) < 2:
+        if len(parts) < 3:
             continue
-        pending.add((parts[0], parts[1]))
+        pending[(parts[0], parts[1])] = parts[2]
     return pending
 
 
 def _cleanup_safe_where_clause(retention_days):
-    """組出安全的清理條件:夠舊(超過保留天數) 且 沒有任何裝置的佇列還在active=1等它。
-    這個條件是查證過nanomdm的schema跟view_queue的實際查詢邏輯後才確定的:
-    enrollment_queue跟commands之間是INNER JOIN,如果砍掉一筆commands、但它在
-    某台裝置的佇列裡還是active=1(還沒送達/還沒確認),那筆佇列紀錄會連帶被CASCADE
-    砍掉,裝置永遠不會收到這個指令、也不會有任何錯誤訊息。加上NOT IN這個條件,
-    確保只砍「真的沒有任何裝置還在等」的舊指令。
+    """組出安全的清理條件:夠舊(超過保留天數) 且 沒有任何裝置的佇列項目「真的還沒收到回應」。
+
+    重要修正記錄:原本這裡用 active=1 當作「還有裝置在等」的判斷依據,但查證nanomdm
+    官方schema.sql後發現這個假設是錯的——active這個欄位似乎不會因為裝置成功回應
+    (Acknowledged)就自動被nanomdm改成0(官方文件說明,nanomdm自己內建的清理機制
+    -storage-options delete=1,做的是「直接刪除整筆紀錄」,不是「把active改成0」,
+    代表active很可能從建立那一刻起就一直維持在預設值1,直到那筆紀錄被刪除為止,
+    跟裝置有沒有回應完全無關)。這個問題經過實際資料驗證確認:有Acknowledged超過
+    13天的紀錄,active依然是1。
+
+    如果繼續用active=1判斷,會把絕大多數早就處理完畢的指令,都誤判成「還有裝置在等」
+    而永遠排除在清理範圍外,這正是保留天數設定生效卻清不掉舊資料的根本原因。
+
+    正確的判斷依據改成:這個佇列項目(enrollment_queue的每一列,代表某台裝置在等
+    某個指令)是不是「還沒收到回應」而且「還沒被取消」——兩個條件都要符合,才是真正
+    該保護、不能清理的對象:
+      - 沒有收到回應(LEFT JOIN command_results後cr.id IS NULL):對應nanomdm自己
+        在view_queue裡描述「outstanding」(未處理)的定義
+      - active仍然是1:如果是active=0(不管是「取消命令」功能手動設的,還是其他原因),
+        代表這個佇列項目已經不再被視為需要處理,即使沒有command_results也不該
+        阻擋清理,不然「已取消」的舊紀錄會被誤判成「還在等待」而永遠清不掉,
+        跟已取消也該正常被清理的設計互相矛盾
     """
     retention_days = int(retention_days)  # 防止SQL injection,確定是整數才拼進SQL
     return (
         f"created_at < (NOW() - INTERVAL {retention_days} DAY) "
-        f"AND command_uuid NOT IN (SELECT command_uuid FROM enrollment_queue WHERE active = 1)"
+        f"AND command_uuid NOT IN ("
+        f"SELECT eq.command_uuid FROM enrollment_queue eq "
+        f"LEFT JOIN command_results cr ON cr.command_uuid = eq.command_uuid AND cr.id = eq.id "
+        f"WHERE cr.id IS NULL AND eq.active = 1"
+        f")"
     )
 
 
@@ -1332,7 +1362,7 @@ def lookup_vpp_app_info(vpp_cache_path, adam_id=None, bundle_id=None):
     return None
 
 
-def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, request_type=None, status=None, limit=500):
+def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, request_type=None, status=None, limit=1000):
     """查詢「所有裝置」的指令派送與回應紀錄(不像query_command_history限定單一enrollment)。
     給[系統紀錄]裡的「指派命令紀錄」彙整表用。
 
@@ -1365,8 +1395,14 @@ def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, reque
     if status:
         safe_status = status.replace("'", "''")
         if status == "__pending__":
-            # 特殊值:代表「尚未有回應(仍在排隊等待中)」,對應status欄位是NULL的情況
-            where_clauses.append("status IS NULL")
+            # 特殊值:代表「真的還在排隊等待回應中」,必須同時符合status為NULL
+            # 且active=1兩個條件——如果只看status IS NULL,會把「已經被取消」的舊紀錄
+            # (active=0但status同樣是NULL)也混進來,造成畫面上分不清哪些是真的在等、
+            # 哪些其實已經處理過了
+            where_clauses.append("status IS NULL AND active = 1")
+        elif status == "__cancelled__":
+            # 特殊值:代表「已經被取消」,同樣是status為NULL,但active=0
+            where_clauses.append("status IS NULL AND active = 0")
         else:
             where_clauses.append(f"status = '{safe_status}'")
 

@@ -77,12 +77,19 @@ PAYLOAD_SCHEMA = {
         ],
     },
     "shareddevice": {
-        "label": "共用裝置資訊 (需裝置為 Supervised 狀態)",
+        "label": "鎖定螢幕訊息 / 共用裝置資訊 (需裝置為 Supervised 狀態)",
         "payload_type": "com.apple.shareddeviceconfiguration",
         "singular": True,
         "fields": [
-            {"name": "AssetTagInformation", "label": "資產標籤資訊", "type": "text", "default": ""},
-            {"name": "IfLostReturnToMessage", "label": "遺失時顯示訊息", "type": "text", "default": ""},
+            {"name": "AssetTagInformation", "label": "資產標籤資訊(顯示在鎖定畫面上)", "type": "text", "default": ""},
+            {
+                "name": "IfLostReturnToMessage",
+                "label": "鎖定螢幕下方訊息(Lock Screen Footnote)",
+                "type": "text", "default": "",
+                "help": "顯示在裝置登入畫面與鎖定畫面下方的文字,例如「如拾獲請聯繫OO國小資訊組 04-XXXXXXX」。"
+                        "Apple 官方把這個功能稱作「Lock Screen footnote」,實際存進描述檔的鍵值叫"
+                        "IfLostReturnToMessage,兩者是同一件事。",
+            },
         ],
     },
     "restrictions": {
@@ -120,6 +127,37 @@ PAYLOAD_SCHEMA = {
             {"name": "forceClassroomAutomaticallyJoinClasses", "label": "強制自動加入課堂 (Classroom)", "type": "checkbox", "default": True},
             {"name": "forceClassroomUnpromptedAppAndDeviceLock", "label": "允許 Classroom 直接鎖定裝置/App(免詢問)", "type": "checkbox", "default": True},
             {"name": "forceClassroomUnpromptedScreenObservation", "label": "允許 Classroom 直接查看螢幕(免詢問)", "type": "checkbox", "default": True},
+            {
+                "name": "blockedAppBundleIDs", "label": "原生 App 限制", "type": "app_checklist", "default": [],
+                "help": "勾選後將會限制使用(App 會被隱藏、無法啟動)。只對監管模式(Supervised)的裝置生效,"
+                        "透過 DEP/ASM 自動註冊的裝置預設就是監管模式。「設定」App 是 Apple 系統層級的限制,"
+                        "無法被隱藏,不會列在下面的選項裡。「遊戲」對應的是 2025 年(iOS/iPadOS 26)才推出的"
+                        "全新 Games App;獨立的「Game Center」App 其實從 2016 年(iOS 10)就已經被移除,"
+                        "功能併入「設定」裡,所以沒有獨立的 Bundle ID 可以封鎖——如果這裡勾選「遊戲」後"
+                        "還是沒有效果,可能是裝置的 iOS 版本較舊、還沒有這個新 App,或是 Apple 對這個較新的"
+                        "系統 App 尚未完全開放透過限制清單封鎖(已知有其他管理者回報過這個狀況),建議勾選後"
+                        "實際到裝置上測試確認。跟上方「允許 Game Center」開關是兩個獨立的設定,請避免"
+                        "兩邊互相矛盾(例如一邊開著卻又勾選這裡禁用)。「電話」App 只有 iPhone 才有,"
+                        "iPad 沒有電話功能,在 iPad 上勾選這個不會有任何效果。",
+                "options": [
+                    {"bundle_id": "com.apple.stocks", "label": "股市"},
+                    {"bundle_id": "com.apple.Health", "label": "健康"},
+                    {"bundle_id": "com.apple.tips", "label": "提示"},
+                    {"bundle_id": "com.apple.podcasts", "label": "Podcast"},
+                    {"bundle_id": "com.apple.Music", "label": "音樂"},
+                    {"bundle_id": "com.apple.tv", "label": "TV"},
+                    {"bundle_id": "com.apple.Home", "label": "家庭"},
+                    {"bundle_id": "com.apple.games", "label": "遊戲"},
+                    {"bundle_id": "com.apple.iBooks", "label": "書籍"},
+                    {"bundle_id": "com.apple.MobileSMS", "label": "訊息"},
+                    {"bundle_id": "com.apple.reminders", "label": "提醒事項"},
+                    {"bundle_id": "com.apple.journal", "label": "日誌"},
+                    {"bundle_id": "com.apple.MobileAddressBook", "label": "聯絡人"},
+                    {"bundle_id": "com.apple.mobilephone", "label": "電話"},
+                    {"bundle_id": "com.apple.facetime", "label": "FaceTime"},
+                    {"bundle_id": "com.apple.MobileStore", "label": "iTunes Store"},
+                ],
+            },
         ],
     },
 }
@@ -452,7 +490,13 @@ def _build_restrictions_payload(fields, payload_uuid, identifier_prefix):
     }
     for field in PAYLOAD_SCHEMA["restrictions"]["fields"]:
         fname = field["name"]
-        payload[fname] = bool(fields.get(fname, field["default"]))
+        if field["type"] == "app_checklist":
+            # 陣列型別,不能用bool()強制轉換(非空陣列會被誤判成True,空陣列被誤判成False,
+            # 完全不是原本要存的陣列內容),直接存成list
+            value = fields.get(fname, field["default"])
+            payload[fname] = list(value) if value else []
+        else:
+            payload[fname] = bool(fields.get(fname, field["default"]))
     return payload
 
 

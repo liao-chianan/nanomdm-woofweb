@@ -190,6 +190,8 @@ document.addEventListener("DOMContentLoaded", () => {
 // 指派命令紀錄(彙整所有裝置的回應紀錄)
 // ---------------------------------------------------------------------------
 let commandFilterValues = { search: "", group: "", request_type: "", status: "" };
+let selectedCommandItems = new Map(); // key: "enrollment_id::command_uuid", value: actionType("cancel"/"resend")
+let lastCommandRows = []; // 快取最後一次從API抓到的原始資料,排序時不用重新打API,純前端重新排列即可
 
 function renderCommandFilters(filterOptions) {
   const container = document.getElementById("log-filters-container");
@@ -232,28 +234,54 @@ function renderCommandFilters(filterOptions) {
   buildSelect("裝置群組", "group", filterOptions.groups.map(g => ({ value: g, label: g })));
   buildSelect("命令類別", "request_type", filterOptions.request_types.map(t => ({ value: t, label: t })));
   buildSelect("命令狀態", "status", filterOptions.statuses.map(s => ({
-    value: s, label: s === "__pending__" ? "等待中" : s,
+    value: s,
+    label: s === "__pending__" ? "等待中" : s === "__cancelled__" ? "已取消" : s,
   })));
 }
 
-function commandStatusBadge(status) {
-  if (!status) return `<span class="badge warn">等待中</span>`;
+function commandStatusBadge(status, active) {
+  if (!status) {
+    // status是空的,代表裝置還沒有回應過。但這不代表「還在排隊等待中」——
+    // 如果active已經是0(通常是被「取消命令」設定的),代表這筆已經被取消掉了,
+    // 只是沒有明確的status可以標記,不能再顯示「等待中」這種容易誤導的標籤
+    return active
+      ? `<span class="badge warn">等待中</span>`
+      : `<span class="badge" style="background:#e5e7eb; color:#6b7280;">已取消</span>`;
+  }
   const map = { Acknowledged: "ok", Error: "warn", NotNow: "warn", Idle: "ok", CommandFormatError: "warn" };
   const cls = map[status] || "warn";
   return `<span class="badge ${cls}">${escapeHtml(status)}</span>`;
 }
 
+// 指派命令紀錄的欄位定義,給排序功能用。勾選框、回應內容(展開按鈕)、操作(按鈕)
+// 這三欄不是可排序的單一資料值,不列進來。
+const COMMAND_TABLE_COLUMNS = [
+  { key: "serial_number", label: "裝置序號", type: "text" },
+  { key: "group", label: "裝置群組", type: "text" },
+  { key: "device_name", label: "裝置名稱", type: "text" },
+  { key: "request_type", label: "命令類別", type: "text" },
+  { key: "status", label: "命令狀態", type: "text" },
+];
+const COMMAND_TABLE_COLUMNS_AFTER_RESULT = [
+  { key: "created_at", label: "時間", type: "text" },
+  { key: "enrollment_id", label: "裝置佈署 ID", type: "text" },
+];
+const commandSorter = createTableSorter();
+
 function renderCommandTableHeader() {
   const thead = document.getElementById("logs-thead");
+  const beforeResultCells = COMMAND_TABLE_COLUMNS
+    .map((col) => `<th style="cursor:pointer;" data-sort-key="${col.key}">${escapeHtml(col.label)}${commandSorter.sortArrow(col.key)}</th>`)
+    .join("");
+  const afterResultCells = COMMAND_TABLE_COLUMNS_AFTER_RESULT
+    .map((col) => `<th style="cursor:pointer;" data-sort-key="${col.key}">${escapeHtml(col.label)}${commandSorter.sortArrow(col.key)}</th>`)
+    .join("");
   thead.innerHTML = `
     <tr>
-      <th>裝置序號</th>
-      <th>裝置群組</th>
-      <th>裝置名稱</th>
-      <th>命令類別</th>
-      <th>命令狀態</th>
+      <th style="width:32px;"><input type="checkbox" id="command-select-all-checkbox"></th>
+      ${beforeResultCells}
       <th>回應內容</th>
-      <th>時間</th>
+      ${afterResultCells}
       <th>操作</th>
     </tr>
   `;
@@ -261,11 +289,14 @@ function renderCommandTableHeader() {
 
 function renderCommandTableBody(rows) {
   const tbody = document.getElementById("logs-tbody");
-  document.getElementById("log-count-info").textContent = `顯示 ${rows.length} 筆(最多顯示最近500筆)`;
+  document.getElementById("log-count-info").textContent = `顯示 ${rows.length} 筆(最多顯示最近1000筆)`;
+
+  selectedCommandItems.clear();
+  updateBatchActionsUI();
 
   tbody.innerHTML = "";
   if (rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8">沒有符合條件的紀錄</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10">沒有符合條件的紀錄</td></tr>`;
     return;
   }
 
@@ -287,23 +318,32 @@ function renderCommandTableBody(rows) {
       ? `<button class="secondary command-expand-btn" type="button" style="font-size:12px;" data-content="${encodeURIComponent(row.raw_result)}">展開查看</button>`
       : `<span style="color:#9ca3af; font-size:12px;">(無內容)</span>`;
 
+    // actionType決定這一列可以做什麼批次操作:pending狀態才能批次取消,Error狀態才能批次重新派送,
+    // 其他狀態(已經正常完成等)不適用任何批次操作,不顯示勾選框
+    let actionType = "none";
     let actionHtml = "";
     if (row.status === null && row.active) {
-      // 尚未完成(仍在排隊等待中):提供取消按鈕
+      actionType = "cancel";
       actionHtml = `<button class="secondary command-cancel-btn" type="button" style="font-size:12px;" data-eid="${escapeHtml(row.enrollment_id)}" data-uuid="${escapeHtml(row.command_uuid)}">取消命令</button>`;
     } else if (row.status === "Error" || row.status === "CommandFormatError") {
-      // 發生錯誤:提供重新派送按鈕
+      actionType = "resend";
       actionHtml = `<button class="secondary command-resend-btn" type="button" style="font-size:12px;" data-eid="${escapeHtml(row.enrollment_id)}" data-uuid="${escapeHtml(row.command_uuid)}">重新派送</button>`;
     }
 
+    const checkboxHtml = actionType !== "none"
+      ? `<input type="checkbox" class="command-row-checkbox" data-eid="${escapeHtml(row.enrollment_id)}" data-uuid="${escapeHtml(row.command_uuid)}" data-action-type="${actionType}">`
+      : "";
+
     tr.innerHTML = `
+      <td>${checkboxHtml}</td>
       <td style="font-family:var(--mono); font-size:12px;">${escapeHtml(row.serial_number || "")}</td>
       <td style="font-size:12px;">${escapeHtml(row.group || "")}</td>
       <td style="font-size:12px;">${escapeHtml(row.device_name || "")}</td>
       <td style="font-size:12px;">${requestTypeHtml}</td>
-      <td>${commandStatusBadge(row.status)}</td>
+      <td>${commandStatusBadge(row.status, row.active)}</td>
       <td>${resultPreview}</td>
       <td style="font-family:var(--mono); font-size:12px;">${escapeHtml(row.result_updated_at || row.created_at || "")}</td>
+      <td style="font-family:var(--mono); font-size:11px; color:#9ca3af;">${escapeHtml(row.enrollment_id || "")}</td>
       <td>${actionHtml}</td>
     `;
     tbody.appendChild(tr);
@@ -312,7 +352,7 @@ function renderCommandTableBody(rows) {
 
 async function loadCommandLogs() {
   const tbody = document.getElementById("logs-tbody");
-  tbody.innerHTML = `<tr><td colspan="8">載入中...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="10">載入中...</td></tr>`;
   document.getElementById("log-retention-info").textContent = "";
 
   const params = new URLSearchParams();
@@ -323,13 +363,22 @@ async function loadCommandLogs() {
 
   const res = await apiFetch(`/api/system-logs/commands?${params.toString()}`);
   if (!res.ok) {
-    tbody.innerHTML = `<tr><td colspan="8" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
     return;
   }
 
   renderCommandTableHeader();
   renderCommandFilters(res.data.filter_options);
-  renderCommandTableBody(res.data.rows);
+  lastCommandRows = res.data.rows;
+  resortAndRenderCommandRows();
+}
+
+function resortAndRenderCommandRows() {
+  const sortedRows = commandSorter.sortRows(
+    lastCommandRows,
+    [...COMMAND_TABLE_COLUMNS, ...COMMAND_TABLE_COLUMNS_AFTER_RESULT],
+  );
+  renderCommandTableBody(sortedRows);
 }
 
 async function cancelCommand(enrollmentId, commandUuid) {
@@ -358,6 +407,102 @@ async function resendCommand(enrollmentId, commandUuid) {
   }
 }
 
+function updateBatchActionsUI() {
+  const container = document.getElementById("batch-actions-container");
+  const cancelCount = [...selectedCommandItems.values()].filter(t => t === "cancel").length;
+  const resendCount = [...selectedCommandItems.values()].filter(t => t === "resend").length;
+
+  const parts = [];
+  if (cancelCount > 0) {
+    parts.push(`<button id="batch-cancel-btn" class="danger" type="button" style="font-size:12px;">批次取消所選(${cancelCount})</button>`);
+  }
+  if (resendCount > 0) {
+    parts.push(`<button id="batch-resend-btn" type="button" style="font-size:12px;">批次重新派送所選(${resendCount})</button>`);
+  }
+  container.innerHTML = parts.join(" ");
+
+  const cancelBtn = document.getElementById("batch-cancel-btn");
+  if (cancelBtn) cancelBtn.addEventListener("click", batchCancelSelected);
+  const resendBtn = document.getElementById("batch-resend-btn");
+  if (resendBtn) resendBtn.addEventListener("click", batchResendSelected);
+}
+
+function toggleCommandCheckbox(checkbox) {
+  const key = `${checkbox.dataset.eid}::${checkbox.dataset.uuid}`;
+  if (checkbox.checked) {
+    selectedCommandItems.set(key, checkbox.dataset.actionType);
+  } else {
+    selectedCommandItems.delete(key);
+  }
+  updateBatchActionsUI();
+}
+
+function toggleSelectAllCommandCheckboxes(checked) {
+  document.querySelectorAll(".command-row-checkbox").forEach((cb) => {
+    cb.checked = checked;
+    toggleCommandCheckbox(cb);
+  });
+}
+
+async function runBatchOperation(actionType, apiPath, confirmMessage, titleWord) {
+  const items = [...selectedCommandItems.entries()].filter(([, type]) => type === actionType);
+  if (items.length === 0) return;
+  if (!confirm(confirmMessage.replace("{n}", items.length))) return;
+
+  document.getElementById("batch-progress-title").textContent = `批次${titleWord}中...`;
+  document.getElementById("batch-progress-bar").style.width = "0%";
+  document.getElementById("batch-progress-text").textContent = `準備處理 ${items.length} 筆...`;
+  document.getElementById("batch-progress-errors").innerHTML = "";
+  document.getElementById("batch-progress-close-btn").style.display = "none";
+  openModal("batch-progress-modal");
+
+  let successCount = 0;
+  const errors = [];
+
+  for (let i = 0; i < items.length; i++) {
+    const [key] = items[i];
+    const [enrollmentId, commandUuid] = key.split("::");
+
+    const res = await apiFetchJSON(apiPath, "POST", {
+      enrollment_id: enrollmentId, command_uuid: commandUuid,
+    });
+
+    if (res.ok) {
+      successCount++;
+    } else {
+      errors.push(`${commandUuid}: ${(res.data && res.data.message) || "未知錯誤"}`);
+    }
+
+    const progressPct = Math.round(((i + 1) / items.length) * 100);
+    document.getElementById("batch-progress-bar").style.width = `${progressPct}%`;
+    document.getElementById("batch-progress-text").textContent = `已處理 ${i + 1}/${items.length}(成功 ${successCount},失敗 ${errors.length})`;
+  }
+
+  document.getElementById("batch-progress-title").textContent = `批次${titleWord}完成`;
+  if (errors.length > 0) {
+    document.getElementById("batch-progress-errors").innerHTML =
+      `<strong>失敗項目:</strong><br>` + errors.map(e => escapeHtml(e)).join("<br>");
+  }
+  document.getElementById("batch-progress-close-btn").style.display = "";
+
+  selectedCommandItems.clear();
+  loadCommandLogs();
+}
+
+async function batchCancelSelected() {
+  await runBatchOperation(
+    "cancel", "/api/system-logs/commands/cancel",
+    "確定要批次取消這 {n} 筆尚未完成的指令嗎?裝置之後就不會再收到這些指令了。", "取消",
+  );
+}
+
+async function batchResendSelected() {
+  await runBatchOperation(
+    "resend", "/api/system-logs/commands/resend",
+    "確定要批次重新派送這 {n} 筆指令嗎?會用跟原本完全相同的內容,分別再送一次給對應的裝置。", "重新派送",
+  );
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("logs-tbody").addEventListener("click", (e) => {
     if (e.target.classList.contains("command-expand-btn")) {
@@ -369,5 +514,30 @@ document.addEventListener("DOMContentLoaded", () => {
     } else if (e.target.classList.contains("command-resend-btn")) {
       resendCommand(e.target.dataset.eid, e.target.dataset.uuid);
     }
+  });
+
+  document.getElementById("logs-tbody").addEventListener("change", (e) => {
+    if (e.target.classList.contains("command-row-checkbox")) {
+      toggleCommandCheckbox(e.target);
+    }
+  });
+
+  document.getElementById("logs-thead").addEventListener("change", (e) => {
+    if (e.target.id === "command-select-all-checkbox") {
+      toggleSelectAllCommandCheckboxes(e.target.checked);
+    }
+  });
+
+  document.getElementById("logs-thead").addEventListener("click", (e) => {
+    if (currentLogType !== "commands") return;
+    const th = e.target.closest("th");
+    if (!th || !th.dataset.sortKey) return;
+    commandSorter.handleHeaderClick(th.dataset.sortKey);
+    renderCommandTableHeader();
+    resortAndRenderCommandRows();
+  });
+
+  document.getElementById("batch-progress-close-btn").addEventListener("click", () => {
+    closeModal("batch-progress-modal");
   });
 });

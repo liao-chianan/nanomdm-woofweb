@@ -4,6 +4,30 @@ let currentCommandSerial = null;
 let groupNamesList = [];
 let allDeviceRows = [];
 
+// 裝置列表的欄位定義,給排序功能用。派送命令欄位是操作按鈕不是資料,不列進來(不能排序)。
+const DEVICES_TABLE_COLUMNS = [
+  { key: "seq", label: "流水號", type: "number" },
+  { key: "device_name", label: "裝置名稱", type: "text" },
+  { key: "group", label: "群組", type: "text" },
+  { key: "serial_number", label: "裝置序號", type: "text" },
+  { key: "wifi_mac", label: "WIFI MAC", type: "text" },
+  { key: "battery_level", label: "電量", type: "number" },
+  { key: "device_capacity", label: "容量", type: "number" },
+  { key: "os_version", label: "作業系統", type: "text" },
+  { key: "ip_address", label: "IP 位址", type: "text" },
+  { key: "last_seen_at", label: "最後同步", type: "text" },
+  { key: "enrollment_id", label: "佈署 ID", type: "text" },
+];
+const devicesSorter = createTableSorter();
+
+function renderDevicesTableHeader() {
+  const thead = document.getElementById("devices-thead");
+  const cells = DEVICES_TABLE_COLUMNS
+    .map((col) => `<th style="cursor:pointer;" data-sort-key="${col.key}">${escapeHtml(col.label)}${devicesSorter.sortArrow(col.key)}</th>`)
+    .join("");
+  thead.innerHTML = `<tr>${cells}<th>派送命令</th></tr>`;
+}
+
 async function loadGroupNames() {
   const res = await apiFetch("/api/groups");
   if (res.ok) {
@@ -275,7 +299,7 @@ function applyDevicesFilters() {
   const groupFilter = document.getElementById("devices-filter-group").value;
   const searchText = document.getElementById("devices-filter-search").value.trim().toLowerCase();
 
-  const filtered = allDeviceRows.filter((row) => {
+  let filtered = allDeviceRows.filter((row) => {
     if (groupFilter === "__none__" && row.group) return false;
     if (groupFilter && groupFilter !== "__none__" && row.group !== groupFilter) return false;
     if (searchText) {
@@ -285,6 +309,9 @@ function applyDevicesFilters() {
     return true;
   });
 
+  filtered = devicesSorter.sortRows(filtered, DEVICES_TABLE_COLUMNS);
+
+  renderDevicesTableHeader();
   const tbody = document.getElementById("devices-tbody");
   tbody.innerHTML = "";
   if (filtered.length === 0) {
@@ -711,6 +738,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("command-send-btn").addEventListener("click", sendCommand);
   document.getElementById("devices-filter-group").addEventListener("change", applyDevicesFilters);
   document.getElementById("devices-filter-search").addEventListener("input", applyDevicesFilters);
+
+  document.getElementById("devices-thead").addEventListener("click", (e) => {
+    const th = e.target.closest("th");
+    if (!th || !th.dataset.sortKey) return;
+    devicesSorter.handleHeaderClick(th.dataset.sortKey);
+    applyDevicesFilters();
+  });
 
   document.getElementById("devices-tbody").addEventListener("click", (e) => {
     const tr = e.target.closest("tr");

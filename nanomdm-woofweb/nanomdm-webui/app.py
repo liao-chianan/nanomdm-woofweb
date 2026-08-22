@@ -400,7 +400,7 @@ def api_system_logs_commands():
         enrollment_ids=enrollment_ids_filter,
         request_type=request_type_filter or None,
         status=status_filter or None,
-        limit=500,
+        limit=1000,
     )
     if rc != 0:
         return jsonify({"ok": False, "message": err}), 500
@@ -436,7 +436,7 @@ def api_system_logs_commands():
         "filter_options": {
             "groups": groups_available,
             "request_types": sorted(COMMAND_DEFS.keys()),
-            "statuses": ["__pending__", "Acknowledged", "NotNow", "Error", "CommandFormatError", "Idle"],
+            "statuses": ["__pending__", "__cancelled__", "Acknowledged", "NotNow", "Error", "CommandFormatError", "Idle"],
         },
     })
 
@@ -480,7 +480,7 @@ def api_system_logs_commands_resend():
     # 那次一模一樣。只是send_mdm_command內部會自動配上一組全新的CommandUUID
     # (沿用舊的UUID會跟資料庫裡的唯一鍵衝突)。
     rows, rc, err = utils.query_all_command_history(
-        CFG["mysql"], db_password, enrollment_ids=[enrollment_id], limit=500,
+        CFG["mysql"], db_password, enrollment_ids=[enrollment_id], limit=1000,
     )
     if rc != 0:
         return jsonify({"ok": False, "message": f"查詢原始指令失敗: {err}"}), 500
@@ -3500,7 +3500,9 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
     env = get_env_dict()
     db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
 
+    step_started = datetime.datetime.now()
     devices, rc, _, err = utils.query_devices_from_mysql(CFG["mysql"], db_password)
+    print(f"[裝置狀態排程]   查詢裝置清單完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒,共 {len(devices) if devices else 0} 台")
     if rc != 0:
         return False, err, 0
     serial_by_enrollment_id = {d["enrollment_id"]: d["serial_number"] for d in devices}
@@ -3512,34 +3514,57 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
         _, di_params = build_mdm_command_params("DeviceInformation", {})
         _, aou_params = build_mdm_command_params("AvailableOSUpdates", {})
 
-        # 查一次目前所有裝置有哪些(裝置,指令類型)組合還卡在active=1佇列裡沒被處理完。
-        # 派送每一種查詢指令前,先確認該裝置的這個類型是不是已經pending,是的話跳過這次派送,
-        # 不重複疊加——這是為了修正實際發生過的問題:對長時間離線的裝置每10分鐘無條件
-        # 重新派送同類型查詢指令,導致enrollment_queue/commands資料表無限累積。
+        # 查一次目前所有裝置有哪些(裝置,指令類型)組合還卡在active=1佇列裡沒被處理完,
+        # 以及每筆pending紀錄是什麼時候建立的。
+        # 派送每一種查詢指令前,先確認該裝置的這個類型是不是「最近才送出、還在等回應」,
+        # 是的話跳過這次派送,不重複疊加——這是為了修正實際發生過的問題:對長時間離線的
+        # 裝置每10分鐘無條件重新派送同類型查詢指令,導致enrollment_queue/commands資料表
+        # 無限累積。但如果pending的那筆已經卡了超過pending_retry_threshold_minutes
+        # 分鐘還沒解決,視為「這筆多半已經沒有意義了」,重新嘗試送一次新的——避免裝置一旦
+        # 離線超過一次排程週期就被永久放棄追蹤,即使裝置後來已經恢復連線也不會再被查詢。
+        step_started = datetime.datetime.now()
         pending_queries = utils.get_pending_status_query_types(CFG["mysql"], db_password)
+        print(f"[裝置狀態排程]   查詢pending清單完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒,共 {len(pending_queries)} 筆")
+        retry_threshold_minutes = CFG["devices_status_cache"].get("pending_retry_threshold_minutes", 180)
 
+        def _should_send_query(eid, request_type):
+            key = (eid, request_type)
+            if key not in pending_queries:
+                return True  # 沒有pending紀錄,正常送出
+            created_at_str = pending_queries[key]
+            try:
+                created_at = datetime.datetime.strptime(created_at_str, "%Y-%m-%d %H:%M:%S")
+                age_minutes = (datetime.datetime.now() - created_at).total_seconds() / 60
+                return age_minutes > retry_threshold_minutes  # 卡太久了,視為過期,重新嘗試
+            except (ValueError, TypeError):
+                return False  # 時間格式解析失敗,保守起見維持原本「已經pending,不重送」的行為
+
+        step_started = datetime.datetime.now()
         for d in devices:
             try:
                 eid = d["enrollment_id"]
-                if (eid, "DeviceInformation") not in pending_queries:
+                if _should_send_query(eid, "DeviceInformation"):
                     utils.send_mdm_command(base_url, api_user, api_key, eid, "DeviceInformation", di_params)
-                if (eid, "AvailableOSUpdates") not in pending_queries:
+                if _should_send_query(eid, "AvailableOSUpdates"):
                     utils.send_mdm_command(base_url, api_user, api_key, eid, "AvailableOSUpdates", aou_params)
-                if (eid, "OSUpdateStatus") not in pending_queries:
+                if _should_send_query(eid, "OSUpdateStatus"):
                     utils.send_mdm_command(base_url, api_user, api_key, eid, "OSUpdateStatus", {})
                 # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,
                 # 沒開遺失模式的裝置送DeviceLocation一定會失敗,不用浪費請求
                 old_row = existing_cache_before.get(d["serial_number"], {})
-                if old_row.get("lost_mode_enabled") == "true" and (eid, "DeviceLocation") not in pending_queries:
+                if old_row.get("lost_mode_enabled") == "true" and _should_send_query(eid, "DeviceLocation"):
                     utils.send_mdm_command(base_url, api_user, api_key, eid, "DeviceLocation", {})
             except Exception:
                 continue  # 個別裝置排入失敗不該影響整批
+        print(f"[裝置狀態排程]   派送查詢指令完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
 
     # 稍等一下,讓在線上的裝置有機會立刻處理推播、回應查詢(非強制,只是盡量提高這次就抓到新資料的機會)
     if wait_for_response_seconds > 0:
         time.sleep(wait_for_response_seconds)
 
+    step_started = datetime.datetime.now()
     status_rows, rc2, err2 = utils.query_all_devices_latest_status(CFG["mysql"], db_password)
+    print(f"[裝置狀態排程]   查詢最新狀態完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
     if rc2 != 0:
         return False, err2, 0
 
@@ -3574,11 +3599,15 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
 
 def _devices_status_scheduler_loop():
     while True:
+        started_at = datetime.datetime.now()
         try:
+            print(f"[裝置狀態排程] 開始執行,時間: {started_at.strftime('%Y-%m-%d %H:%M:%S')}")
             ok, msg, count = refresh_devices_status_cache_once()
-            print(f"[裝置狀態排程] {'完成,共 ' + str(count) + ' 台裝置有資料' if ok else '失敗: ' + str(msg)}")
+            elapsed = (datetime.datetime.now() - started_at).total_seconds()
+            print(f"[裝置狀態排程] {'完成,共 ' + str(count) + ' 台裝置有資料' if ok else '失敗: ' + str(msg)}(耗時 {elapsed:.1f} 秒)")
         except Exception as e:
-            print(f"[裝置狀態排程] 發生例外: {e}")
+            elapsed = (datetime.datetime.now() - started_at).total_seconds()
+            print(f"[裝置狀態排程] 發生例外: {e}(耗時 {elapsed:.1f} 秒)")
         time.sleep(CFG["devices_status_cache"]["refresh_interval_seconds"])
 
 
@@ -4201,8 +4230,12 @@ def api_sysstatus_mysql():
             "db_password": db_password,
         })
 
-    data, errors = utils_sysstatus.get_mysql_database_stats(db_configs)
-    return jsonify({"ok": True, "data": data, "errors": missing_config_messages + errors})
+    exact = request.args.get("exact") == "1"
+    if exact:
+        data, errors = utils_sysstatus.get_mysql_database_stats_exact(db_configs)
+    else:
+        data, errors = utils_sysstatus.get_mysql_database_stats(db_configs)
+    return jsonify({"ok": True, "data": data, "errors": missing_config_messages + errors, "exact": exact})
 
 
 @app.route("/api/sysstatus/static-files")

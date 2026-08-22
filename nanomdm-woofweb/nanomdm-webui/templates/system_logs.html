@@ -21,7 +21,10 @@
 
   <div id="log-filters-container" style="display:flex; gap:12px; align-items:center; margin-bottom:14px; flex-wrap:wrap;"></div>
 
-  <div style="font-size:12px; color:#9ca3af; margin-bottom:8px;" id="log-count-info"></div>
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+    <div style="font-size:12px; color:#9ca3af;" id="log-count-info"></div>
+    <div id="batch-actions-container"></div>
+  </div>
 
   <table class="data-table" id="logs-table">
     <thead id="logs-thead"></thead>
@@ -36,6 +39,18 @@
     <span class="modal-close" onclick="closeModal('command-result-modal')">✕</span>
     <h3>回應內容</h3>
     <pre id="command-result-modal-content" style="background:#0d1117; color:#c9d1d9; padding:14px; border-radius:6px; max-height:500px; overflow-y:auto; font-size:12px; white-space:pre-wrap; word-break:break-all;"></pre>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="batch-progress-modal">
+  <div class="modal-box" style="width:500px;">
+    <h3 id="batch-progress-title">批次處理中...</h3>
+    <div style="background:#e5e7eb; border-radius:6px; height:20px; overflow:hidden; margin:12px 0;">
+      <div id="batch-progress-bar" style="background:#2563eb; height:100%; width:0%; transition:width 0.2s;"></div>
+    </div>
+    <p id="batch-progress-text" style="font-size:13px; color:#6b7280;">準備中...</p>
+    <div id="batch-progress-errors" style="max-height:180px; overflow-y:auto; font-size:12px; color:#b42318; margin-top:8px;"></div>
+    <button id="batch-progress-close-btn" type="button" style="margin-top:10px; display:none;">關閉</button>
   </div>
 </div>
 

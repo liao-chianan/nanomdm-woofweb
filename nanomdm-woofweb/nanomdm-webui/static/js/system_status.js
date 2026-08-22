@@ -155,10 +155,11 @@ async function restartSystemdService(name) {
 // ---------------------------------------------------------------------------
 // MySQL
 // ---------------------------------------------------------------------------
-async function loadMysqlStatus() {
+async function loadMysqlStatus(exact) {
   const container = document.getElementById("mysql-status-container");
-  container.innerHTML = "載入中...";
-  const res = await apiFetch("/api/sysstatus/mysql");
+  container.innerHTML = exact ? "精確計算中,資料表較多時可能需要幾秒..." : "載入中...";
+  const url = exact ? "/api/sysstatus/mysql?exact=1" : "/api/sysstatus/mysql";
+  const res = await apiFetch(url);
   if (!res.ok) {
     container.innerHTML = `<p style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
     return;
@@ -167,7 +168,23 @@ async function loadMysqlStatus() {
     container.innerHTML = `<p style="color:#9ca3af;">沒有查到任何資料庫</p>`;
     return;
   }
+  const rowsLabel = exact ? "精確筆數" : "估計筆數";
   let html = "";
+  if (exact) {
+    html += `
+      <p style="font-size:12px; color:#166534; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; padding:8px 12px; margin-bottom:10px;">
+        ✅ 以下是即時精確查詢結果(真正的 COUNT(*)),不是估計值。
+      </p>
+    `;
+  } else {
+    html += `
+      <p style="font-size:12px; color:#6b7280; margin-bottom:10px;">
+        「估計筆數」來自 MySQL 內部統計資訊,不是即時精確查詢(這樣載入速度才夠快)。
+        執行大量刪除(例如指令歷史清理)後,這個估計值不會立刻更新,可能要過一段時間才會反映最新狀態,
+        這不代表刪除沒有生效。如果想立刻看到精確數字,可以按上方「重新整理(精確筆數)」按鈕。
+      </p>
+    `;
+  }
   if (res.data.errors && res.data.errors.length > 0) {
     html += `<div style="background:#fef3c7; border:1px solid #fde68a; border-radius:6px; padding:8px 12px; margin-bottom:12px; font-size:12px;">
       ⚠️ 部分資料庫查詢失敗(可能是 .env 裡的密碼設定還沒對應到,或帳號權限不足):<br>
@@ -179,7 +196,7 @@ async function loadMysqlStatus() {
       <div style="margin-bottom:16px;">
         <h3 style="margin-bottom:6px;">${escapeHtml(db.database)} <span style="color:#9ca3af; font-size:12px; font-weight:normal;">(共 ${db.total_rows.toLocaleString()} 筆資料)</span></h3>
         <table class="data-table">
-          <thead><tr><th>資料表</th><th>用途</th><th>估計筆數</th><th>大小 (MB)</th></tr></thead>
+          <thead><tr><th>資料表</th><th>用途</th><th>${rowsLabel}</th><th>大小 (MB)</th></tr></thead>
           <tbody>
             ${db.tables.map((t) => `<tr><td style="font-family:var(--mono); font-size:12px;">${escapeHtml(t.table)}</td><td style="font-size:12px; color:#6b7280;">${escapeHtml(t.purpose)}</td><td>${t.rows.toLocaleString()}</td><td>${t.size_mb}</td></tr>`).join("")}
           </tbody>
@@ -258,10 +275,12 @@ async function loadStaticFilesStatus() {
 
   if (d.unaccounted_files && d.unaccounted_files.length > 0) {
     html += `
-      <div style="background:#fef3c7; border:1px solid #fde68a; border-radius:6px; padding:10px 14px; margin-top:16px; font-size:12px;">
-        ⚠️ 部署目錄裡發現以下檔案,不在上面任何已知清單裡,可能是遺漏未列入管理、或是暫存/備份檔案,建議確認一下:<br>
-        ${d.unaccounted_files.map((f) => `<span style="font-family:var(--mono);">${escapeHtml(f)}</span>`).join("<br>")}
-      </div>
+      <details style="background:#fef3c7; border:1px solid #fde68a; border-radius:6px; padding:10px 14px; margin-top:16px; font-size:12px;">
+        <summary style="cursor:pointer; font-weight:600;">⚠️ 部署目錄中其他檔案(${d.unaccounted_files.length} 個)</summary>
+        <div style="margin-top:8px;">
+          ${d.unaccounted_files.map((f) => `<span style="font-family:var(--mono);">${escapeHtml(f)}</span>`).join("<br>")}
+        </div>
+      </details>
     `;
   } else {
     html += `<p style="color:#9ca3af; font-size:12px; margin-top:12px;">✅ 部署目錄裡沒有發現未列入清單的檔案</p>`;
@@ -274,12 +293,13 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSystemStatus();
   loadDockerStatus();
   loadSystemdStatus();
-  loadMysqlStatus();
+  loadMysqlStatus(false);
   loadStaticFilesStatus();
   loadCleanupSettings();
 
   document.getElementById("refresh-system-btn").addEventListener("click", loadSystemStatus);
-  document.getElementById("refresh-mysql-btn").addEventListener("click", loadMysqlStatus);
+  document.getElementById("refresh-mysql-btn").addEventListener("click", () => loadMysqlStatus(false));
+  document.getElementById("refresh-mysql-exact-btn").addEventListener("click", () => loadMysqlStatus(true));
   document.getElementById("refresh-static-files-btn").addEventListener("click", loadStaticFilesStatus);
   document.getElementById("cleanup-save-settings-btn").addEventListener("click", saveCleanupSettings);
   document.getElementById("cleanup-preview-btn").addEventListener("click", previewCleanup);

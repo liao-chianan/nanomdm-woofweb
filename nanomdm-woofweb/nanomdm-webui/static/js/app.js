@@ -16,6 +16,24 @@ function renderField(field, value) {
       ${renderFieldHelp(field)}
     `;
   }
+  if (field.type === "app_checklist") {
+    const selected = new Set(Array.isArray(val) ? val : []);
+    const optionsHtml = field.options.map((opt) => `
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; padding:4px 0;">
+        <input type="checkbox" data-field="${escapeHtml(field.name)}" data-value="${escapeHtml(opt.bundle_id)}" ${selected.has(opt.bundle_id) ? "checked" : ""}>
+        ${escapeHtml(opt.label)}
+      </label>
+    `).join("");
+    return `
+      <div style="margin:6px 0;">
+        <p style="font-size:13px; font-weight:600; margin-bottom:4px;">${escapeHtml(field.label)}</p>
+        ${renderFieldHelp(field)}
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:2px 10px; margin-top:4px;">
+          ${optionsHtml}
+        </div>
+      </div>
+    `;
+  }
   if (field.type === "select") {
     const options = field.options.map((opt) =>
       `<option value="${escapeHtml(opt)}" ${opt === val ? "selected" : ""}>${escapeHtml(opt)}</option>`
@@ -39,6 +57,10 @@ function renderField(field, value) {
 }
 
 function readFieldValue(container, field) {
+  if (field.type === "app_checklist") {
+    const checkboxes = container.querySelectorAll(`[data-field="${field.name}"]`);
+    return [...checkboxes].filter((cb) => cb.checked).map((cb) => cb.dataset.value);
+  }
   const el = container.querySelector(`[data-field="${field.name}"]`);
   if (!el) return field.default;
   if (field.type === "checkbox") return el.checked;
@@ -185,6 +207,60 @@ function openModal(id) {
 }
 function closeModal(id) {
   document.getElementById(id).classList.add("hidden");
+}
+
+// ---------------------------------------------------------------------------
+// 共用表格排序工具,給[裝置與命令]、[裝置註冊狀態]、[系統紀錄]這幾個頁面的資料表格共用。
+// ---------------------------------------------------------------------------
+/**
+ * 建立一個表格排序控制器。
+ * initialKey/initialDir: 預設排序欄位與方向(選填,不給的話預設不排序)
+ * 回傳: { state, sortRows(rows, columns), sortArrow(key), handleHeaderClick(key) }
+ *
+ * columns裡每個欄位可以指定type: "text"(預設,字串排序,支援中文)、
+ * "number"(數值排序,空值視為最小)、"bool"(布林值排序,false排在true前面)
+ */
+function createTableSorter(initialKey, initialDir) {
+  const state = { key: initialKey || null, dir: initialDir || "asc" };
+
+  function sortRows(rows, columns) {
+    if (!state.key) return rows;
+    const colSpec = (columns || []).find((c) => c.key === state.key) || {};
+    const type = colSpec.type || "text";
+    const sorted = [...rows].sort((a, b) => {
+      let av = a[state.key];
+      let bv = b[state.key];
+      let cmp;
+      if (type === "number") {
+        const an = (av === null || av === undefined || av === "") ? -Infinity : Number(av);
+        const bn = (bv === null || bv === undefined || bv === "") ? -Infinity : Number(bv);
+        cmp = an - bn;
+      } else if (type === "bool") {
+        const ab = !!av, bb = !!bv;
+        cmp = (ab === bb) ? 0 : (ab ? 1 : -1);
+      } else {
+        cmp = String(av ?? "").localeCompare(String(bv ?? ""), "zh-Hant");
+      }
+      return state.dir === "asc" ? cmp : -cmp;
+    });
+    return sorted;
+  }
+
+  function sortArrow(key) {
+    if (state.key !== key) return "";
+    return state.dir === "asc" ? " ▲" : " ▼";
+  }
+
+  function handleHeaderClick(key) {
+    if (state.key === key) {
+      state.dir = state.dir === "asc" ? "desc" : "asc";
+    } else {
+      state.key = key;
+      state.dir = "asc";
+    }
+  }
+
+  return { state, sortRows, sortArrow, handleHeaderClick };
 }
 
 document.addEventListener("DOMContentLoaded", () => {
