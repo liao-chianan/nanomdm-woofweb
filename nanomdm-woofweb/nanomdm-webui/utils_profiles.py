@@ -8,9 +8,11 @@ mobileconfig 描述檔管理:
 import os
 import plistlib
 import re
+import tempfile
 import uuid
 
 import utils
+import utils_signing
 
 FILENAME_RE = re.compile(r'^[A-Za-z0-9_\-]{1,100}\.mobileconfig$')
 PROTECTED_FILENAMES = {"enroll-template.mobileconfig", "baseline.mobileconfig"}
@@ -199,6 +201,7 @@ def list_mobileconfig_files(dir_path, groups_path=None):
             "payload_types": [],
             "parse_error": None,
             "is_protected": is_protected,
+            "is_signed": False,
         }
         if is_protected:
             info["assigned_group"] = None
@@ -209,7 +212,9 @@ def list_mobileconfig_files(dir_path, groups_path=None):
             info["assigned_group_label"] = assigned or "(尚未指派給任何群組)"
         try:
             with open(full_path, "rb") as f:
-                parsed = plistlib.load(f)
+                raw_bytes = f.read()
+            info["is_signed"] = utils_signing.is_signed_mobileconfig_bytes(raw_bytes)
+            parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
             info["display_name"] = parsed.get("PayloadDisplayName", "")
             info["payload_types"] = [p.get("PayloadType", "?") for p in parsed.get("PayloadContent", [])]
         except Exception as e:
@@ -261,7 +266,8 @@ def delete_mobileconfig(dir_path, filename, groups_path=None):
         utils.clear_group_paired_file(groups_path, "mobileconfig", filename)
 
 
-def duplicate_mobileconfig(dir_path, source_filename, new_filename):
+def duplicate_mobileconfig(dir_path, source_filename, new_filename,
+                            sign_with_cert_path=None, sign_with_key_path=None, sign_with_ca_path=None):
     """複製一份現有描述檔另存新檔。
     1. 所有 PayloadUUID(含頂層跟每個payload,多實例的wifi/webclip每一份也都要)全部重新產生,
        不能沿用來源檔案的UUID,否則裝置可能會把兩份檔案搞混,或者其中一份被判定成同一個payload的更新。
@@ -269,6 +275,11 @@ def duplicate_mobileconfig(dir_path, source_filename, new_filename):
        附加到來源檔案原本的PayloadIdentifier結尾。如果不這樣做,複製出來的新檔案會跟來源檔案
        用一模一樣的PayloadIdentifier,推送到裝置上時,後推送的那份會直接取代先推送的那份
        (不是疊加),而不是像期望的那樣是兩份互相獨立、各自套用在不同群組的描述檔。
+
+    sign_with_cert_path/sign_with_key_path:選填,邏輯跟save_mobileconfig()一致——提供的話,
+    寫入新檔案前會套用簽署;不提供則寫入未簽署版本。這是為了修正曾經發生過的問題:
+    再製功能原本無論如何都只會寫出未簽署版本,不會跟隨目前系統的簽署設定,導致複製出來的
+    新檔案,簽署狀態跟來源檔案(或系統目前的簽署設定)不一致。
     """
     validate_filename(source_filename)
     validate_filename(new_filename)
@@ -281,7 +292,8 @@ def duplicate_mobileconfig(dir_path, source_filename, new_filename):
         raise ValueError(f"檔案 {new_filename} 已經存在,請換一個檔名")
 
     with open(source_path, "rb") as f:
-        parsed = plistlib.load(f)
+        raw_bytes = f.read()
+    parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
 
     suffix = os.path.splitext(new_filename)[0]
     old_top_identifier = parsed.get("PayloadIdentifier", "")
@@ -299,9 +311,20 @@ def duplicate_mobileconfig(dir_path, source_filename, new_filename):
             payload["PayloadIdentifier"] = f"{old_payload_identifier}.{suffix}"
 
     plist_bytes = plistlib.dumps(parsed)
+
+    final_bytes = plist_bytes
+    if sign_with_cert_path and sign_with_key_path:
+        signed_bytes, sign_err = utils_signing.sign_plist_bytes(
+            plist_bytes, sign_with_cert_path, sign_with_key_path, ca_cert_path=sign_with_ca_path,
+        )
+        if signed_bytes is not None:
+            final_bytes = signed_bytes
+        # 簽署失敗時不拋出例外,直接寫入未簽署版本即可(再製動作本身不該因為簽署
+        # 這個附加功能出問題就整個失敗)
+
     tmp_path = new_path + ".tmp"
     with open(tmp_path, "wb") as f:
-        f.write(plist_bytes)
+        f.write(final_bytes)
     os.replace(tmp_path, new_path)
 
 
@@ -326,7 +349,8 @@ def read_mobileconfig_as_form(dir_path, filename):
     validate_filename(filename)
     full_path = os.path.join(dir_path, filename)
     with open(full_path, "rb") as f:
-        parsed = plistlib.load(f)
+        raw_bytes = f.read()
+    parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
 
     top_level = {}
     for field in TOP_LEVEL_FIELDS:
@@ -601,7 +625,8 @@ def check_duplicate_payload_identifier(dir_path, payload_identifier, exclude_fil
         full_path = os.path.join(dir_path, fname)
         try:
             with open(full_path, "rb") as f:
-                parsed = plistlib.load(f)
+                raw_bytes = f.read()
+            parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
         except Exception:
             continue  # 讀取失敗的檔案跳過,不影響這次檢查
         if parsed.get("PayloadIdentifier") == payload_identifier:
@@ -609,18 +634,48 @@ def check_duplicate_payload_identifier(dir_path, payload_identifier, exclude_fil
     return None
 
 
-def save_mobileconfig(dir_path, filename, top_level, payloads, unmanaged_payloads=None, existing_uuids=None):
+def save_mobileconfig(dir_path, filename, top_level, payloads, unmanaged_payloads=None, existing_uuids=None,
+                       sign_with_cert_path=None, sign_with_key_path=None, sign_with_ca_path=None):
+    """sign_with_cert_path/sign_with_key_path:選填,提供的話會在寫入檔案前,
+    用openssl smime把內容簽署成PKCS#7格式,不提供(維持None)的話完全比照
+    加上簽署功能之前的行為,不會有任何改變。
+
+    簽署失敗時不會讓整個存檔動作失敗——退回寫入未簽署版本,並在warnings裡
+    加上一則說明,讓使用者知道這次沒有簽署成功、需要自己去確認,而不是
+    因為簽署這個額外功能出問題,就連基本的存檔都做不了。
+    """
     validate_filename(filename)
     ensure_mobileconfig_dir(dir_path)
     plist_bytes, warnings = build_mobileconfig(top_level, payloads, unmanaged_payloads, existing_uuids)
 
     # 用 plistlib 重新載入一次,double-check 產出的內容一定是合法可解析的 plist
+    # (這個驗證一定要在簽署之前做,簽署後的PKCS#7格式plistlib沒辦法解析)
     plistlib.loads(plist_bytes)
+
+    # enroll-template.mobileconfig這份檔案本質上是含有字面佔位符(__SERIAL_PLACEHOLDER__)
+    # 的原始文字樣板,由enroll-server.py在每次裝置請求時動態做文字替換+簽署,存在磁碟上
+    # 的這份檔案本身必須永遠維持未簽署的純文字格式——不然enroll-server.py完全沒辦法對
+    # 簽署過的二進位內容做文字替換,會直接導致服務啟動失敗。不管呼叫端傳入什麼簽署參數,
+    # 這份檔案一律強制不簽署,避免這個曾經實際發生過的問題再次出現。
+    if filename == "enroll-template.mobileconfig":
+        sign_with_cert_path = None
+        sign_with_key_path = None
+
+    final_bytes = plist_bytes
+    if sign_with_cert_path and sign_with_key_path:
+        import utils_signing
+        signed_bytes, sign_err = utils_signing.sign_plist_bytes(
+            plist_bytes, sign_with_cert_path, sign_with_key_path, ca_cert_path=sign_with_ca_path,
+        )
+        if signed_bytes is not None:
+            final_bytes = signed_bytes
+        else:
+            warnings = list(warnings) + [f"描述檔簽署失敗,已改為儲存未簽署版本(不影響裝置安裝與生效): {sign_err}"]
 
     full_path = os.path.join(dir_path, filename)
     tmp_path = full_path + ".tmp"
     with open(tmp_path, "wb") as f:
-        f.write(plist_bytes)
+        f.write(final_bytes)
     os.replace(tmp_path, full_path)
     return warnings
 
@@ -633,7 +688,8 @@ def get_existing_uuids(dir_path, filename):
     if not os.path.exists(full_path):
         return {}
     with open(full_path, "rb") as f:
-        parsed = plistlib.load(f)
+        raw_bytes = f.read()
+    parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
 
     type_to_key = {v["payload_type"]: k for k, v in PAYLOAD_SCHEMA.items()}
     result = {"_top": parsed.get("PayloadUUID")}
@@ -707,6 +763,107 @@ def update_enroll_template_topic(mobileconfig_dir, new_topic):
     return True, f"已將Topic從「{old_topic}」更新為「{new_topic}」"
 
 
+ENROLL_TEMPLATE_CA_PAYLOAD_IDENTIFIER = "tw.edu.nanomdm.enroll.ca-root"
+ENROLL_TEMPLATE_SERIAL_PLACEHOLDER = "__SERIAL_PLACEHOLDER__"  # 跟enroll-server.py裡的PLACEHOLDER常數保持一致
+
+
+def add_ca_cert_to_enroll_template(mobileconfig_dir, scep_ca_path, timeout=15):
+    """把SCEP CA的根憑證,加進精簡註冊描述檔(enroll-template.mobileconfig)裡,
+    成為一個獨立的「憑證」payload(PayloadType: com.apple.security.root)。
+
+    背景:裝置透過SCEP拿到自己的身分憑證,只會建立「裝置跟MDM伺服器之間」的信任關係,
+    不會讓這張CA自動變成裝置「一般用途信任根憑證清單」裡的一員——而簽署過的描述檔
+    要不要顯示「已驗證」,查的正是這份一般用途的信任清單。加上這個憑證payload後,
+    裝置完成初次註冊的同時就會信任這張CA,之後任何用同一張CA簽發的簽署憑證簽過的
+    描述檔(baseline、群組描述檔等),才會被裝置正確判定為「已驗證」。
+
+    做法:
+    1. 用openssl把PEM格式的CA憑證轉成DER格式(Apple的憑證payload規定要DER編碼,
+       不是PEM文字格式;PEM轉DER的輸出是二進位資料,全程用暫存檔案處理輸入輸出,
+       不透過文字模式的subprocess呼叫,避免二進位內容被文字編碼轉換搞壞)
+    2. 用plistlib讀入現有的精簡註冊描述檔,檢查有沒有已經加過這個憑證payload
+       (用固定的PayloadIdentifier判斷),有的話就地更新憑證內容(CA換過的情況),
+       沒有的話新增一筆
+    3. 重新序列化寫回檔案
+
+    這裡改用plistlib整份重新序列化寫回去,不像update_enroll_template_topic()那樣
+    只做純文字替換——因為「加入一個全新的陣列元素」沒辦法用簡單的文字替換可靠地
+    做到。已經確認過plistlib重新序列化後,__SERIAL_PLACEHOLDER__這個佔位符字串
+    本身會完整保留,不受影響。
+
+    回傳 (ok, message)。
+    """
+    template_path = os.path.join(mobileconfig_dir, "enroll-template.mobileconfig")
+    if not os.path.exists(template_path):
+        return False, f"找不到精簡註冊描述檔: {template_path}"
+    if not os.path.exists(scep_ca_path):
+        return False, f"找不到 SCEP CA 憑證: {scep_ca_path}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        der_path = os.path.join(tmpdir, "ca.der")
+        rc, out, err = utils.run_cmd(
+            ["openssl", "x509", "-in", scep_ca_path, "-outform", "der", "-out", der_path],
+            timeout=timeout,
+        )
+        if rc != 0:
+            return False, f"轉換 CA 憑證格式(PEM轉DER)失敗: {err or out}"
+        try:
+            with open(der_path, "rb") as f:
+                der_bytes = f.read()
+        except OSError as e:
+            return False, f"讀取轉換後的憑證失敗: {e}"
+
+    if not der_bytes:
+        return False, "轉換後的憑證內容是空的,openssl可能沒有正確產生輸出"
+
+    try:
+        with open(template_path, "rb") as f:
+            raw_bytes = f.read()
+        parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
+    except Exception as e:
+        return False, f"讀取/解析精簡註冊描述檔失敗: {e}"
+
+    payload_content = parsed.setdefault("PayloadContent", [])
+    existing_cert_payload = next(
+        (p for p in payload_content if p.get("PayloadIdentifier") == ENROLL_TEMPLATE_CA_PAYLOAD_IDENTIFIER),
+        None,
+    )
+
+    if existing_cert_payload is not None:
+        existing_cert_payload["PayloadContent"] = der_bytes
+        action_msg = "已更新既有的CA根憑證payload內容"
+    else:
+        cert_payload = {
+            "PayloadCertificateFileName": "nanomdm-ca.cer",
+            "PayloadContent": der_bytes,
+            "PayloadDescription": "讓裝置信任這張CA,之後用這張CA簽署過的描述檔才會顯示為已驗證",
+            "PayloadDisplayName": "NanoMDM CA 根憑證",
+            "PayloadIdentifier": ENROLL_TEMPLATE_CA_PAYLOAD_IDENTIFIER,
+            "PayloadType": "com.apple.security.root",
+            "PayloadUUID": str(uuid.uuid4()).upper(),
+            "PayloadVersion": 1,
+        }
+        payload_content.append(cert_payload)
+        action_msg = "已新增CA根憑證payload"
+
+    new_bytes = plistlib.dumps(parsed)
+
+    # 寫回之前,先確認佔位符沒有在重新序列化的過程中意外消失或被改動,
+    # 這個檢查失敗的話寧可整個動作失敗,也不要寫入一份壞掉、裝置沒辦法正常註冊的模板
+    if ENROLL_TEMPLATE_SERIAL_PLACEHOLDER.encode("utf-8") not in new_bytes:
+        return False, (
+            f"重新序列化後找不到預期的序號佔位符({ENROLL_TEMPLATE_SERIAL_PLACEHOLDER}),"
+            "為了安全起見不寫入檔案,請自己手動確認"
+        )
+
+    tmp_path = template_path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(new_bytes)
+    os.replace(tmp_path, template_path)
+
+    return True, f"{action_msg},裝置下次註冊時就會信任這張CA"
+
+
 def find_other_files_with_mdm_payload(mobileconfig_dir, exclude_filename="enroll-template.mobileconfig"):
     """掃描mobileconfig_dir底下所有描述檔,找出「除了精簡註冊描述檔以外」還有哪些檔案
     也包含MDM Payload。理論上一般群組描述檔不應該用到這個Payload,但如果誤設定了,
@@ -721,7 +878,8 @@ def find_other_files_with_mdm_payload(mobileconfig_dir, exclude_filename="enroll
         full_path = os.path.join(mobileconfig_dir, fname)
         try:
             with open(full_path, "rb") as f:
-                parsed = plistlib.load(f)
+                raw_bytes = f.read()
+            parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
         except Exception:
             continue
         for payload in parsed.get("PayloadContent", []):

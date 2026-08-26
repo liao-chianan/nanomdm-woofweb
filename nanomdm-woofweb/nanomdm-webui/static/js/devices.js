@@ -3,6 +3,8 @@ let currentCommandEnrollmentId = null;
 let currentCommandSerial = null;
 let groupNamesList = [];
 let allDeviceRows = [];
+let currentOsStatusFilter = ""; // ""(全部) / "download" / "install"
+let selectedDeviceItems = new Set(); // 目前勾選的enrollment_id集合
 
 // 裝置列表的欄位定義,給排序功能用。派送命令欄位是操作按鈕不是資料,不列進來(不能排序)。
 const DEVICES_TABLE_COLUMNS = [
@@ -20,12 +22,43 @@ const DEVICES_TABLE_COLUMNS = [
 ];
 const devicesSorter = createTableSorter();
 
+// 只有「下載更新」跟「安裝更新」這兩種篩選模式需要勾選框做批次派送,
+// 「安裝中」這種純粹顯示狀態、不該讓使用者對其觸發任何派送動作的模式不需要
+function osStatusFilterNeedsCheckbox(filter) {
+  return filter === "download" || filter === "install";
+}
+
+// 判斷一台裝置目前是不是「可以下載更新」或「可以安裝更新」,跟畫面上單一裝置按鈕
+// 顯示的判斷條件完全一致(見renderRow裡的osCell邏輯),確保篩選結果跟畫面上看到的
+// 按鈕狀態一致,不會篩出一批裝置、卻有些其實沒有對應的按鈕可以批次操作。
+function deviceMatchesOsStatusFilter(row, filter) {
+  if (!filter) return true;
+  if (!row.available_os_version) return false;
+  if (filter === "download") {
+    return row.os_update_status !== "Downloading" && row.os_update_status !== "Installing" && row.os_update_is_downloaded !== "true";
+  }
+  if (filter === "downloading") {
+    return row.os_update_status === "Downloading";
+  }
+  if (filter === "install") {
+    // 已下載完成、但還沒開始安裝的才算「可以觸發安裝」;正在安裝中的不算(該歸類到「安裝中」篩選)
+    return row.os_update_is_downloaded === "true" && row.os_update_status !== "Installing";
+  }
+  if (filter === "installing") {
+    return row.os_update_status === "Installing";
+  }
+  return true;
+}
+
 function renderDevicesTableHeader() {
   const thead = document.getElementById("devices-thead");
   const cells = DEVICES_TABLE_COLUMNS
     .map((col) => `<th style="cursor:pointer;" data-sort-key="${col.key}">${escapeHtml(col.label)}${devicesSorter.sortArrow(col.key)}</th>`)
     .join("");
-  thead.innerHTML = `<tr>${cells}<th>派送命令</th></tr>`;
+  const checkboxHeaderHtml = osStatusFilterNeedsCheckbox(currentOsStatusFilter)
+    ? `<th style="width:32px;"><input type="checkbox" id="devices-select-all-checkbox"></th>`
+    : `<th style="width:32px;"></th>`;
+  thead.innerHTML = `<tr>${checkboxHeaderHtml}${cells}<th>派送命令</th></tr>`;
 }
 
 async function loadGroupNames() {
@@ -82,6 +115,8 @@ function renderRow(row) {
   if (row.available_os_version) {
     if (row.os_update_status === "Downloading") {
       osCell += ` <button class="secondary os-action-btn" type="button" data-action="downloading" style="font-size:11px; padding:2px 8px; background-color:#d1fae5; border-color:#6ee7b7;">下載中...</button>`;
+    } else if (row.os_update_status === "Installing") {
+      osCell += ` <button class="secondary os-action-btn" type="button" data-action="installing" style="font-size:11px; padding:2px 8px; background-color:#ede9fe; border-color:#c4b5fd;">安裝中...</button>`;
     } else if (row.os_update_is_downloaded === "true") {
       osCell += ` <button class="secondary os-action-btn" type="button" data-action="install" style="font-size:11px; padding:2px 8px; background-color:#fef3c7; border-color:#fde68a;">安裝更新</button>`;
     } else {
@@ -97,7 +132,12 @@ function renderRow(row) {
     ipCell += ` <button class="secondary show-location-btn" type="button" style="font-size:11px; padding:2px 8px;" data-lat="${escapeHtml(String(row.location_lat))}" data-lng="${escapeHtml(String(row.location_lng))}" data-at="${escapeHtml(row.location_at || "")}" data-accuracy="${escapeHtml(String(row.location_accuracy || ""))}">遺失定位</button>`;
   }
 
+  const checkboxCellHtml = osStatusFilterNeedsCheckbox(currentOsStatusFilter)
+    ? `<input type="checkbox" class="device-row-checkbox" data-eid="${escapeHtml(row.enrollment_id)}" ${selectedDeviceItems.has(row.enrollment_id) ? "checked" : ""}>`
+    : "";
+
   tr.innerHTML = `
+    <td>${checkboxCellHtml}</td>
     <td>${row.seq}</td>
     <td>${escapeHtml(row.device_name) || '<span style="color:#9ca3af;">(未命名)</span>'}</td>
     <td>${escapeHtml(row.group) || '<span style="color:#9ca3af;">(未分類)</span>'}</td>
@@ -110,8 +150,9 @@ function renderRow(row) {
     <td style="font-size:12px;">${escapeHtml(row.last_seen_at || "")}</td>
     <td style="font-family: var(--mono); font-size:10px; word-break:break-all;">${escapeHtml(row.enrollment_id)}</td>
     <td>
-      <button class="secondary send-command-btn" type="button">派送命令</button>
-      <button class="secondary history-btn" type="button" style="margin-top:4px;">回應記錄</button>
+      <button class="secondary send-command-btn" type="button">命令</button>
+      <button class="secondary history-btn" type="button" style="margin-top:4px;">紀錄</button>
+      <button class="secondary sync-one-btn" type="button" style="margin-top:4px;" data-serial="${escapeHtml(row.serial_number)}" data-eid="${escapeHtml(row.enrollment_id)}">同步</button>
     </td>
   `;
   return tr;
@@ -199,6 +240,10 @@ async function triggerOsAction(enrollmentId, action) {
     alert("系統軟體下載中，下載時間視網路狀況而定，下載完畢後會才能安裝更新");
     return;
   }
+  if (action === "installing") {
+    alert("系統軟體安裝中，過程中裝置可能會重新開機，安裝完成前請勿手動關機或中斷電源");
+    return;
+  }
 
   const requestType = action === "install" ? "InstallOSUpdate" : "DownloadOSUpdate";
   const label = action === "install" ? "安裝" : "下載";
@@ -213,6 +258,85 @@ async function triggerOsAction(enrollmentId, action) {
   } else {
     alert(`送出${label}更新指令失敗: ` + ((res.data && res.data.message) || "未知錯誤"));
   }
+}
+
+function updateDevicesBatchActionsUI() {
+  const container = document.getElementById("devices-batch-actions-container");
+  if (!osStatusFilterNeedsCheckbox(currentOsStatusFilter) || selectedDeviceItems.size === 0) {
+    container.innerHTML = "";
+    return;
+  }
+  const label = currentOsStatusFilter === "install" ? "安裝更新" : "下載更新";
+  container.innerHTML = `<button id="devices-batch-os-action-btn" type="button" style="font-size:12px;">批次${label}(${selectedDeviceItems.size})</button>`;
+  document.getElementById("devices-batch-os-action-btn").addEventListener("click", batchTriggerOsAction);
+}
+
+function toggleDeviceCheckbox(checkbox) {
+  if (checkbox.checked) {
+    selectedDeviceItems.add(checkbox.dataset.eid);
+  } else {
+    selectedDeviceItems.delete(checkbox.dataset.eid);
+  }
+  updateDevicesBatchActionsUI();
+}
+
+function toggleSelectAllDeviceCheckboxes(checked) {
+  document.querySelectorAll(".device-row-checkbox").forEach((cb) => {
+    cb.checked = checked;
+    toggleDeviceCheckbox(cb);
+  });
+}
+
+async function batchTriggerOsAction() {
+  const action = currentOsStatusFilter; // "download" 或 "install"
+  const label = action === "install" ? "安裝更新" : "下載更新";
+  const requestType = action === "install" ? "InstallOSUpdate" : "DownloadOSUpdate";
+  const enrollmentIds = [...selectedDeviceItems];
+
+  const confirmMsg = action === "install"
+    ? `確定要批次對這 ${enrollmentIds.length} 台裝置開始安裝最新的系統更新嗎?\n\n每台裝置都會嘗試安裝,過程中可能需要重新開機,會中斷裝置目前的使用。`
+    : `確定要批次對這 ${enrollmentIds.length} 台裝置開始下載最新的系統更新嗎?`;
+  if (!confirm(confirmMsg)) return;
+
+  document.getElementById("devices-batch-progress-title").textContent = `批次${label}中...`;
+  document.getElementById("devices-batch-progress-bar").style.width = "0%";
+  document.getElementById("devices-batch-progress-text").textContent = `準備處理 ${enrollmentIds.length} 台...`;
+  document.getElementById("devices-batch-progress-errors").innerHTML = "";
+  document.getElementById("devices-batch-progress-close-btn").style.display = "none";
+  openModal("devices-batch-progress-modal");
+
+  let successCount = 0;
+  const errors = [];
+
+  for (let i = 0; i < enrollmentIds.length; i++) {
+    const eid = enrollmentIds[i];
+    const row = allDeviceRows.find((r) => r.enrollment_id === eid);
+    const serialLabel = row ? row.serial_number : eid;
+
+    const res = await apiFetchJSON("/api/devices/command", "POST", {
+      enrollment_id: eid, request_type: requestType, params: {},
+    });
+
+    if (res.ok) {
+      successCount++;
+    } else {
+      errors.push(`${serialLabel}: ${(res.data && res.data.message) || "未知錯誤"}`);
+    }
+
+    const progressPct = Math.round(((i + 1) / enrollmentIds.length) * 100);
+    document.getElementById("devices-batch-progress-bar").style.width = `${progressPct}%`;
+    document.getElementById("devices-batch-progress-text").textContent =
+      `已處理 ${i + 1}/${enrollmentIds.length}(成功 ${successCount},失敗 ${errors.length})`;
+  }
+
+  document.getElementById("devices-batch-progress-title").textContent = `批次${label}完成`;
+  if (errors.length > 0) {
+    document.getElementById("devices-batch-progress-errors").innerHTML =
+      `<strong>失敗項目:</strong><br>` + errors.map((e) => escapeHtml(e)).join("<br>");
+  }
+  document.getElementById("devices-batch-progress-close-btn").style.display = "";
+
+  selectedDeviceItems.clear();
 }
 
 function statusBadge(status) {
@@ -298,6 +422,7 @@ function populateDevicesFilterGroupDropdown() {
 function applyDevicesFilters() {
   const groupFilter = document.getElementById("devices-filter-group").value;
   const searchText = document.getElementById("devices-filter-search").value.trim().toLowerCase();
+  currentOsStatusFilter = document.getElementById("devices-filter-os-status").value;
 
   let filtered = allDeviceRows.filter((row) => {
     if (groupFilter === "__none__" && row.group) return false;
@@ -306,30 +431,35 @@ function applyDevicesFilters() {
       const haystack = `${row.serial_number} ${row.device_name}`.toLowerCase();
       if (!haystack.includes(searchText)) return false;
     }
+    if (!deviceMatchesOsStatusFilter(row, currentOsStatusFilter)) return false;
     return true;
   });
 
   filtered = devicesSorter.sortRows(filtered, DEVICES_TABLE_COLUMNS);
 
+  // 篩選條件改變後,清空之前的勾選狀態(避免勾選的裝置已經不在目前篩選結果裡,卻還留著看不到的勾選)
+  selectedDeviceItems.clear();
+
   renderDevicesTableHeader();
   const tbody = document.getElementById("devices-tbody");
   tbody.innerHTML = "";
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12">沒有符合條件的裝置</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13">沒有符合條件的裝置</td></tr>`;
   } else {
     filtered.forEach((row) => tbody.appendChild(renderRow(row)));
   }
   document.getElementById("devices-filter-count").textContent = `顯示 ${filtered.length} / ${allDeviceRows.length} 台`;
+  updateDevicesBatchActionsUI();
 }
 
 async function loadDevices() {
   const tbody = document.getElementById("devices-tbody");
-  tbody.innerHTML = `<tr><td colspan="12">載入中...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="13">載入中...</td></tr>`;
   await loadGroupNames();
   populateDevicesFilterGroupDropdown();
   const res = await apiFetch("/api/devices");
   if (!res.ok) {
-    tbody.innerHTML = `<tr><td colspan="12" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
     return;
   }
   allDeviceRows = res.data.rows;
@@ -339,7 +469,34 @@ async function loadDevices() {
   applyDevicesFilters();
 }
 
+async function syncOneDevice(btn) {
+  const serial = btn.dataset.serial;
+  const enrollmentId = btn.dataset.eid;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "同步中...";
+
+  const res = await apiFetchJSON("/api/devices/sync-one", "POST", {
+    serial, enrollment_id: enrollmentId,
+  });
+
+  btn.disabled = false;
+  btn.textContent = originalText;
+
+  if (res.ok) {
+    loadDevices(); // 重新整理表格,顯示剛剛更新的快取內容
+  } else {
+    alert(`同步失敗: ` + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
 async function syncDevicesStatus() {
+  const deviceCount = allDeviceRows.length;
+  const confirmMsg = deviceCount > 0
+    ? `即將對全部 ${deviceCount} 台裝置重新查詢狀態,依裝置數量跟連線狀況,可能需要一段時間才能完成,過程中請不要關閉這個頁面。\n\n確定要繼續嗎?`
+    : `即將對所有裝置重新查詢狀態,依裝置數量跟連線狀況,可能需要一段時間才能完成,過程中請不要關閉這個頁面。\n\n確定要繼續嗎?`;
+  if (!confirm(confirmMsg)) return;
+
   const btn = document.getElementById("sync-status-btn");
   const infoSpan = document.getElementById("devices-status-sync-info");
   btn.disabled = true;
@@ -353,14 +510,14 @@ async function syncDevicesStatus() {
     if (update.error) {
       infoSpan.textContent = `同步失敗: ${update.error}`;
       btn.disabled = false;
-      btn.textContent = "立即同步更新";
+      btn.textContent = "立即同步裝置狀態";
       es.close();
       return;
     }
     if (update.done) {
       infoSpan.textContent = `狀態資料同步於: ${update.last_sync}`;
       btn.disabled = false;
-      btn.textContent = "立即同步更新";
+      btn.textContent = "立即同步裝置狀態";
       es.close();
       loadDevices(); // 重新整理表格,顯示剛剛更新的快取內容
     } else if (update.message) {
@@ -369,7 +526,7 @@ async function syncDevicesStatus() {
   };
   es.onerror = () => {
     btn.disabled = false;
-    btn.textContent = "立即同步更新";
+    btn.textContent = "立即同步裝置狀態";
     es.close();
   };
 }
@@ -446,16 +603,6 @@ function renderLiveInfoSection(deviceInfoData, osUpdatesData, enrollmentId) {
     const restartNote = update.RestartRequired ? "、需要重新開機" : "";
     const versionLabel = `${update.HumanReadableName || update.ProductName || ""}${update.Version ? " (" + update.Version + ")" : ""}`;
     rowsHtml += `<tr><td class="k">可更新版本</td><td>${escapeHtml(versionLabel)}${critical}<span style="color:#9ca3af; font-size:11px;">${escapeHtml(formatDownloadSize(update.DownloadSize) ? " · 下載大小 " + formatDownloadSize(update.DownloadSize) + restartNote : "")}</span></td></tr>`;
-    rowsHtml += `<tr><td class="k">ProductKey</td><td>
-      <span style="font-family:var(--mono); font-size:11px; word-break:break-all;">${escapeHtml(update.ProductKey || "")}</span>
-      <button class="secondary download-os-update-btn" type="button" data-product-key="${escapeHtml(update.ProductKey || "")}" data-version-label="${escapeHtml(versionLabel)}" style="font-size:11px; margin-left:8px;">1. 下載更新</button>
-      <button class="secondary install-os-update-btn" type="button" data-product-key="${escapeHtml(update.ProductKey || "")}" data-version-label="${escapeHtml(versionLabel)}" style="font-size:11px; margin-left:4px;">2. 安裝更新</button>
-      <button class="secondary check-os-update-status-btn" type="button" style="font-size:11px; margin-left:4px;">查詢下載狀態</button>
-      <div style="color:#9ca3af; font-size:11px; margin-top:4px;">
-        iOS/iPadOS 規定下載跟安裝是分開的兩個步驟:請先按「1. 下載更新」,確認裝置下載完成後,再按「2. 安裝更新」。
-        如果還沒下載完就按安裝,會收到「安裝前必須先下載」的錯誤。可以到下方「查詢下載狀態」確認是否已下載完成。
-      </div>
-    </td></tr>`;
   } else if (osUpdatesData && osUpdatesData.found) {
     rowsHtml += `<tr><td class="k">可更新版本</td><td style="color:#9ca3af;">目前已是最新版本,或尚未查到可更新項目</td></tr>`;
   }
@@ -505,63 +652,6 @@ async function requeryLiveInfo(enrollmentId) {
   }
 }
 
-async function downloadOsUpdate(enrollmentId, productKey, versionLabel) {
-  const confirmed = confirm(
-    `確定要開始下載「${versionLabel}」嗎?\n\n` +
-    `這一步只會下載更新檔案,不會安裝、不會重新開機。下載會使用網路流量,依檔案大小可能需要一些時間。\n` +
-    `下載完成後,請用「查詢下載狀態」確認,再按「2. 安裝更新」。\n\n` +
-    `確定要繼續嗎?`
-  );
-  if (!confirmed) return;
-
-  const res = await apiFetchJSON("/api/devices/command", "POST", {
-    enrollment_id: enrollmentId, request_type: "ScheduleOSUpdate",
-    params: { ProductKey: productKey, InstallAction: "DownloadOnly" },
-  });
-
-  if (res.ok) {
-    alert("已送出下載指令,裝置連線後會開始下載。可以按「查詢下載狀態」確認進度,或到「回應記錄」查看詳細結果。");
-    loadDevices();
-  } else {
-    alert("送出下載指令失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-  }
-}
-
-async function installOsUpdate(enrollmentId, productKey, versionLabel) {
-  const confirmed = confirm(
-    `確定要安裝「${versionLabel}」嗎?\n\n` +
-    `這一步會安裝更新(InstallASAP)。iOS/iPadOS 規定安裝前必須已經下載完成,如果還沒下載完會失敗並收到錯誤訊息。\n` +
-    `請注意:\n` +
-    `・如果裝置有設定密碼,依 Apple 的安全機制,通常還是需要使用者在裝置上輸入密碼才能真正完成安裝,無法保證 100% 全自動靜默完成\n` +
-    `・安裝過程可能需要重新開機,會中斷裝置目前的使用\n\n` +
-    `確定要繼續嗎?`
-  );
-  if (!confirmed) return;
-
-  const res = await apiFetchJSON("/api/devices/command", "POST", {
-    enrollment_id: enrollmentId, request_type: "ScheduleOSUpdate",
-    params: { ProductKey: productKey, InstallAction: "InstallASAP" },
-  });
-
-  if (res.ok) {
-    alert("已送出安裝指令,裝置連線後會嘗試安裝。可以到「回應記錄」查看進度或錯誤訊息。");
-    loadDevices();
-  } else {
-    alert("送出安裝指令失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-  }
-}
-
-async function checkOsUpdateStatus(enrollmentId) {
-  const res = await apiFetchJSON("/api/devices/command", "POST", {
-    enrollment_id: enrollmentId, request_type: "OSUpdateStatus", params: {},
-  });
-  if (res.ok) {
-    alert("已送出狀態查詢,裝置連線後會回報下載進度。請到「回應記錄」查看結果(裡面會有 IsDownloaded 這個欄位,true 代表已下載完成、可以安裝了)。");
-  } else {
-    alert("送出查詢失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-  }
-}
-
 async function openDeviceDetails(serial, enrollmentId) {
   document.getElementById("details-modal-title").textContent = `裝置詳細資訊 - ${serial}`;
   document.getElementById("details-modal-body").innerHTML = `
@@ -588,15 +678,6 @@ async function openDeviceDetails(serial, enrollmentId) {
 
   document.getElementById("offboard-device-btn").addEventListener("click", () => startDeviceOffboard(serial, enrollmentId));
   document.getElementById("details-requery-btn").addEventListener("click", () => requeryLiveInfo(enrollmentId));
-  document.getElementById("details-live-info-container").addEventListener("click", (e) => {
-    if (e.target.classList.contains("download-os-update-btn")) {
-      downloadOsUpdate(enrollmentId, e.target.dataset.productKey, e.target.dataset.versionLabel);
-    } else if (e.target.classList.contains("install-os-update-btn")) {
-      installOsUpdate(enrollmentId, e.target.dataset.productKey, e.target.dataset.versionLabel);
-    } else if (e.target.classList.contains("check-os-update-status-btn")) {
-      checkOsUpdateStatus(enrollmentId);
-    }
-  });
 
   const [staticRes, liveRes, osUpdatesRes] = await Promise.all([
     apiFetch(`/api/devices/details/${encodeURIComponent(serial)}`),
@@ -738,6 +819,23 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("command-send-btn").addEventListener("click", sendCommand);
   document.getElementById("devices-filter-group").addEventListener("change", applyDevicesFilters);
   document.getElementById("devices-filter-search").addEventListener("input", applyDevicesFilters);
+  document.getElementById("devices-filter-os-status").addEventListener("change", applyDevicesFilters);
+
+  document.getElementById("devices-thead").addEventListener("change", (e) => {
+    if (e.target.id === "devices-select-all-checkbox") {
+      toggleSelectAllDeviceCheckboxes(e.target.checked);
+    }
+  });
+
+  document.getElementById("devices-tbody").addEventListener("change", (e) => {
+    if (e.target.classList.contains("device-row-checkbox")) {
+      toggleDeviceCheckbox(e.target);
+    }
+  });
+
+  document.getElementById("devices-batch-progress-close-btn").addEventListener("click", () => {
+    closeModal("devices-batch-progress-modal");
+  });
 
   document.getElementById("devices-thead").addEventListener("click", (e) => {
     const th = e.target.closest("th");
@@ -760,6 +858,8 @@ document.addEventListener("DOMContentLoaded", () => {
       triggerOsAction(tr.dataset.enrollmentId, e.target.dataset.action);
     } else if (e.target.classList.contains("show-location-btn")) {
       openLocationMapModal(e.target.dataset.lat, e.target.dataset.lng, e.target.dataset.at, e.target.dataset.accuracy);
+    } else if (e.target.classList.contains("sync-one-btn")) {
+      syncOneDevice(e.target);
     }
   });
 });

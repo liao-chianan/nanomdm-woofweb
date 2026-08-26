@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# install.sh — NanoMDM WoofWeb 一鍵安裝腳本
-# 適用環境: Debian 12 (bookworm) x86_64,全新主機,需要 sudo 權限、固定對外IP、DNS解析
+# nanomdm-woofwebui-install.sh — NanoMDM WoofWeb 一鍵安裝腳本
+# 適用環境: Debian 12 (bookworm) 或 Debian 13 (trixie) x86_64,全新主機,需要 sudo 權限、固定對外IP、DNS解析
 #
-# 用法: sudo bash install.sh
+# 用法: sudo bash nanomdm-woofwebui-install.sh
 #
 set -euo pipefail
 
@@ -28,7 +28,7 @@ die()       { log_err "$1"; exit 1; }
 log_step "檢查系統需求"
 
 if [ "$(id -u)" -ne 0 ]; then
-    die "請用 root 權限執行(例如: sudo bash install.sh)"
+    die "請用 root 權限執行(例如: sudo bash nanomdm-woofwebui-install.sh)"
 fi
 
 if [ ! -f /etc/os-release ]; then
@@ -36,8 +36,16 @@ if [ ! -f /etc/os-release ]; then
 fi
 # shellcheck disable=SC1091
 . /etc/os-release
-if [ "${ID:-}" != "debian" ] || [ "${VERSION_ID:-}" != "12" ]; then
-    log_warn "偵測到的作業系統是 ${PRETTY_NAME:-未知},本腳本是針對 Debian 12 (bookworm) 設計"
+SUPPORTED_DEBIAN_VERSIONS=("12" "13")
+is_supported_version=false
+for v in "${SUPPORTED_DEBIAN_VERSIONS[@]}"; do
+    if [ "${VERSION_ID:-}" = "$v" ]; then
+        is_supported_version=true
+        break
+    fi
+done
+if [ "${ID:-}" != "debian" ] || [ "$is_supported_version" != "true" ]; then
+    log_warn "偵測到的作業系統是 ${PRETTY_NAME:-未知},本腳本已測試過 Debian 12 (bookworm) 與 Debian 13 (trixie)"
     read -rp "  是否仍要繼續? (y/N): " continue_anyway
     if [ "${continue_anyway,,}" != "y" ]; then
         die "已取消安裝"
@@ -81,7 +89,7 @@ apt update -qq
 apt install -y \
     build-essential strace git curl wget jq unzip pigz rsync \
     nginx certbot python3-certbot-nginx python3-dev python3-pip python3-venv \
-    net-tools dnsutils ca-certificates iperf3 htop iftop iotop ioping \
+    net-tools dnsutils ca-certificates htop iftop iotop ioping \
     traceroute lsof usbutils pciutils bash-completion gnupg \
     docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
@@ -257,7 +265,7 @@ log_step "產生 .env 設定檔"
 ENV_FILE="/opt/nanomdm-deployment/.env"
 
 cat > "$ENV_FILE" << EOF
-# 由 install.sh 自動產生於 $(date '+%Y-%m-%d %H:%M:%S')
+# 由 nanomdm-woofwebui-install.sh 自動產生於 $(date '+%Y-%m-%d %H:%M:%S')
 
 # --- nanomdm ---
 NANOMDM_API_KEY=${API_KEY}
@@ -617,8 +625,8 @@ log_ok "管理者帳號設定完成"
 # =============================================================================
 # 記錄初始安裝版本(給webui的[版本與更新]功能使用)
 # =============================================================================
-echo "v0.91" > /opt/nanomdm-webui/VERSION
-log_ok "已記錄初始安裝版本: v0.91"
+echo "v0.8" > /opt/nanomdm-webui/VERSION
+log_ok "已記錄初始安裝版本: v0.8"
 
 # =============================================================================
 # 10. 啟用並啟動所有服務

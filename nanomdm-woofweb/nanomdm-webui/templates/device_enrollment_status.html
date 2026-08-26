@@ -22,6 +22,16 @@
       <label style="font-size:13px; color:#6b7280;">篩選群組:</label>
       <select id="enrollment-filter-group" style="min-width:160px;"></select>
     </div>
+    <div style="display:flex; align-items:center; gap:6px;">
+      <label style="font-size:13px; color:#6b7280;">指派狀態:</label>
+      <select id="enrollment-filter-status" style="min-width:180px;">
+        <option value="">(全部)</option>
+        <option value="pushed">已註冊成功</option>
+        <option value="assigned_reregister">註冊檔已修改，等待重新註冊</option>
+        <option value="assigned_new">已指派(尚未註冊)</option>
+        <option value="empty">尚未指派</option>
+      </select>
+    </div>
     <div style="display:flex; align-items:center; gap:6px; flex:1; min-width:220px;">
       <label style="font-size:13px; color:#6b7280;">搜尋序號/裝置名稱:</label>
       <input type="text" id="enrollment-filter-search" placeholder="輸入序號或裝置名稱..." style="flex:1;">

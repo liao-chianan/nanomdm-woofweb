@@ -492,9 +492,79 @@ async function loadCertStatus() {
   });
 }
 
+async function loadProfileSigningStatus() {
+  const container = document.getElementById("profile-signing-status");
+  const generateBtn = document.getElementById("profile-signing-generate-btn");
+  const toggleBtn = document.getElementById("profile-signing-toggle-btn");
+  container.textContent = "載入中...";
+
+  const res = await apiFetch("/api/profile-signing/status");
+  if (!res.ok) {
+    container.innerHTML = `<p style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    return;
+  }
+  const d = res.data;
+
+  let html = "";
+  if (!d.cert_exists) {
+    html = `<p style="color:#9ca3af; font-size:13px;">尚未產生簽署憑證</p>`;
+    generateBtn.textContent = "產生簽署憑證";
+    toggleBtn.style.display = "none";
+  } else {
+    const info = d.cert_info || {};
+    const enddate = info.enddate ? info.enddate[0] : "未知";
+    html = `
+      <p style="font-size:13px;">
+        簽署憑證已產生,到期日: ${escapeHtml(enddate)}<br>
+        目前狀態: ${d.enabled ? '<span class="badge ok">已啟用</span>' : '<span class="badge warn">尚未啟用</span>'}
+      </p>
+    `;
+    generateBtn.textContent = "重新產生簽署憑證";
+    toggleBtn.style.display = "";
+    toggleBtn.textContent = d.enabled ? "停用簽署" : "啟用簽署";
+  }
+  container.innerHTML = html;
+}
+
+async function generateProfileSigningCert() {
+  if (!confirm("確定要產生新的簽署憑證嗎?\n\n如果已經有一張在用,產生新的之後,之前已經簽署過的舊描述檔不會自動重新簽署(不影響其現有效力),但之後新存檔的描述檔會改用這張新憑證簽署。")) return;
+  const res = await apiFetchJSON("/api/profile-signing/generate", "POST");
+  if (res.ok) {
+    alert("簽署憑證已產生");
+    loadProfileSigningStatus();
+  } else {
+    alert("產生失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
+async function toggleProfileSigning() {
+  const statusRes = await apiFetch("/api/profile-signing/status");
+  const currentlyEnabled = statusRes.ok && statusRes.data.enabled;
+  const res = await apiFetchJSON("/api/profile-signing/toggle", "POST", { enabled: !currentlyEnabled });
+  if (res.ok) {
+    loadProfileSigningStatus();
+  } else {
+    alert("設定失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
+async function addCaToEnrollTemplate() {
+  if (!confirm("確定要把 CA 根憑證加進註冊模板嗎?\n\n做完之後,裝置需要重新清空註冊,才會拿到含有這張 CA 的新版本,之前已經完成註冊的裝置不會自動套用。")) return;
+  const res = await apiFetchJSON("/api/profile-signing/add-ca-to-enroll-template", "POST");
+  if (res.ok) {
+    alert(res.data.message || "已完成");
+  } else {
+    alert("失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   loadCertStatus();
+  loadProfileSigningStatus();
   document.getElementById("refresh-cert-btn").addEventListener("click", loadCertStatus);
+  document.getElementById("profile-signing-generate-btn").addEventListener("click", generateProfileSigningCert);
+  document.getElementById("profile-signing-toggle-btn").addEventListener("click", toggleProfileSigning);
+  document.getElementById("profile-signing-add-ca-btn").addEventListener("click", addCaToEnrollTemplate);
 
   document.getElementById("cert-status-details").addEventListener("click", (e) => {
     if (e.target.classList.contains("cert-nginx-renew-btn")) renewNginxCert();

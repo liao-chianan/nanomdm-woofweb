@@ -51,8 +51,13 @@ async function loadProfilesList() {
     div.style.cssText = `border-bottom:1px solid var(--border-color); padding:10px 10px; ${highlightStyle}`;
     const errBadge = f.parse_error ? `<span class="badge warn">解析失敗</span>` : "";
     const protectedBadge = f.is_protected ? `<span class="badge warn" style="margin-left:6px;">系統預設</span>` : "";
+    const signedBadge = f.filename === "enroll-template.mobileconfig"
+      ? `<span class="badge" style="margin-left:6px; background:#e5e7eb; color:#6b7280;">不需簽署</span>`
+      : f.is_signed
+        ? `<span class="badge ok" style="margin-left:6px;">已簽署</span>`
+        : `<span class="badge" style="margin-left:6px; background:#e5e7eb; color:#6b7280;">未簽署</span>`;
     div.innerHTML = `
-      <div style="font-family:var(--mono); font-size:13px; font-weight:600;">${escapeHtml(f.filename)} ${errBadge}${protectedBadge}</div>
+      <div style="font-family:var(--mono); font-size:13px; font-weight:600;">${escapeHtml(f.filename)} ${errBadge}${protectedBadge}${signedBadge}</div>
       <div style="font-size:12px; color:#6b7280; margin:3px 0;">${escapeHtml(f.display_name || "(無顯示名稱)")} · 配對群組: ${escapeHtml(f.assigned_group_label)}</div>
       <div style="font-size:11px; color:#9ca3af;">${f.payload_types.map(escapeHtml).join(", ") || "(無 payload)"}</div>
       <div style="font-size:11px; color:#9ca3af;">${formatBytes(f.size)} · ${formatMtime(f.mtime)}</div>
@@ -480,6 +485,12 @@ async function applyProfileToGroup(filename) {
 document.addEventListener("DOMContentLoaded", () => {
   loadSchema();
   loadProfilesList();
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const openFilename = urlParams.get("open");
+  if (openFilename) {
+    openEditProfile(openFilename);
+  }
 
   document.getElementById("new-profile-btn").addEventListener("click", openNewProfile);
   document.getElementById("validate-profile-btn").addEventListener("click", validateProfile);

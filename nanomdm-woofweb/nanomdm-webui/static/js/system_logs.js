@@ -162,6 +162,14 @@ async function loadLogs() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  const urlParams = new URLSearchParams(window.location.search);
+  const typeParam = urlParams.get("type");
+  const validTypes = ["login", "activity", "commands"];
+  if (validTypes.includes(typeParam)) {
+    currentLogType = typeParam;
+    document.getElementById("log-type-select").value = typeParam;
+  }
+
   loadLogs();
 
   document.getElementById("log-type-select").addEventListener("change", (e) => {

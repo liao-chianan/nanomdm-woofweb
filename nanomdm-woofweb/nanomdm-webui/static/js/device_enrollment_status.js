@@ -41,17 +41,26 @@ function statusBadgeES(status, pushTime, enrollmentId) {
   const cls = map[status] || "warn";
 
   let text;
+  let customStyle = null;
   if (status === "pushed") {
     text = "已註冊成功";
   } else if (status === "assigned") {
     // 已經有MDM UUID代表這台裝置之前註冊過一次;重新指派新的profile後,
     // 要等裝置被清空、重新走一次Setup Assistant才會套用,跟「全新裝置尚未註冊過」是不同情境
-    text = enrollmentId ? "(等待重新註冊)" : "已指派(尚未註冊)";
+    if (enrollmentId) {
+      text = "註冊檔已修改，等待重新註冊";
+      customStyle = "background-color:#dbeafe; color:#000000; border-color:#93c5fd;";
+    } else {
+      text = "已指派(尚未註冊)";
+    }
   } else {
     text = "尚未指派";
   }
 
-  let html = `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
+  const styleAttr = customStyle ? ` style="${customStyle}"` : "";
+  let html = customStyle
+    ? `<span class="badge"${styleAttr}>${escapeHtml(text)}</span>`
+    : `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
   if (status === "pushed" && pushTime) {
     html += `<span style="font-size:11px; color:#6b7280; margin-left:6px; white-space:nowrap;">${escapeHtml(formatPushTime(pushTime))}</span>`;
   }
@@ -105,9 +114,21 @@ function populateGroupFilterDropdown() {
   select.value = current || "";
 }
 
+// 判斷邏輯要跟statusBadgeES()裡「怎麼把raw status+enrollmentId轉成畫面上四種顯示狀態」
+// 完全一致,不然篩選出來的結果會跟畫面上實際看到的文字對不起來
+function deviceMatchesAssignmentStatusFilter(row, filter) {
+  if (!filter) return true;
+  if (filter === "pushed") return row.profile_status === "pushed";
+  if (filter === "assigned_reregister") return row.profile_status === "assigned" && !!row.enrollment_id;
+  if (filter === "assigned_new") return row.profile_status === "assigned" && !row.enrollment_id;
+  if (filter === "empty") return row.profile_status !== "pushed" && row.profile_status !== "assigned";
+  return true;
+}
+
 function applyEnrollmentFilters() {
   const groupFilter = document.getElementById("enrollment-filter-group").value;
   const searchText = document.getElementById("enrollment-filter-search").value.trim().toLowerCase();
+  const statusFilter = document.getElementById("enrollment-filter-status").value;
 
   let filtered = allEnrollmentRows.filter((row) => {
     if (groupFilter === "__none__" && row.group) return false;
@@ -116,6 +137,7 @@ function applyEnrollmentFilters() {
       const haystack = `${row.serial_number} ${row.device_name}`.toLowerCase();
       if (!haystack.includes(searchText)) return false;
     }
+    if (!deviceMatchesAssignmentStatusFilter(row, statusFilter)) return false;
     return true;
   });
 
@@ -380,6 +402,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("enrollment-filter-group").addEventListener("change", applyEnrollmentFilters);
   document.getElementById("enrollment-filter-search").addEventListener("input", applyEnrollmentFilters);
+  document.getElementById("enrollment-filter-status").addEventListener("change", applyEnrollmentFilters);
 
   document.getElementById("enrollment-status-thead").addEventListener("click", (e) => {
     const th = e.target.closest("th");

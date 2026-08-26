@@ -5,15 +5,16 @@
   <h2>所有裝置與命令
     <span style="float:right; display:flex; align-items:center; gap:10px;">
       <span id="devices-status-sync-info" style="font-size:12px; color:#9ca3af;"></span>
-      <button class="secondary" id="sync-status-btn" type="button" style="font-size:12px;">立即同步更新</button>
+      <button class="secondary" id="sync-status-btn" type="button" style="font-size:12px;">立即同步裝置狀態</button>
       <button class="secondary" id="refresh-devices-btn" type="button" style="font-size:12px;">重新整理</button>
+      <a class="secondary" href="{{ url_for('system_logs_page') }}?type=commands" style="font-size:12px; text-decoration:none; padding:6px 12px; border:1px solid var(--border-color); border-radius:6px; color:inherit; display:inline-block;">所有命令紀錄</a>
     </span>
   </h2>
   <p style="color:#6b7280; font-size:13px; margin-bottom:14px;">
     此處顯示的是<strong>已經完成 MDM 註冊</strong>的裝置(資料來自 nanomdm 的 enrollments 紀錄)。
     尚未註冊、或還在 ASM 待註冊的裝置請到「裝置註冊狀態」頁查看。
-    電量/容量/系統版本這幾欄是背景排程每 10 分鐘向裝置查詢一次的結果(MDM 是推播式架構,不是即時抓取,
-    裝置離線時資料不會更新),按「立即同步更新」可以馬上重新查詢一次。
+    電量/容量/系統版本這幾欄是背景排程每 {{ refresh_interval_minutes }} 分鐘向裝置查詢一次的結果(MDM 是推播式架構,不是即時抓取,
+    裝置離線時資料不會更新),按「立即同步裝置狀態」可以馬上重新查詢一次。
   </p>
 
   <div style="display:flex; gap:16px; align-items:center; margin-bottom:14px; flex-wrap:wrap;">
@@ -25,11 +26,23 @@
       <label style="font-size:13px; color:#6b7280;">搜尋序號/裝置名稱:</label>
       <input type="text" id="devices-filter-search" placeholder="輸入序號或裝置名稱..." style="flex:1;">
     </div>
+    <div style="display:flex; align-items:center; gap:6px;">
+      <label style="font-size:13px; color:#6b7280;">作業系統狀態:</label>
+      <select id="devices-filter-os-status" style="min-width:140px;">
+        <option value="">(全部)</option>
+        <option value="download">(下載更新)</option>
+        <option value="downloading">(下載中)</option>
+        <option value="install">(安裝更新)</option>
+        <option value="installing">(安裝中)</option>
+      </select>
+    </div>
+    <div id="devices-batch-actions-container"></div>
     <div id="devices-filter-count" style="font-size:12px; color:#9ca3af;"></div>
   </div>
 
   <table class="data-table" id="devices-table">
     <colgroup>
+      <col style="width:32px;">
       <col style="width:60px;">
       <col style="width:240px;">
       <col style="width:150px;">
@@ -46,7 +59,7 @@
     <thead id="devices-thead">
     </thead>
     <tbody id="devices-tbody">
-      <tr><td colspan="12">載入中...</td></tr>
+      <tr><td colspan="13">載入中...</td></tr>
     </tbody>
   </table>
 </div>
@@ -97,6 +110,19 @@
       <button class="secondary" onclick="closeModal('command-modal')" type="button">取消</button>
       <button id="command-send-btn" type="button">送出</button>
     </div>
+  </div>
+</div>
+
+<!-- 批次更新進度 Modal -->
+<div class="modal-overlay hidden" id="devices-batch-progress-modal">
+  <div class="modal-box" style="width:500px;">
+    <h3 id="devices-batch-progress-title">批次處理中...</h3>
+    <div style="background:#e5e7eb; border-radius:6px; height:20px; overflow:hidden; margin:12px 0;">
+      <div id="devices-batch-progress-bar" style="background:#2563eb; height:100%; width:0%; transition:width 0.2s;"></div>
+    </div>
+    <p id="devices-batch-progress-text" style="font-size:13px; color:#6b7280;">準備中...</p>
+    <div id="devices-batch-progress-errors" style="max-height:180px; overflow-y:auto; font-size:12px; color:#b42318; margin-top:8px;"></div>
+    <button id="devices-batch-progress-close-btn" type="button" style="margin-top:10px; display:none;">關閉</button>
   </div>
 </div>
 

@@ -316,6 +316,12 @@ document.addEventListener("DOMContentLoaded", () => {
   loadDepSchema();
   loadDepProfilesList();
 
+  const urlParams = new URLSearchParams(window.location.search);
+  const openFilename = urlParams.get("open");
+  if (openFilename) {
+    openEditDepProfile(openFilename);
+  }
+
   document.getElementById("new-dep-profile-btn").addEventListener("click", openNewDepProfile);
   document.getElementById("dep-save-btn").addEventListener("click", saveDepProfile);
   document.getElementById("dep-apply-btn").addEventListener("click", applyDepProfile);

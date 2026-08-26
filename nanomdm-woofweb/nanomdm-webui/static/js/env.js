@@ -161,6 +161,31 @@ async function loadGroupsJson() {
 // ---------------------------------------------------------------------------
 // 品牌設定 (站台名稱 / LOGO)
 // ---------------------------------------------------------------------------
+async function loadSystemParams() {
+  const res = await apiFetch("/api/system-params");
+  if (!res.ok) return;
+  const p = res.data.params;
+  document.getElementById("param-asm-devices-interval").value = p.asm_devices_interval_minutes;
+  document.getElementById("param-vpp-interval").value = p.vpp_interval_minutes;
+  document.getElementById("param-devices-status-interval").value = p.devices_status_interval_minutes;
+  document.getElementById("param-pending-retry-hours").value = p.pending_retry_threshold_hours;
+}
+
+async function saveSystemParams() {
+  const payload = {
+    asm_devices_interval_minutes: document.getElementById("param-asm-devices-interval").value,
+    vpp_interval_minutes: document.getElementById("param-vpp-interval").value,
+    devices_status_interval_minutes: document.getElementById("param-devices-status-interval").value,
+    pending_retry_threshold_hours: document.getElementById("param-pending-retry-hours").value,
+  };
+  const res = await apiFetchJSON("/api/system-params", "POST", payload);
+  if (res.ok) {
+    alert("背景排程時間設定已儲存,下一輪排程就會套用新設定");
+  } else {
+    alert("儲存失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
 async function loadBrandingSiteLabel() {
   // 站台名稱已經在base.html的{{ branding.site_label }}裡渲染過,
   // 這裡直接把畫面上目前顯示的文字帶進輸入框當初始值,不用另外呼叫API查詢
@@ -232,6 +257,9 @@ document.addEventListener("DOMContentLoaded", () => {
   loadDevicesCsvRaw();
   loadGroupsJson();
   loadBrandingSiteLabel();
+  loadSystemParams();
+
+  document.getElementById("system-params-save-btn").addEventListener("click", saveSystemParams);
 
   document.getElementById("branding-save-label-btn").addEventListener("click", saveBrandingSiteLabel);
   document.getElementById("branding-upload-logo-btn").addEventListener("click", () => {

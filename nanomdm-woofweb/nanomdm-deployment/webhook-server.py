@@ -171,7 +171,7 @@ def load_group_mobileconfig(group: str):
             log(f"群組 {group} 綁定的描述檔 {filename} 實際上不存在於 {MOBILECONFIG_DIR}")
             return None
 
-        with open(full_path, "r", encoding="utf-8") as f:
+        with open(full_path, "rb") as f:
             return f.read()
     except Exception as e:
         log(f"讀取群組 {group} 的描述檔失敗: {e}")
@@ -240,9 +240,9 @@ def build_install_app_plist(adam_id: str) -> str:
 </plist>"""
 
 
-def build_install_profile_plist(profile_content: str) -> str:
+def build_install_profile_plist(profile_content: bytes) -> str:
     cmd_uuid = str(uuid.uuid4()).upper()
-    encoded = base64.b64encode(profile_content.encode("utf-8")).decode("ascii")
+    encoded = base64.b64encode(profile_content).decode("ascii")
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -302,7 +302,7 @@ def process_enrollment(udid: str):
     time.sleep(2)
 
     # 2. 派送 baseline
-    with open(BASELINE_PLIST, "r", encoding="utf-8") as f:
+    with open(BASELINE_PLIST, "rb") as f:
         baseline_content = f.read()
     enqueue_command(udid, build_install_profile_plist(baseline_content))
     time.sleep(2)

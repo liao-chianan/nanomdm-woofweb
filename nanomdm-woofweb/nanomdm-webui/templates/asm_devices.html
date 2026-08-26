@@ -12,7 +12,7 @@
     </span>
   </h2>
   <p style="color:#6b7280; font-size:13px; margin-bottom:6px;">
-    每 30 分鐘自動背景同步一次到本地 CSV 快取,以下表格顯示的是最近一次同步的結果。
+    每 {{ refresh_interval_minutes }} 分鐘自動背景同步一次到本地 CSV 快取,以下表格顯示的是最近一次同步的結果。
     可以匯出 CSV 離線修改「指派的MDM伺服器」欄位,改完重新上傳,系統會自動比對差異並改派。
   </p>
   <div id="asm-last-sync" style="font-size:13px; color:#6b7280; margin-bottom:14px;">載入中...</div>

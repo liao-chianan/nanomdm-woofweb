@@ -51,6 +51,9 @@ DEFAULT_CONFIG = {
         "devices_csv": "/opt/nanomdm-deployment/all_asm_devices.csv",
         "refresh_interval_seconds": 1800
     },
+    "vpp_cache": {
+        "refresh_interval_seconds": 300
+    },
     "mysql": {
         "docker_container": "nanomdm-mysql",
         "db_user": "nanomdm",
@@ -72,11 +75,17 @@ DEFAULT_CONFIG = {
     "cert_status": {
         "nginx_cert_path": "/etc/letsencrypt/live/YOUR_DOMAIN_HERE/fullchain.pem",
         "scep_ca_path": "/opt/nanomdm-deployment/scep-depot/ca.pem",
+        "scep_ca_key_path": "/opt/nanomdm-deployment/scep-depot/ca.key",
         "scep_depot_dir": "/opt/nanomdm-deployment/scep-depot",
         "scep_ca_backup_dir": "/opt/nanomdm-deployment/scep-depot-backups",
         "scep_docker_image": "local/scep:latest",
         "scep_entrypoint": "/usr/local/bin/scepserver-linux-amd64",
         "vpp_token_path": "/opt/nanomdm-deployment/vpp_token.vpptoken"
+    },
+    "profile_signing": {
+        "enabled": False,
+        "signing_cert_path": "/opt/nanomdm-deployment/scep-depot/profile-signing-cert.pem",
+        "signing_key_path": "/opt/nanomdm-deployment/scep-depot/profile-signing-key.pem"
     },
     "nanomdm": {
         "base_url_env_key": "NANOMDM_BASE_URL",
@@ -92,7 +101,7 @@ DEFAULT_CONFIG = {
     "devices_status_cache": {
         "csv_path": "/opt/nanomdm-deployment/devices-status.csv",
         "refresh_interval_seconds": 600,
-        "pending_retry_threshold_minutes": 180
+        "pending_retry_threshold_minutes": 360
     },
     "nanomdm_cleanup": {
         "retention_days": 60,

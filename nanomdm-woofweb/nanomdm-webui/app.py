@@ -26,6 +26,7 @@ import utils_asm
 import utils_sysstatus
 import utils_version
 import utils_certs
+import utils_signing
 import utils_auth
 import utils_logging
 
@@ -730,6 +731,58 @@ def env_page():
     return render_template("env.html", active="env")
 
 
+@app.route("/api/system-params")
+@login_required
+def api_system_params_get():
+    return jsonify({
+        "ok": True,
+        "params": {
+            "asm_devices_interval_minutes": CFG["asm_devices_cache"]["refresh_interval_seconds"] // 60,
+            "vpp_interval_minutes": CFG["vpp_cache"]["refresh_interval_seconds"] // 60,
+            "devices_status_interval_minutes": CFG["devices_status_cache"]["refresh_interval_seconds"] // 60,
+            "pending_retry_threshold_hours": CFG["devices_status_cache"]["pending_retry_threshold_minutes"] / 60,
+        },
+    })
+
+
+@app.route("/api/system-params", methods=["POST"])
+@login_required
+def api_system_params_save():
+    data = request.json or {}
+
+    def _to_positive_int(value, field_label):
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field_label}必須是數字")
+        if n < 1:
+            raise ValueError(f"{field_label}必須大於0")
+        return n
+
+    try:
+        asm_devices_minutes = _to_positive_int(data.get("asm_devices_interval_minutes"), "ASM 所有裝置的自動背景更新時間")
+        vpp_minutes = _to_positive_int(data.get("vpp_interval_minutes"), "ASM 軟體資訊的自動背景更新時間")
+        devices_status_minutes = _to_positive_int(data.get("devices_status_interval_minutes"), "裝置與命令的自動背景更新時間")
+        retry_hours = _to_positive_int(data.get("pending_retry_threshold_hours"), "逾時命令可重派時間")
+    except ValueError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+
+    CFG["asm_devices_cache"]["refresh_interval_seconds"] = asm_devices_minutes * 60
+    CFG["vpp_cache"]["refresh_interval_seconds"] = vpp_minutes * 60
+    CFG["devices_status_cache"]["refresh_interval_seconds"] = devices_status_minutes * 60
+    CFG["devices_status_cache"]["pending_retry_threshold_minutes"] = retry_hours * 60
+    config.save_config(CFG)
+
+    log_activity_entry(
+        "系統參數-背景排程時間設定", True,
+        detail=(
+            f"ASM所有裝置={asm_devices_minutes}分鐘, ASM軟體資訊={vpp_minutes}分鐘, "
+            f"裝置與命令={devices_status_minutes}分鐘, 逾時命令可重派時間={retry_hours}小時"
+        ),
+    )
+    return jsonify({"ok": True})
+
+
 @app.route("/api/env")
 @login_required
 def api_env():
@@ -859,6 +912,93 @@ def api_cert_status():
         return jsonify({"ok": True, "results": results})
     except Exception as e:
         return jsonify({"ok": False, "message": f"檢查過程發生未預期錯誤: {e}"}), 500
+
+
+def get_profile_signing_kwargs():
+    """依照目前系統的描述檔簽署設定,組出可以直接**展開傳給save_mobileconfig()/
+    duplicate_mobileconfig()的簽署參數dict。沒啟用簽署、或簽署憑證不存在時,
+    回傳空dict(展開後等於完全不傳簽署參數,維持不簽署的行為)。
+    """
+    signing_cfg = CFG.get("profile_signing", {})
+    if not signing_cfg.get("enabled"):
+        return {}
+    if not utils_signing.signing_cert_exists(
+        signing_cfg.get("signing_cert_path", ""), signing_cfg.get("signing_key_path", "")
+    ):
+        return {}
+    return {
+        "sign_with_cert_path": signing_cfg["signing_cert_path"],
+        "sign_with_key_path": signing_cfg["signing_key_path"],
+        "sign_with_ca_path": CFG["cert_status"]["scep_ca_path"],
+    }
+
+
+@app.route("/api/profile-signing/status")
+@login_required
+def api_profile_signing_status():
+    signing_cfg = CFG.get("profile_signing", {})
+    cert_path = signing_cfg.get("signing_cert_path", "")
+    key_path = signing_cfg.get("signing_key_path", "")
+    exists = utils_signing.signing_cert_exists(cert_path, key_path)
+    info = utils_signing.get_signing_cert_info(cert_path) if exists else None
+    return jsonify({
+        "ok": True,
+        "enabled": bool(signing_cfg.get("enabled")),
+        "cert_exists": exists,
+        "cert_info": info,
+    })
+
+
+@app.route("/api/profile-signing/generate", methods=["POST"])
+@login_required
+def api_profile_signing_generate():
+    signing_cfg = CFG.get("profile_signing", {})
+    scep_ca_path = CFG["cert_status"]["scep_ca_path"]
+    scep_ca_key_path = CFG["cert_status"].get("scep_ca_key_path", "")
+    env = get_env_dict()
+    ca_key_password = env.get("SCEP_CA_PASSWORD", "")
+
+    ok, message = utils_signing.generate_profile_signing_cert(
+        scep_ca_path, scep_ca_key_path,
+        signing_cfg["signing_cert_path"], signing_cfg["signing_key_path"],
+        ca_key_password=ca_key_password,
+    )
+    log_activity_entry("描述檔簽署-產生憑證", ok, detail=message)
+    if not ok:
+        return jsonify({"ok": False, "message": message}), 500
+    return jsonify({"ok": True, "message": message})
+
+
+@app.route("/api/profile-signing/add-ca-to-enroll-template", methods=["POST"])
+@login_required
+def api_profile_signing_add_ca_to_enroll_template():
+    scep_ca_path = CFG["cert_status"]["scep_ca_path"]
+    ok, message = utils_profiles.add_ca_cert_to_enroll_template(
+        CFG["paths"]["mobileconfig_dir"], scep_ca_path,
+    )
+    log_activity_entry("描述檔簽署-CA加入註冊模板", ok, detail=message)
+    if not ok:
+        return jsonify({"ok": False, "message": message}), 500
+    return jsonify({"ok": True, "message": message})
+
+
+@app.route("/api/profile-signing/toggle", methods=["POST"])
+@login_required
+def api_profile_signing_toggle():
+    data = request.json or {}
+    enabled = bool(data.get("enabled"))
+
+    if enabled:
+        signing_cfg = CFG.get("profile_signing", {})
+        if not utils_signing.signing_cert_exists(
+            signing_cfg.get("signing_cert_path", ""), signing_cfg.get("signing_key_path", "")
+        ):
+            return jsonify({"ok": False, "message": "尚未產生簽署憑證,請先按「產生簽署憑證」再啟用"}), 400
+
+    CFG["profile_signing"]["enabled"] = enabled
+    config.save_config(CFG)
+    log_activity_entry("描述檔簽署-開關設定", True, detail=f"enabled={enabled}")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/cert-status/nginx/days-left")
@@ -1511,7 +1651,6 @@ def api_cert_scep_regenerate_stream():
 # 頁面預設讀快取,可以手動重新整理即時查詢。
 # ---------------------------------------------------------------------------
 _asm_devices_cache_lock = threading.Lock()
-ASM_DEVICES_REFRESH_INTERVAL_SECONDS = CFG["asm_devices_cache"]["refresh_interval_seconds"]
 
 
 def refresh_asm_devices_cache_once():
@@ -1539,7 +1678,7 @@ def _asm_devices_scheduler_loop():
         except Exception as e:
             print(f"[ASM裝置排程] 發生例外: {e}")
             log_system_activity_entry("ASM所有裝置-自動同步", False, detail=str(e))
-        time.sleep(ASM_DEVICES_REFRESH_INTERVAL_SECONDS)
+        time.sleep(CFG["asm_devices_cache"]["refresh_interval_seconds"])
 
 
 def start_asm_devices_scheduler():
@@ -1550,7 +1689,10 @@ def start_asm_devices_scheduler():
 @app.route("/asm-devices")
 @login_required
 def asm_devices_page():
-    return render_template("asm_devices.html", active="asm_devices")
+    return render_template(
+        "asm_devices.html", active="asm_devices",
+        refresh_interval_minutes=CFG["asm_devices_cache"]["refresh_interval_seconds"] // 60,
+    )
 
 
 @app.route("/api/asm-devices/cache")
@@ -2130,7 +2272,10 @@ def api_device_enrollment_status_import_apply_stream():
 @app.route("/devices")
 @login_required
 def devices_page():
-    return render_template("devices.html", active="devices", command_defs=COMMAND_DEFS)
+    return render_template(
+        "devices.html", active="devices", command_defs=COMMAND_DEFS,
+        refresh_interval_minutes=CFG["devices_status_cache"]["refresh_interval_seconds"] // 60,
+    )
 
 
 @app.route("/api/devices")
@@ -2605,9 +2750,12 @@ def api_profiles_save():
     existing_uuids = {} if is_new else utils_profiles.get_existing_uuids(mobileconfig_dir, filename)
     unmanaged_payloads = data.get("unmanaged_payloads") or []
 
+    sign_kwargs = get_profile_signing_kwargs()
+
     try:
         warnings = utils_profiles.save_mobileconfig(
-            mobileconfig_dir, filename, top_level, payloads, unmanaged_payloads, existing_uuids
+            mobileconfig_dir, filename, top_level, payloads, unmanaged_payloads, existing_uuids,
+            **sign_kwargs,
         )
         log_activity_entry("群組描述檔-存檔", True, detail=filename)
         return jsonify({"ok": True, "message": f"已儲存 {filename}", "warnings": warnings})
@@ -2740,7 +2888,9 @@ def api_profiles_duplicate():
     source_filename = (data.get("source_filename") or "").strip()
     new_filename = (data.get("new_filename") or "").strip()
     try:
-        utils_profiles.duplicate_mobileconfig(CFG["paths"]["mobileconfig_dir"], source_filename, new_filename)
+        utils_profiles.duplicate_mobileconfig(
+            CFG["paths"]["mobileconfig_dir"], source_filename, new_filename, **get_profile_signing_kwargs()
+        )
         log_activity_entry("群組描述檔-再製", True, detail=f"來源={source_filename}, 新檔名={new_filename}")
         return jsonify({"ok": True, "message": f"已複製為 {new_filename}"})
     except (FileNotFoundError, ValueError) as e:
@@ -3107,7 +3257,10 @@ def api_groups_duplicate():
     if source_info.get("mobileconfig"):
         new_mobileconfig = f"{new_group_name}.mobileconfig"
         try:
-            utils_profiles.duplicate_mobileconfig(CFG["paths"]["mobileconfig_dir"], source_info["mobileconfig"], new_mobileconfig)
+            utils_profiles.duplicate_mobileconfig(
+                CFG["paths"]["mobileconfig_dir"], source_info["mobileconfig"], new_mobileconfig,
+                **get_profile_signing_kwargs()
+            )
         except Exception as e:
             return jsonify({"ok": False, "message": f"複製描述檔失敗: {e}"}), 500
 
@@ -3382,9 +3535,8 @@ def api_group_command(group_name):
 
 
 # ---------------------------------------------------------------------------
-# ASM 軟體資訊 - 背景排程 (每 5 分鐘同步一次 vpp_license.csv 快取)
+# ASM 軟體資訊 - 背景排程 (預設每 5 分鐘同步一次 vpp_license.csv 快取,可在系統參數頁面調整)
 # ---------------------------------------------------------------------------
-VPP_REFRESH_INTERVAL_SECONDS = 300
 _vpp_cache_lock = threading.Lock()
 
 
@@ -3415,7 +3567,7 @@ def _vpp_scheduler_loop():
         except Exception as e:
             print(f"[VPP排程] 發生例外: {e}")
             log_system_activity_entry("ASM軟體資訊-自動同步", False, detail=str(e))
-        time.sleep(VPP_REFRESH_INTERVAL_SECONDS)
+        time.sleep(CFG["vpp_cache"]["refresh_interval_seconds"])
 
 
 def start_vpp_scheduler():
@@ -3432,7 +3584,10 @@ def _format_last_sync(mtime):
 @app.route("/asm")
 @login_required
 def asm_page():
-    return render_template("asm.html", active="asm")
+    return render_template(
+        "asm.html", active="asm",
+        refresh_interval_minutes=CFG["vpp_cache"]["refresh_interval_seconds"] // 60,
+    )
 
 
 @app.route("/api/asm/cache")
@@ -3485,17 +3640,91 @@ def api_asm_stream():
 # ---------------------------------------------------------------------------
 # 裝置即時狀態快取 (電量/容量/系統版本/可更新版本)
 # ---------------------------------------------------------------------------
-def refresh_devices_status_cache_once(wait_for_response_seconds=3):
-    """重建 devices-status.csv:
-    1. 先送出新的查詢請求(DeviceInformation/AvailableOSUpdates/OSUpdateStatus/DeviceLocation)
-    2. 稍等幾秒,讓裝置(如果剛好在線上、能立刻處理推播)有機會馬上回應
-    3. 再讀出資料庫裡目前已知的最新回應,寫入快取
+def sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5):
+    """對單一裝置強制重新查詢狀態,只更新 devices-status.csv 裡這一台裝置的那一列,
+    其他裝置的資料完全不受影響。給裝置列表裡逐列的「同步」按鈕用。
 
-    這個順序很重要:如果先讀資料庫、寫快取、才送出新的查詢請求,那麼這次查詢request
-    的回應一定會在快取寫完「之後」才進資料庫,導致這次「立即同步更新」看到的其實是
-    上一輪的舊資料,要等下一次刷新才會反映出來,造成「回應紀錄明明是新的,畫面卻是舊值」
-    的錯覺。改成先送出、等一下、再讀取,才有機會在同一次操作裡就撈到裝置的最新回應
-    (仍然不保證一定來得及,MDM推播處理時間裝置端不受我們控制)。
+    重要:不能直接把 build_devices_status_rows() 的結果整批寫入覆蓋整份CSV——
+    那個函式的 existing_cache 只會保留 lost_mode_enabled/定位這幾個欄位,其他裝置
+    (不在這次查詢範圍內的)會因此掉失電量/系統版本等資料。這裡改成:先讀出完整的
+    既有CSV,只替換這一台裝置對應的那一列,其他裝置原封不動地寫回去。
+
+    回傳 (ok, message)。
+    """
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+
+    existing_cache, _ = utils.read_devices_status_cache(CFG["devices_status_cache"]["csv_path"])
+    old_row = existing_cache.get(serial, {})
+
+    base_url, api_user, api_key = get_nanomdm_conn()
+    if not (base_url and api_key):
+        return False, "找不到 nanomdm 連線設定"
+
+    _, di_params = build_mdm_command_params("DeviceInformation", {})
+    _, aou_params = build_mdm_command_params("AvailableOSUpdates", {})
+
+    try:
+        utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceInformation", di_params)
+        utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "AvailableOSUpdates", aou_params)
+        utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "OSUpdateStatus", {})
+        # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,邏輯跟整批排程一致
+        if old_row.get("lost_mode_enabled") == "true":
+            utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceLocation", {})
+    except Exception as e:
+        return False, f"送出查詢指令失敗: {e}"
+
+    if wait_for_response_seconds > 0:
+        time.sleep(wait_for_response_seconds)
+
+    status_rows, rc, err = utils.query_all_devices_latest_status(CFG["mysql"], db_password, enrollment_id=enrollment_id)
+    if rc != 0:
+        return False, f"查詢最新狀態失敗: {err}"
+
+    updated_rows = utils.build_devices_status_rows(
+        status_rows, {enrollment_id: serial}, existing_cache={serial: old_row},
+    )
+    updated_row = next((r for r in updated_rows if r["serial_number"] == serial), None)
+    if updated_row is None:
+        return False, "查無這台裝置的最新狀態資料(裝置可能從未回應過任何查詢)"
+
+    # 從nanomdm的docker log解析這台裝置最後連線的來源IP(Apple MDM協定本身不提供這項
+    # 資訊,是從nanomdm服務自己的HTTP request log裡,用trace_id把x_forwarded_for的IP
+    # 兜出來的)。build_devices_status_rows()的existing_cache保留邏輯不包含ip_address
+    # 這個欄位,所以這裡沒查到新的IP時,要自己明確保留舊值,不然會被清空成空字串。
+    try:
+        container_name = CFG["nanomdm_docker"]["container_name"]
+        tail_lines = CFG["nanomdm_docker"]["log_tail_lines"]
+        log_rc, log_text, log_err = utils.run_docker_logs(container_name, tail=tail_lines)
+        if log_rc == 0:
+            ip_by_enrollment_id = utils.extract_device_ips_from_nanomdm_logs(log_text)
+            if enrollment_id in ip_by_enrollment_id:
+                updated_row["ip_address"] = ip_by_enrollment_id[enrollment_id]["ip"]
+            else:
+                # 這次的log範圍內沒找到這台裝置的連線紀錄,保留舊值,不要清空
+                updated_row["ip_address"] = old_row.get("ip_address", "")
+        else:
+            updated_row["ip_address"] = old_row.get("ip_address", "")
+    except Exception:
+        # IP解析失敗不該讓整個同步失敗,保留舊值即可
+        updated_row["ip_address"] = old_row.get("ip_address", "")
+
+    # 只替換這一台裝置在既有快取裡的那一列,其他裝置完全不動
+    existing_cache[serial] = updated_row
+    utils.write_devices_status_cache(CFG["devices_status_cache"]["csv_path"], list(existing_cache.values()))
+
+    return True, "同步完成"
+
+
+def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=False):
+    """重建 devices-status.csv 的產生器版本,派送查詢指令的過程中會逐步yield進度更新,
+    方便SSE串流即時顯示派送進度給使用者看(例如「已派送 15/96 台」)。
+    背景排程不需要即時進度,用下面的refresh_devices_status_cache_once()這個薄包裝,
+    直接把這個產生器整個跑完、只取最後一筆「最終結果」即可,呼叫方式完全不變。
+
+    每次yield的內容是一個dict:
+      進度更新: {"progress": True, "current": N, "total": M}
+      最終結果: {"final": True, "ok": bool, "msg": str或None, "count": int}
     """
     env = get_env_dict()
     db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
@@ -3504,7 +3733,8 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
     devices, rc, _, err = utils.query_devices_from_mysql(CFG["mysql"], db_password)
     print(f"[裝置狀態排程]   查詢裝置清單完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒,共 {len(devices) if devices else 0} 台")
     if rc != 0:
-        return False, err, 0
+        yield {"final": True, "ok": False, "msg": err, "count": 0}
+        return
     serial_by_enrollment_id = {d["enrollment_id"]: d["serial_number"] for d in devices}
 
     # 先送出查詢請求(用「目前已知的」快取判斷要不要額外查定位,不用等新一輪的rows)
@@ -3514,20 +3744,27 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
         _, di_params = build_mdm_command_params("DeviceInformation", {})
         _, aou_params = build_mdm_command_params("AvailableOSUpdates", {})
 
-        # 查一次目前所有裝置有哪些(裝置,指令類型)組合還卡在active=1佇列裡沒被處理完,
-        # 以及每筆pending紀錄是什麼時候建立的。
-        # 派送每一種查詢指令前,先確認該裝置的這個類型是不是「最近才送出、還在等回應」,
-        # 是的話跳過這次派送,不重複疊加——這是為了修正實際發生過的問題:對長時間離線的
-        # 裝置每10分鐘無條件重新派送同類型查詢指令,導致enrollment_queue/commands資料表
-        # 無限累積。但如果pending的那筆已經卡了超過pending_retry_threshold_minutes
-        # 分鐘還沒解決,視為「這筆多半已經沒有意義了」,重新嘗試送一次新的——避免裝置一旦
-        # 離線超過一次排程週期就被永久放棄追蹤,即使裝置後來已經恢復連線也不會再被查詢。
-        step_started = datetime.datetime.now()
-        pending_queries = utils.get_pending_status_query_types(CFG["mysql"], db_password)
-        print(f"[裝置狀態排程]   查詢pending清單完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒,共 {len(pending_queries)} 筆")
+        if force:
+            # 強制模式:完全跳過pending查詢,對所有裝置一律送出,不受門檻限制
+            pending_queries = {}
+            print("[裝置狀態排程]   強制模式,跳過pending檢查")
+        else:
+            # 查一次目前所有裝置有哪些(裝置,指令類型)組合還卡在active=1佇列裡沒被處理完,
+            # 以及每筆pending紀錄是什麼時候建立的。
+            # 派送每一種查詢指令前,先確認該裝置的這個類型是不是「最近才送出、還在等回應」,
+            # 是的話跳過這次派送,不重複疊加——這是為了修正實際發生過的問題:對長時間離線的
+            # 裝置每10分鐘無條件重新派送同類型查詢指令,導致enrollment_queue/commands資料表
+            # 無限累積。但如果pending的那筆已經卡了超過pending_retry_threshold_minutes
+            # 分鐘還沒解決,視為「這筆多半已經沒有意義了」,重新嘗試送一次新的——避免裝置一旦
+            # 離線超過一次排程週期就被永久放棄追蹤,即使裝置後來已經恢復連線也不會再被查詢。
+            step_started = datetime.datetime.now()
+            pending_queries = utils.get_pending_status_query_types(CFG["mysql"], db_password)
+            print(f"[裝置狀態排程]   查詢pending清單完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒,共 {len(pending_queries)} 筆")
         retry_threshold_minutes = CFG["devices_status_cache"].get("pending_retry_threshold_minutes", 180)
 
         def _should_send_query(eid, request_type):
+            if force:
+                return True  # 強制模式,一律送出
             key = (eid, request_type)
             if key not in pending_queries:
                 return True  # 沒有pending紀錄,正常送出
@@ -3540,7 +3777,8 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
                 return False  # 時間格式解析失敗,保守起見維持原本「已經pending,不重送」的行為
 
         step_started = datetime.datetime.now()
-        for d in devices:
+        total = len(devices)
+        for i, d in enumerate(devices):
             try:
                 eid = d["enrollment_id"]
                 if _should_send_query(eid, "DeviceInformation"):
@@ -3555,7 +3793,8 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
                 if old_row.get("lost_mode_enabled") == "true" and _should_send_query(eid, "DeviceLocation"):
                     utils.send_mdm_command(base_url, api_user, api_key, eid, "DeviceLocation", {})
             except Exception:
-                continue  # 個別裝置排入失敗不該影響整批
+                pass  # 個別裝置排入失敗不該影響整批,繼續往下一台
+            yield {"progress": True, "current": i + 1, "total": total}
         print(f"[裝置狀態排程]   派送查詢指令完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
 
     # 稍等一下,讓在線上的裝置有機會立刻處理推播、回應查詢(非強制,只是盡量提高這次就抓到新資料的機會)
@@ -3566,7 +3805,8 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
     status_rows, rc2, err2 = utils.query_all_devices_latest_status(CFG["mysql"], db_password)
     print(f"[裝置狀態排程]   查詢最新狀態完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
     if rc2 != 0:
-        return False, err2, 0
+        yield {"final": True, "ok": False, "msg": err2, "count": 0}
+        return
 
     existing_cache, _ = utils.read_devices_status_cache(CFG["devices_status_cache"]["csv_path"])
     rows = utils.build_devices_status_rows(status_rows, serial_by_enrollment_id, existing_cache=existing_cache)
@@ -3594,7 +3834,19 @@ def refresh_devices_status_cache_once(wait_for_response_seconds=3):
 
     utils.write_devices_status_cache(CFG["devices_status_cache"]["csv_path"], rows)
 
-    return True, None, len(rows)
+    yield {"final": True, "ok": True, "msg": None, "count": len(rows)}
+
+
+def refresh_devices_status_cache_once(wait_for_response_seconds=3, force=False):
+    """薄包裝:把上面的產生器版本整個跑完,只取最後一筆「最終結果」回傳,
+    維持跟改寫前完全一樣的呼叫介面跟回傳格式(ok, msg, count)三元組,
+    給背景排程等不需要即時進度的呼叫方使用,不用改動任何既有呼叫的地方。
+    """
+    result = {"ok": False, "msg": "沒有任何結果", "count": 0}
+    for item in _refresh_devices_status_cache_once_gen(wait_for_response_seconds, force):
+        if item.get("final"):
+            result = item
+    return result["ok"], result["msg"], result["count"]
 
 
 def _devices_status_scheduler_loop():
@@ -3936,23 +4188,40 @@ def api_devices_status_cache():
     return jsonify({"ok": True, "cache": cache, "last_sync": _format_last_sync(mtime) if mtime else None})
 
 
+@app.route("/api/devices/sync-one", methods=["POST"])
+@login_required
+def api_devices_sync_one():
+    data = request.json or {}
+    serial = data.get("serial", "")
+    enrollment_id = data.get("enrollment_id", "")
+    if not serial or not enrollment_id:
+        return jsonify({"ok": False, "message": "缺少序號或 enrollment_id"}), 400
+
+    ok, message = sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5)
+    if not ok:
+        return jsonify({"ok": False, "message": message}), 500
+    return jsonify({"ok": True, "message": message})
+
+
 @app.route("/api/devices/status-sync-stream")
 @login_required
 def api_devices_status_sync_stream():
     def generate():
-        yield f"data: {json.dumps({'message': '正在送出查詢請求並等待裝置回應...', 'done': False}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'message': '正在送出查詢請求...', 'done': False}, ensure_ascii=False)}\n\n"
         try:
-            ok, msg, count = refresh_devices_status_cache_once(wait_for_response_seconds=5)
+            for item in _refresh_devices_status_cache_once_gen(wait_for_response_seconds=5, force=True):
+                if item.get("progress"):
+                    current, total = item["current"], item["total"]
+                    yield f"data: {json.dumps({'message': f'已派送查詢指令: {current}/{total} 台', 'done': False}, ensure_ascii=False)}\n\n"
+                elif item.get("final"):
+                    if not item["ok"]:
+                        yield f"data: {json.dumps({'error': item['msg'], 'done': True}, ensure_ascii=False)}\n\n"
+                        return
+                    count = item["count"]
+                    mtime = os.path.getmtime(CFG["devices_status_cache"]["csv_path"])
+                    yield f"data: {json.dumps({'done': True, 'count': count, 'last_sync': _format_last_sync(mtime), 'message': f'已更新快取(共 {count} 台裝置有資料)。已在線上、能立刻處理推播的裝置這次應該就有拿到最新資料;沒能及時回應的裝置,已經幫它排入新的查詢,請稍後再按一次查看'}, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e), 'done': True}, ensure_ascii=False)}\n\n"
-            return
-
-        if not ok:
-            yield f"data: {json.dumps({'error': msg, 'done': True}, ensure_ascii=False)}\n\n"
-            return
-
-        mtime = os.path.getmtime(CFG["devices_status_cache"]["csv_path"])
-        yield f"data: {json.dumps({'done': True, 'count': count, 'last_sync': _format_last_sync(mtime), 'message': f'已更新快取(共 {count} 台裝置有資料)。已在線上、能立刻處理推播的裝置這次應該就有拿到最新資料;沒能及時回應的裝置,已經幫它排入新的查詢,請稍後再按一次查看'}, ensure_ascii=False)}\n\n"
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 

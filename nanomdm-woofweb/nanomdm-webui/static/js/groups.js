@@ -38,10 +38,10 @@ async function loadGroups() {
   res.data.rows.forEach((row) => {
     const tr = document.createElement("tr");
     const enrollLink = row.enroll_json
-      ? `<a href="${apiUrl('/dep-profiles')}" class="serial-link" style="text-decoration:underline;">${escapeHtml(row.enroll_json)}</a>`
+      ? `<a href="${apiUrl('/dep-profiles')}?open=${encodeURIComponent(row.enroll_json)}" class="serial-link" style="text-decoration:underline;">${escapeHtml(row.enroll_json)}</a>`
       : `<span style="color:#9ca3af;">(未指派)</span>`;
     const mobileconfigLink = row.mobileconfig
-      ? `<a href="${apiUrl('/profiles')}" class="serial-link" style="text-decoration:underline;">${escapeHtml(row.mobileconfig)}</a>`
+      ? `<a href="${apiUrl('/profiles')}?open=${encodeURIComponent(row.mobileconfig)}" class="serial-link" style="text-decoration:underline;">${escapeHtml(row.mobileconfig)}</a>`
       : `<span style="color:#9ca3af;">(未指派)</span>`;
     tr.innerHTML = `
       <td>${escapeHtml(row.group_name)}</td>

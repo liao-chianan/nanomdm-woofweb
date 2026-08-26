@@ -792,12 +792,18 @@ def read_vpp_cache_csv(path):
     return rows, mtime
 
 
-def query_all_devices_latest_status(mysql_cfg, db_password):
+def query_all_devices_latest_status(mysql_cfg, db_password, enrollment_id=None):
     """一次查出「每一台裝置」最近一筆 DeviceInformation / AvailableOSUpdates /
     OSUpdateStatus / DeviceLocation 回應,用 window function(ROW_NUMBER)在單一SQL裡完成,
     不用對每台裝置各自呼叫一次(那樣裝置一多會很慢)。
+
+    enrollment_id: 選填,只查這一台裝置(給單一裝置手動同步用,不用每次都撈出全部裝置)。
     回傳 (rows, rc, err),rows 是 [{id, request_type, result, result_updated_at}, ...]
     """
+    enrollment_filter = ""
+    if enrollment_id:
+        safe_id = enrollment_id.replace("'", "''")
+        enrollment_filter = f"AND id = '{safe_id}' "
     sql = (
         "SELECT JSON_ARRAYAGG(JSON_OBJECT("
         "'id', id, 'request_type', request_type, 'result_b64', TO_BASE64(result), "
@@ -805,8 +811,8 @@ def query_all_devices_latest_status(mysql_cfg, db_password):
         ")) FROM (SELECT id, request_type, result, result_updated_at, "
         "ROW_NUMBER() OVER (PARTITION BY id, request_type ORDER BY result_updated_at DESC) AS rn "
         "FROM view_queue "
-        "WHERE request_type IN ('DeviceInformation', 'AvailableOSUpdates', 'OSUpdateStatus', 'DeviceLocation') "
-        "AND result IS NOT NULL"
+        "WHERE request_type IN ('DeviceInformation', 'AvailableOSUpdates', 'OSUpdateStatus', 'DeviceLocation', 'ScheduleOSUpdate') "
+        f"AND result IS NOT NULL {enrollment_filter}"
         ") t WHERE rn = 1;"
     )
     args = [
@@ -916,7 +922,14 @@ def build_devices_status_rows(status_rows, serial_by_enrollment_id, existing_cac
                 "location_accuracy": old_row.get("location_accuracy", ""),
             }
 
-    for item in status_rows:
+    # 依result_updated_at時間排序(由舊到新)再處理,確保有「同一個裝置欄位可能被多種
+    # request_type設定」的情況時(例如os_update_status同時會被OSUpdateStatus跟
+    # ScheduleOSUpdate設定),最後生效的一定是時間上真正最新的那筆,不會因為SQL查詢
+    # 回傳的順序不保證跟時間一致,而被舊資料蓋掉新資料。空字串(缺少時間戳記的極端情況)
+    # 排最前面,不會影響排序穩定性。
+    sorted_status_rows = sorted(status_rows, key=lambda item: item.get("result_updated_at") or "")
+
+    for item in sorted_status_rows:
         enrollment_id = item.get("id")
         serial = serial_by_enrollment_id.get(enrollment_id)
         if not serial:
@@ -947,12 +960,16 @@ def build_devices_status_rows(status_rows, serial_by_enrollment_id, existing_cac
                 row["available_os_version"] = version_label
                 row["available_os_product_key"] = latest.get("ProductKey") or ""
             else:
-                # 空陣列代表裝置已經是最新版本、沒有更新可用了,
-                # 一定要明確清空,不然舊的「可更新」資訊會一直卡住不會消失
+                # 空陣列不代表「完全沒有更新」,也可能代表「更新已經下載完成、
+                # 不再是待下載狀態」——只清空「可用更新版本」相關欄位,不要連帶清空
+                # os_update_is_downloaded/os_update_status。這兩個欄位由OSUpdateStatus
+                # 獨立維護,如果這裡也跟著清空,萬一同一輪排程裡AvailableOSUpdates(空陣列)
+                # 剛好排在OSUpdateStatus之後處理,會把剛解析出來的IsDownloaded=true洗掉,
+                # 導致裝置明明已經下載完成,畫面卻還是顯示「下載更新」而不是「安裝更新」。
+                # 前端的下載/安裝按鈕完全是靠available_os_version是否有值來決定要不要顯示,
+                # 不清空這兩個欄位不會造成「沒有更新卻顯示按鈕」的問題。
                 row["available_os_version"] = ""
                 row["available_os_product_key"] = ""
-                row["os_update_is_downloaded"] = ""
-                row["os_update_status"] = ""
 
         elif item.get("request_type") == "OSUpdateStatus":
             # 回應格式參考micromdm的OSUpdateStatusResponseItem:
@@ -960,13 +977,40 @@ def build_devices_status_rows(status_rows, serial_by_enrollment_id, existing_cac
             # 頂層key沿用RequestType慣例(跟AvailableOSUpdates一致),防禦性處理找不到的情況
             statuses = parsed.get("OSUpdateStatus") or []
             target_key = row.get("available_os_product_key")
-            for s in statuses:
-                if not target_key or s.get("ProductKey") == target_key:
-                    is_downloaded = s.get("IsDownloaded")
-                    # 已知部分裝置回傳整數0/1而非布林值(社群回報過的已知行為),兩種都處理
-                    row["os_update_is_downloaded"] = "true" if is_downloaded in (True, 1, "1", "true") else "false"
-                    row["os_update_status"] = s.get("Status", "")
-                    break
+            # 陣列裡通常只會有一筆資料(裝置目前只會處理一個更新),這種情況直接採用,
+            # 不強制要求跟target_key完全比對成功——這是實際發生過的問題:如果target_key
+            # 因為時序(AvailableOSUpdates還沒處理過)或格式些微差異對不上,整筆回應會被
+            # 靜靜跳過,os_update_is_downloaded就會停留在舊值,不會被更新。
+            # 只有陣列裡真的有多筆資料、需要挑出正確那筆時,才使用target_key比對篩選。
+            candidates = statuses if (len(statuses) <= 1 or not target_key) else [
+                s for s in statuses if s.get("ProductKey") == target_key
+            ] or statuses  # 篩選後如果一筆都沒有(target_key對不上任何一筆),退回用全部,不要整批放棄
+            for s in candidates:
+                is_downloaded = s.get("IsDownloaded")
+                # 已知部分裝置回傳整數0/1而非布林值(社群回報過的已知行為),兩種都處理
+                row["os_update_is_downloaded"] = "true" if is_downloaded in (True, 1, "1", "true") else "false"
+                row["os_update_status"] = s.get("Status", "")
+                break
+
+        elif item.get("request_type") == "ScheduleOSUpdate":
+            # ScheduleOSUpdate指令本身的確認回應,格式跟OSUpdateStatus不同:
+            # 頂層key是UpdateResults(不是OSUpdateStatus),每筆包含
+            # {InstallAction, ProductKey, Status}。這是唯一會回報「安裝中(Installing)」
+            # 這個狀態的地方——OSUpdateStatus查詢指令本身不會回報Installing,
+            # 只有實際觸發ScheduleOSUpdate指令後,裝置在這個指令自己的確認回應裡
+            # 才會回報目前是不是正在安裝。(查證來源:Apple官方文件
+            # ScheduleOSUpdateResponse.UpdateResultsItem,以及多篇社群MDM廠商
+            # 技術文件裡的實際範例回應)
+            update_results = parsed.get("UpdateResults") or []
+            target_key = row.get("available_os_product_key")
+            candidates = update_results if (len(update_results) <= 1 or not target_key) else [
+                u for u in update_results if u.get("ProductKey") == target_key
+            ] or update_results
+            for u in candidates:
+                status_value = u.get("Status", "")
+                if status_value:  # 空字串代表這筆沒有明確狀態(例如純粹的錯誤回應),不要覆蓋掉既有值
+                    row["os_update_status"] = status_value
+                break
 
         elif item.get("request_type") == "DeviceLocation":
             lat = parsed.get("Latitude")
@@ -1170,9 +1214,9 @@ def trigger_push(nanomdm_base_url, api_user, api_key, enrollment_id, timeout=15)
 
 
 def get_pending_status_query_types(mysql_cfg, db_password):
-    """查詢目前所有裝置,還有哪些(enrollment_id, request_type)組合有active=1(尚未處理完成)
-    的定期狀態查詢佇列項目,以及這筆pending紀錄是什麼時候建立的。只鎖定裝置狀態排程會用到
-    的這幾種查詢類型,不是全部指令類型,避免不必要地撈出大量不相關的資料。
+    """查詢目前所有裝置,還有哪些(enrollment_id, request_type)組合「真的還沒收到任何回應」,
+    以及這筆pending紀錄是什麼時候建立的。只鎖定裝置狀態排程會用到的這幾種查詢類型,
+    不是全部指令類型,避免不必要地撈出大量不相關的資料。
 
     回傳一個dict,key是(enrollment_id, request_type)的tuple,value是這筆pending紀錄裡
     「最新一筆」的建立時間字串("%Y-%m-%d %H:%M:%S",已轉換成台灣時區)。用途:讓裝置狀態
@@ -1187,13 +1231,25 @@ def get_pending_status_query_types(mysql_cfg, db_password):
     MIN永遠會抓到那筆極舊的紀錄,導致「已經超過門檻、該重試」的判斷永遠成立,不管
     最近是不是才剛送過,完全沒有真的達到「避免短時間內重複」的效果——這是實際發生過、
     造成裝置每10分鐘還是重複被派送指令的真正原因。
+
+    更重要:判斷「還在不在等待中」不能只看active=1這個欄位——已經證實過nanomdm的
+    active欄位不會因為裝置成功回應(Acknowledged)就自動變成0,只有明確被取消才會變0。
+    如果只看active=1,一台早就已經回應完成的裝置,還是會被誤判成「還在等待中」,
+    導致下一輪排程時,明明該無條件強制重送最新查詢,卻被6小時的逾時重派門檻誤擋下來,
+    造成「排程自動更新」跟「逾時重派門檻」兩個機制互相衝突。正確做法是額外用
+    LEFT JOIN command_results,只把「還沒有對應回應紀錄」的查詢視為真正等待中——
+    已經收到任何回應(不管是Acknowledged還是其他任何最終狀態)的,一律視為「不在等待中」,
+    完全不會出現在這個函式的回傳結果裡,讓呼叫端(_should_send_query)判斷「沒有pending紀錄」
+    而直接放行,下一輪排程正常強制送出新的查詢,不受逾時重派門檻限制。
     """
     query_types = "'DeviceInformation','AvailableOSUpdates','OSUpdateStatus','DeviceLocation'"
     sql = (
         "SELECT q.id AS enrollment_id, c.request_type, "
         "DATE_FORMAT(CONVERT_TZ(MAX(q.created_at), '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS latest_created_at "
-        "FROM enrollment_queue q JOIN commands c ON q.command_uuid = c.command_uuid "
-        f"WHERE q.active = 1 AND c.request_type IN ({query_types}) "
+        "FROM enrollment_queue q "
+        "JOIN commands c ON q.command_uuid = c.command_uuid "
+        "LEFT JOIN command_results r ON r.command_uuid = q.command_uuid AND r.id = q.id "
+        f"WHERE r.id IS NULL AND c.request_type IN ({query_types}) "
         "GROUP BY q.id, c.request_type;"
     )
     args = [
