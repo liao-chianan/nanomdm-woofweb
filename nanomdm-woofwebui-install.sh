@@ -146,10 +146,10 @@ log_ok "專案下載並部署到 /opt/nanomdm-webui 與 /opt/nanomdm-deployment 
 # (zip/git在某些流程下不一定會保留unix執行權限,這是實際部署時遇到過的問題:
 #  這些腳本是被我們的程式直接呼叫路徑執行,不是透過bash/sh間接執行,缺execute bit會直接
 #  收到 Permission denied)
-chmod +x /opt/nanomdm-deployment/nanodep-release/tools/*.sh 2>/dev/null || true
-chmod +x /opt/nanomdm-deployment/nanoaxm-tools/*.sh 2>/dev/null || true
-chmod +x /opt/nanomdm-deployment/check_vpp_license.sh 2>/dev/null || true
-chmod +x /opt/nanomdm-deployment/check-cert-expiry.sh 2>/dev/null || true
+sudo chmod +x /opt/nanomdm-deployment/nanodep-release/tools/*.sh 2>/dev/null || true
+sudo chmod +x /opt/nanomdm-deployment/nanoaxm-tools/*.sh 2>/dev/null || true
+sudo chmod +x /opt/nanomdm-deployment/check_vpp_license.sh 2>/dev/null || true
+sudo chmod +x /opt/nanomdm-deployment/check-cert-expiry.sh 2>/dev/null || true
 log_ok "已設定必要腳本的執行權限"
 
 # =============================================================================
