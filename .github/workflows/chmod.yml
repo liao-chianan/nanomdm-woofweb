@@ -1,8 +1,12 @@
-name: Make scripts executable 讓所有sh都帶有chmod +x可執行屬性
+name: Make scripts executable commit時讓所有sh都帶有可執行屬性
 
 on:
   push:
     branches: [ main ]
+
+# 新增此區塊明確給予寫入權限
+permissions:
+  contents: write
 
 jobs:
   chmod:
@@ -15,5 +19,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           find . -type f -name "*.sh" -exec git update-index --chmod=+x {} +
-          git commit -m "chmod +x on script files" || exit 0
-          git push
+          # 檢查是否有變更，有變更才 commit & push
+          if ! git diff --staged --quiet; then
+            git commit -m "chmod +x on script files"
+            git push
+          else
+            echo "No file permission changes detected."
+          fi
