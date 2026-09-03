@@ -1,0 +1,19 @@
+name: Make scripts executable 讓所有sh都帶有chmod +x 可執行屬性
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  chmod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Make all .sh files executable
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          find . -type f -name "*.sh" -exec git update-index --chmod=+x {} +
+          git commit -m "chmod +x on script files" || exit 0
+          git push
