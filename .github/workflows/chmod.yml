@@ -1,4 +1,4 @@
-name: Make scripts executable 讓所有sh都帶有chmod +x 可執行屬性
+name: Make scripts executable 讓所有sh都帶有chmod +x可執行屬性
 
 on:
   push:
