@@ -16,6 +16,8 @@ const LOG_COLUMN_SPECS = {
 };
 
 let currentLogType = "login";
+let currentPage = 1;
+let commandLogsHasSearched = false; // 指派命令紀錄:進頁面時先不自動查詢,要等使用者手動變更篩選條件才觸發
 let allEntries = [];
 let sortState = { key: "timestamp", dir: "desc" };
 let filterValues = {};
@@ -137,8 +139,59 @@ function renderTableBody() {
   });
 }
 
+function renderPagination(page, totalPages, totalCount, onPageChange) {
+  ["top", "bottom"].forEach((position) => {
+    const container = document.getElementById(`logs-pagination-container-${position}`);
+    if (!container) return;
+
+    if (totalPages <= 1) {
+      container.innerHTML = totalCount > 0 ? `<span style="color:#9ca3af;">共 ${totalCount} 筆</span>` : "";
+      return;
+    }
+
+    const prevDisabled = page <= 1 ? "disabled" : "";
+    const nextDisabled = page >= totalPages ? "disabled" : "";
+    container.innerHTML = `
+      <button class="secondary" id="logs-page-prev-btn-${position}" type="button" ${prevDisabled}>上一頁</button>
+      <span>第 ${page} / ${totalPages} 頁(共 ${totalCount} 筆,每頁 1000 筆)</span>
+      <button class="secondary" id="logs-page-next-btn-${position}" type="button" ${nextDisabled}>下一頁</button>
+      <span style="margin-left:8px; display:flex; align-items:center; gap:4px;">
+        跳至第
+        <input type="number" id="logs-page-jump-input-${position}" min="1" max="${totalPages}" value="${page}" style="width:60px; text-align:center;">
+        頁
+        <button class="secondary" id="logs-page-jump-btn-${position}" type="button">前往</button>
+      </span>
+    `;
+
+    const prevBtn = document.getElementById(`logs-page-prev-btn-${position}`);
+    const nextBtn = document.getElementById(`logs-page-next-btn-${position}`);
+    const jumpInput = document.getElementById(`logs-page-jump-input-${position}`);
+    const jumpBtn = document.getElementById(`logs-page-jump-btn-${position}`);
+
+    if (prevBtn) prevBtn.addEventListener("click", () => onPageChange(page - 1));
+    if (nextBtn) nextBtn.addEventListener("click", () => onPageChange(page + 1));
+
+    const doJump = () => {
+      let target = parseInt(jumpInput.value, 10);
+      if (isNaN(target)) return;
+      target = Math.max(1, Math.min(totalPages, target)); // 超出範圍的頁碼,自動修正到有效範圍內
+      onPageChange(target);
+    };
+    if (jumpBtn) jumpBtn.addEventListener("click", doJump);
+    if (jumpInput) {
+      jumpInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doJump();
+      });
+    }
+  });
+}
+
 async function loadLogs() {
   if (currentLogType === "commands") {
+    if (!commandLogsHasSearched) {
+      await initCommandLogsFiltersOnly();
+      return;
+    }
     await loadCommandLogs();
     return;
   }
@@ -150,15 +203,20 @@ async function loadLogs() {
   renderFilters();
   filterValues = {};
 
-  const res = await apiFetch(`/api/system-logs?type=${currentLogType}`);
+  const res = await apiFetch(`/api/system-logs?type=${currentLogType}&page=${currentPage}`);
   if (!res.ok) {
     tbody.innerHTML = `<tr><td style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
     return;
   }
 
   allEntries = res.data.entries || [];
+  currentPage = res.data.page || 1;
   document.getElementById("log-retention-info").textContent = `保留天數: ${res.data.retention_days} 天`;
   renderTableBody();
+  renderPagination(res.data.page, res.data.total_pages, res.data.total_count, (newPage) => {
+    currentPage = newPage;
+    loadLogs();
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -175,6 +233,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("log-type-select").addEventListener("change", (e) => {
     currentLogType = e.target.value;
     sortState = { key: "timestamp", dir: "desc" };
+    currentPage = 1;
+    commandLogsHasSearched = false;
     loadLogs();
   });
 
@@ -358,7 +418,31 @@ function renderCommandTableBody(rows) {
   });
 }
 
+async function initCommandLogsFiltersOnly() {
+  const tbody = document.getElementById("logs-tbody");
+  document.getElementById("log-retention-info").textContent = "";
+  document.getElementById("logs-pagination-container-top").innerHTML = "";
+  document.getElementById("logs-pagination-container-bottom").innerHTML = "";
+
+  renderCommandTableHeader();
+
+  const res = await apiFetch("/api/system-logs/commands/filter-options");
+  if (res.ok) {
+    renderCommandFilters(res.data.filter_options);
+  }
+
+  tbody.innerHTML = `
+    <tr>
+      <td colspan="10" style="text-align:center; padding:28px 16px; color:#6b7280; font-size:13px;">
+        資料量較大(超過 18 萬筆),請先選擇上方的篩選條件(例如裝置群組、命令類別、狀態,或輸入裝置名稱/序號搜尋)才會開始查詢。<br>
+        <span style="color:#b42318; font-weight:600;">⚠️ 選擇「全部群組」進行查詢時,因資料量較大,仍需要一段時間才能完成,請耐心等候。</span>
+      </td>
+    </tr>
+  `;
+}
+
 async function loadCommandLogs() {
+  commandLogsHasSearched = true; // 只要真的執行過一次查詢(不管是哪個篩選觸發的),之後分頁/排序都能正常繼續使用loadCommandLogs
   const tbody = document.getElementById("logs-tbody");
   tbody.innerHTML = `<tr><td colspan="10">載入中...</td></tr>`;
   document.getElementById("log-retention-info").textContent = "";
@@ -368,6 +452,7 @@ async function loadCommandLogs() {
   if (commandFilterValues.group) params.set("group", commandFilterValues.group);
   if (commandFilterValues.request_type) params.set("request_type", commandFilterValues.request_type);
   if (commandFilterValues.status) params.set("status", commandFilterValues.status);
+  params.set("page", currentPage);
 
   const res = await apiFetch(`/api/system-logs/commands?${params.toString()}`);
   if (!res.ok) {
@@ -378,7 +463,12 @@ async function loadCommandLogs() {
   renderCommandTableHeader();
   renderCommandFilters(res.data.filter_options);
   lastCommandRows = res.data.rows;
+  currentPage = res.data.page || 1;
   resortAndRenderCommandRows();
+  renderPagination(res.data.page, res.data.total_pages, res.data.total_count, (newPage) => {
+    currentPage = newPage;
+    loadCommandLogs();
+  });
 }
 
 function resortAndRenderCommandRows() {

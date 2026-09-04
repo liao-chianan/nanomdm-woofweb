@@ -4,6 +4,24 @@
 <div class="panel">
   <h2>版本與更新</h2>
 
+  <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border-color);">
+    <a href="https://github.com/{{ github_owner }}" target="_blank" rel="noopener">
+      <img src="https://github.com/{{ github_owner }}.png" alt="{{ github_owner }}" style="width:36px; height:36px; border-radius:50%; display:block;">
+    </a>
+    <div style="font-size:13px;">
+      <div>
+        專案原始碼:
+        <a href="https://github.com/{{ github_owner }}/{{ github_repo }}" target="_blank" rel="noopener">
+          github.com/{{ github_owner }}/{{ github_repo }}
+        </a>
+      </div>
+      <div style="color:#6b7280;">
+        作者:
+        <a href="https://github.com/{{ github_owner }}" target="_blank" rel="noopener">@{{ github_owner }}</a>
+      </div>
+    </div>
+  </div>
+
   <div id="version-unknown-box" style="display:none; background:#fdeaea; border:1px solid #f5c2c2; border-radius:6px; padding:14px; margin-bottom:14px;">
     <p style="margin:0 0 10px 0; font-size:13px; color:#7a271a;">
       目前找不到版本記錄(通常是這個功能上線之前就已經安裝好的環境)。請先確認目前實際安裝的版本,才能正確比對差異。
@@ -33,18 +51,18 @@
 
 <div class="panel">
   <h2>
-    所有可用版本(降版用)
-    <button id="version-list-refresh-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
+    更新歷程記錄
+    <button id="version-history-refresh-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
   </h2>
   <p style="color:#6b7280; font-size:13px; margin:6px 0;">
-    如果更新之後發現問題,可以在這裡選擇一個先前的版本切換回去。切換方式(套用哪些檔案)跟「更新」完全相同,只是目標版本比較舊。
+    過去每一次透過這個頁面套用更新的紀錄,純粹顯示用,不能從這裡切換回舊版本。
   </p>
-  <table class="data-table" id="version-list-table">
+  <table class="data-table" id="version-history-table">
     <thead>
-      <tr><th>版本</th><th>發布時間</th><th>版本說明</th><th>操作</th></tr>
+      <tr><th>更新時間</th><th>更新到的版本</th></tr>
     </thead>
-    <tbody id="version-list-tbody">
-      <tr><td colspan="4">載入中...</td></tr>
+    <tbody id="version-history-tbody">
+      <tr><td colspan="2">載入中...</td></tr>
     </tbody>
   </table>
 </div>
@@ -68,5 +86,9 @@
 {% endblock %}
 
 {% block extra_js %}
+<script>
+  window.GITHUB_OWNER = {{ github_owner | tojson }};
+  window.GITHUB_REPO = {{ github_repo | tojson }};
+</script>
 <script src="{{ url_for('static', filename='js/version.js') }}?v={{ static_version }}"></script>
 {% endblock %}

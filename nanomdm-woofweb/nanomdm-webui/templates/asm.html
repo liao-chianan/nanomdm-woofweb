@@ -13,6 +13,13 @@
     每 {{ refresh_interval_minutes }} 分鐘自動背景同步一次,以下表格顯示的是最近一次同步的快取結果。
     按「立即同步軟體」可以馬上重新查詢一次(過程較慢,會即時顯示進度)。
   </p>
+  <div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; padding:10px 14px; margin-bottom:14px; font-size:13px; color:#1e3a5f;">
+    <strong>App 更新機制說明:</strong>
+    Apple 沒有獨立的「更新」指令,重新派送安裝指令(InstallApplication)就是觸發更新的正確做法——
+    如果裝置上已經有這個 App,裝置會判斷這是更新而不是重新安裝。
+    每個 App 右側的「更新 App」按鈕可以手動觸發,會對所有<strong>綁定這個 App 的群組</strong>裡的全部裝置重新派送;
+    勾選「自動更新」後,之後每次同步軟體資訊時,只要偵測到這個 App 的版本有變化,系統就會自動派送更新,不需要手動操作。
+  </div>
   <div id="vpp-last-sync" style="font-size:13px; color:#6b7280; margin-bottom:12px;">載入中...</div>
 
   <table class="data-table" id="vpp-table">
@@ -21,12 +28,16 @@
         <th>Adam ID</th>
         <th>Bundle ID</th>
         <th>軟體名稱</th>
+        <th>當下版本</th>
+        <th>版本日期</th>
         <th>總數量</th>
         <th>剩餘量</th>
+        <th>更新 App</th>
+        <th>自動更新</th>
       </tr>
     </thead>
     <tbody id="vpp-tbody">
-      <tr><td colspan="5">載入中...</td></tr>
+      <tr><td colspan="9">載入中...</td></tr>
     </tbody>
   </table>
 </div>
@@ -35,6 +46,19 @@
   <h2>即時查詢進度</h2>
   <div id="vpp-status" style="margin-bottom:10px; font-size:13px; color:#6b7280;"></div>
   <pre id="vpp-output" style="background:#0d1117; color:#c9d6e8; padding:14px 16px; border-radius:6px; min-height:160px; max-height:420px; overflow-y:auto; font-family:var(--mono); font-size:12.5px; white-space:pre-wrap;"></pre>
+</div>
+
+<!-- 更新App進度 Modal -->
+<div class="modal-overlay hidden" id="app-update-progress-modal">
+  <div class="modal-box" style="width:500px;">
+    <h3 id="app-update-progress-title">派送更新中...</h3>
+    <div style="background:#e5e7eb; border-radius:6px; height:20px; overflow:hidden; margin:12px 0;">
+      <div id="app-update-progress-bar" style="background:#2563eb; height:100%; width:0%; transition:width 0.2s;"></div>
+    </div>
+    <p id="app-update-progress-text" style="font-size:13px; color:#6b7280;">準備中...</p>
+    <div id="app-update-progress-errors" style="max-height:180px; overflow-y:auto; font-size:12px; color:#b42318; margin-top:8px;"></div>
+    <button id="app-update-progress-close-btn" type="button" style="margin-top:10px; display:none;">關閉</button>
+  </div>
 </div>
 
 {% endblock %}

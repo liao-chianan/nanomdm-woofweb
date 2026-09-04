@@ -34,6 +34,24 @@ function renderField(field, value) {
       </div>
     `;
   }
+  if (field.type === "image_upload") {
+    const hasExisting = !!val;
+    const previewSrc = hasExisting ? `data:image/png;base64,${val}` : "";
+    return `
+      <div style="margin:6px 0;">
+        <p style="font-size:13px; font-weight:600; margin-bottom:4px;">${escapeHtml(field.label)}</p>
+        ${renderFieldHelp(field)}
+        <input type="hidden" data-field="${escapeHtml(field.name)}" value="${escapeHtml(val || "")}">
+        <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+          <div class="image-upload-preview" style="width:48px; height:48px; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; display:flex; align-items:center; justify-content:center; background:#f9fafb; flex-shrink:0;">
+            ${previewSrc ? `<img src="${previewSrc}" style="width:100%; height:100%; object-fit:cover;">` : `<span style="font-size:11px; color:#9ca3af;">無圖示</span>`}
+          </div>
+          <input type="file" accept="image/png,image/jpeg" class="image-upload-picker" data-target-field="${escapeHtml(field.name)}" style="font-size:12px;">
+          ${hasExisting ? `<button type="button" class="secondary image-upload-clear-btn" data-target-field="${escapeHtml(field.name)}" style="font-size:12px;">清除圖示</button>` : ""}
+        </div>
+      </div>
+    `;
+  }
   if (field.type === "select") {
     const options = field.options.map((opt) =>
       `<option value="${escapeHtml(opt)}" ${opt === val ? "selected" : ""}>${escapeHtml(opt)}</option>`
@@ -266,4 +284,35 @@ function createTableSorter(initialKey, initialDir) {
 document.addEventListener("DOMContentLoaded", () => {
   initDebugPanel();
   loadDepAccountDetail();
+
+  document.addEventListener("change", (e) => {
+    if (!e.target.classList.contains("image-upload-picker")) return;
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const fieldName = e.target.dataset.targetField;
+    const wrapper = e.target.closest("div").parentElement; // 外層的field容器,包含隱藏欄位跟預覽區
+    const hiddenInput = wrapper.querySelector(`input[type="hidden"][data-field="${fieldName}"]`);
+    const previewContainer = wrapper.querySelector(".image-upload-preview");
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      // readAsDataURL的結果格式是"data:image/png;base64,XXXX",只需要取base64部分,
+      // 逗號後面才是真正的內容
+      const base64Content = reader.result.split(",")[1];
+      hiddenInput.value = base64Content;
+      previewContainer.innerHTML = `<img src="${reader.result}" style="width:100%; height:100%; object-fit:cover;">`;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!e.target.classList.contains("image-upload-clear-btn")) return;
+    const fieldName = e.target.dataset.targetField;
+    const wrapper = e.target.closest("div").parentElement;
+    const hiddenInput = wrapper.querySelector(`input[type="hidden"][data-field="${fieldName}"]`);
+    const previewContainer = wrapper.querySelector(".image-upload-preview");
+    hiddenInput.value = "";
+    previewContainer.innerHTML = `<span style="font-size:11px; color:#9ca3af;">無圖示</span>`;
+  });
 });

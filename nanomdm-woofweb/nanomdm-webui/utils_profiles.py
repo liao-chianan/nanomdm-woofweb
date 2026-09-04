@@ -5,6 +5,7 @@ mobileconfig 描述檔管理:
 - 用 plistlib 組建/解析,保證輸出一定是合法的 plist XML
 - 針對已知的常見錯誤(例如 PayloadRemovalDisallowed 搭配 MDM payload)給出警告
 """
+import base64
 import os
 import plistlib
 import re
@@ -73,6 +74,12 @@ PAYLOAD_SCHEMA = {
         "fields": [
             {"name": "Label", "label": "顯示名稱", "type": "text", "default": ""},
             {"name": "URL", "label": "網址", "type": "text", "default": ""},
+            {
+                "name": "Icon", "label": "圖示", "type": "image_upload", "default": "",
+                "help": "上傳 PNG 格式的正方形圖片(建議 120x120 或 180x180 像素),裝置會自動縮放裁切。"
+                        "不上傳的話,裝置會嘗試自動抓取網站本身的 favicon,抓不到或效果不理想時"
+                        "就會顯示空白的預設圖示——這正是目前 Web Clip 沒有圖示的原因。",
+            },
             {"name": "IsRemovable", "label": "允許使用者移除", "type": "checkbox", "default": True},
             {"name": "FullScreen", "label": "全螢幕模式", "type": "checkbox", "default": False},
             {"name": "Precomposed", "label": "圖示不加特效 (Precomposed)", "type": "checkbox", "default": False},
@@ -382,6 +389,9 @@ def read_mobileconfig_as_form(dir_path, filename):
                 fields_out[fname] = bool(payload.get("IdentityCertificateUUID"))
             elif fname == "Keysize":
                 fields_out[fname] = str(source.get(fname, field["default"]))
+            elif field["type"] == "image_upload":
+                icon_bytes = source.get(fname)
+                fields_out[fname] = base64.b64encode(icon_bytes).decode("ascii") if icon_bytes else ""
             else:
                 fields_out[fname] = source.get(fname, field["default"])
 
@@ -475,7 +485,8 @@ def _build_wifi_payload(fields, payload_uuid, identifier_prefix, instance_idx=0)
 
 
 def _build_webclip_payload(fields, payload_uuid, identifier_prefix, instance_idx=0):
-    return {
+    icon_b64 = fields.get("Icon", "")
+    payload = {
         "PayloadType": "com.apple.webClip.managed",
         "PayloadIdentifier": f"{identifier_prefix}.webclip.{instance_idx}",
         "PayloadUUID": payload_uuid,
@@ -488,6 +499,14 @@ def _build_webclip_payload(fields, payload_uuid, identifier_prefix, instance_idx
         "FullScreen": bool(fields.get("FullScreen", False)),
         "Precomposed": bool(fields.get("Precomposed", False)),
     }
+    if icon_b64:
+        # 前端傳來的是base64字串,轉回原始二進位資料,plistlib才會正確序列化成<data>元素
+        # (不是把base64文字本身當成一般字串存進去,那樣裝置端沒辦法正確解析成圖片)
+        try:
+            payload["Icon"] = base64.b64decode(icon_b64)
+        except Exception:
+            pass  # base64格式不合法就跳過,不要讓整個描述檔存檔失敗
+    return payload
 
 
 def _build_shareddevice_payload(fields, payload_uuid, identifier_prefix):

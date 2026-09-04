@@ -92,6 +92,28 @@
   </div>
 </div>
 
+<div class="panel">
+  <h2>腳本執行權限檢查</h2>
+  <p style="color:#6b7280; font-size:13px; margin:6px 0;">
+    掃描專案目錄底下所有 .sh 腳本檔案目前的執行權限狀態。有些情況下(例如透過更新機制重新
+    拉取檔案)可能會不小心遺失執行權限,導致依賴這些腳本的功能失敗——這裡可以手動掃描確認,
+    並且一鍵補上缺少的執行權限。
+  </p>
+  <button id="sh-permissions-scan-btn" type="button" style="font-size:12px;">掃描 .sh 檔案權限</button>
+  <div id="sh-permissions-result" style="margin-top:12px; display:none;">
+    <p id="sh-permissions-summary" style="font-size:13px; margin-bottom:8px;"></p>
+    <div style="max-height:300px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px;">
+      <table class="data-table" style="margin:0;">
+        <thead>
+          <tr><th>檔案路徑</th><th>目前權限</th><th>狀態</th></tr>
+        </thead>
+        <tbody id="sh-permissions-tbody"></tbody>
+      </table>
+    </div>
+    <button id="sh-permissions-grant-btn" type="button" style="margin-top:10px; font-size:12px; display:none;">賦予執行權限(僅缺少的部分)</button>
+  </div>
+</div>
+
 <!-- Log 檢視 Modal -->
 <div class="modal-overlay hidden" id="log-viewer-modal">
   <div class="modal-box" style="width:900px;">

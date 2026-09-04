@@ -3,6 +3,7 @@
 用GitHub Tags API當作「有哪些版本」的主要依據(這個一定存在,不需要使用者額外建立正式Release),
 Release的版本說明當作選配的加分資訊,有的話顯示,沒有的話優雅顯示「沒有額外說明」。
 """
+import datetime
 import os
 import re
 import shutil
@@ -213,6 +214,44 @@ def fetch_raw_file_content(owner, repo, ref, repo_path_with_subfolder, timeout=1
     return resp.content, None
 
 
+def list_update_history(backup_dir):
+    """掃描更新備份目錄底下的子目錄,解析出過去每一次更新的時間跟目標版本,
+    給[版本與更新]頁面的「更新歷程記錄」使用。
+
+    每個子目錄的命名格式是「{YYYYMMDD_HHMMSS}_to_{target_tag}」(apply_version_update()
+    建立備份時的命名慣例),從這個名稱反推出「什麼時候更新到了哪個版本」,不需要另外
+    維護一份獨立的歷程記錄資料庫。
+
+    回傳一個list,每個元素是{"timestamp", "target_version", "folder_name"},
+    依時間新到舊排序。目錄不存在或解析失敗的項目會被跳過,不會讓整個函式出錯。
+    """
+    if not os.path.exists(backup_dir):
+        return []
+
+    history = []
+    for folder_name in os.listdir(backup_dir):
+        full_path = os.path.join(backup_dir, folder_name)
+        if not os.path.isdir(full_path):
+            continue
+        match = re.match(r"^(\d{8}_\d{6})_to_(.+)$", folder_name)
+        if not match:
+            continue
+        timestamp_raw, target_version = match.groups()
+        try:
+            dt = datetime.datetime.strptime(timestamp_raw, "%Y%m%d_%H%M%S")
+            timestamp_display = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        history.append({
+            "timestamp": timestamp_display,
+            "target_version": target_version,
+            "folder_name": folder_name,
+        })
+
+    history.sort(key=lambda h: h["timestamp"], reverse=True)
+    return history
+
+
 def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github_token=None):
     """實際套用更新:對每個檔案,先備份現有內容(如果存在),再寫入新版本的內容。
     files是compare_versions()回傳的清單格式。
@@ -235,7 +274,9 @@ def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github
         result = {"repo_path": repo_path, "local_path": local_path, "ok": False, "error": None}
 
         try:
+            old_mode = None
             if os.path.exists(local_path):
+                old_mode = os.stat(local_path).st_mode  # 更新前先記住舊檔案的權限設定,寫入新內容後要套用回去
                 backup_target = os.path.join(this_backup_dir, repo_path.replace("/", "__"))
                 shutil.copy2(local_path, backup_target)
 
@@ -256,6 +297,19 @@ def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github
                 with open(tmp_path, "wb") as out_f:
                     out_f.write(content)
                 os.replace(tmp_path, local_path)
+
+                # 從GitHub重新抓下來的檔案內容,寫入時一律是系統預設權限(通常沒有執行位元),
+                # 不會保留原本檔案的權限設定——這是實際發生過的問題:每次用這個更新機制拉取
+                # 新版本後,shell腳本(.sh)會沒有執行權限,得靠其他地方的防禦性補救才能繼續運作。
+                # 這裡改成:一般檔案先套用舊檔案的權限設定(如果本地本來就有這個檔案);
+                # 不管是既有檔案還是這次更新才新增的全新檔案,只要是.sh結尾,一律無條件
+                # 補上執行位元——每次更新都重新確保一次,不依賴「有沒有保留到舊權限」這件事。
+                if old_mode is not None:
+                    os.chmod(local_path, old_mode)
+                if local_path.endswith(".sh"):
+                    current_mode = os.stat(local_path).st_mode
+                    os.chmod(local_path, current_mode | 0o111)
+
                 result["ok"] = True
         except Exception as e:
             result["error"] = str(e)

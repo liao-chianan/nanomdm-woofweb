@@ -14,6 +14,7 @@ import fcntl
 import io
 import json
 import os
+import stat
 import re
 import subprocess
 import uuid
@@ -702,7 +703,88 @@ def query_devices_from_mysql(mysql_cfg, db_password):
     return rows, rc, out, err
 
 
+def ensure_executable(script_path):
+    """確保這支腳本檔案有執行權限,執行前自動補上,不管缺execute bit的原因是什麼
+    (zip/git在某些流程下不一定會保留unix執行權限、透過webui自己的更新機制重新展開檔案時
+    漏了重設權限、或任何其他原因)。這是自我修復機制,不依賴安裝當下有沒有正確設定過權限。
+
+    找不到檔案、或沒有權限修改(例如檔案擁有者不是目前執行webui的使用者)時,靜默略過,
+    讓後續實際執行時,依照真實的錯誤原因(找不到檔案 vs. 權限不足)自然地失敗並回報,
+    不在這裡假裝掩蓋問題。
+    """
+    try:
+        if not os.path.exists(script_path):
+            return
+        current_mode = os.stat(script_path).st_mode
+        # 在既有的讀寫權限基礎上,加上「擁有者、群組、其他人」的執行位元(+x),
+        # 不動到原本的讀寫權限設定,只補上執行權限
+        os.chmod(script_path, current_mode | 0o111)
+    except Exception:
+        pass
+
+
+# 掃描.sh檔案權限時要排除的目錄名稱——這些是第三方套件/虛擬環境自己管理的內容,
+# 不是我們自己專案的腳本,不該被我們的掃描工具動到權限(而且這些目錄底下常常有大量檔案,
+# 掃描會很慢,也沒有意義)
+SCAN_EXCLUDE_DIRS = {"venv", "node_modules", "__pycache__", ".git"}
+
+
+def scan_sh_file_permissions(root_dirs):
+    """掃描指定的根目錄(可以是多個路徑的list),遞迴找出所有.sh檔案,回報每一個的
+    目前執行權限狀態。給[系統狀態]頁面的手動掃描功能使用。
+
+    回傳一個list,每個元素是 {"path": 完整路徑, "is_executable": bool, "mode": 權限字串(例如'755')}。
+    依路徑排序,方便畫面上穩定呈現(不會每次掃描順序都不一樣)。
+    """
+    results = []
+    for root_dir in root_dirs:
+        if not os.path.exists(root_dir):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root_dir):
+            # 用in-place修改dirnames,讓os.walk()不要繼續往這些排除目錄底下遞迴,
+            # 不是掃完再事後過濾,直接跳過整個子樹,速度快很多
+            dirnames[:] = [d for d in dirnames if d not in SCAN_EXCLUDE_DIRS]
+            for filename in filenames:
+                if not filename.endswith(".sh"):
+                    continue
+                full_path = os.path.join(dirpath, filename)
+                try:
+                    mode = os.stat(full_path).st_mode
+                    is_executable = bool(mode & 0o111)
+                    mode_str = oct(stat.S_IMODE(mode))[2:]
+                    results.append({"path": full_path, "is_executable": is_executable, "mode": mode_str})
+                except OSError:
+                    continue
+    results.sort(key=lambda r: r["path"])
+    return results
+
+
+def grant_executable_to_sh_files(paths):
+    """對指定的一批.sh檔案路徑,逐一補上執行權限。給[系統狀態]頁面掃描後,
+    使用者確認要修正時使用,重用ensure_executable()同一份邏輯,確保跟其他地方
+    (執行第三方腳本前的自我修復機制)的權限處理行為完全一致。
+
+    回傳 (success_count, failed_paths)。
+    """
+    success_count = 0
+    failed_paths = []
+    for path in paths:
+        try:
+            ensure_executable(path)
+            # ensure_executable內部把例外都吞掉了,這裡額外檢查一次結果是否真的成功,
+            # 確保回傳的成功/失敗統計是真實反映結果,不是「有呼叫就算成功」
+            mode = os.stat(path).st_mode
+            if mode & 0o111:
+                success_count += 1
+            else:
+                failed_paths.append(path)
+        except Exception:
+            failed_paths.append(path)
+    return success_count, failed_paths
+
+
 def run_dep_account_detail(script_path, env_file_path=None, extra_env=None):
+    ensure_executable(script_path)
     env = build_subprocess_env(env_file_path, extra_env) if env_file_path else extra_env
     cwd = os.path.dirname(script_path) or None
     rc, out, err = run_cmd([script_path], timeout=20, env=env, cwd=cwd)
@@ -710,6 +792,7 @@ def run_dep_account_detail(script_path, env_file_path=None, extra_env=None):
 
 
 def run_dep_device_details(script_path, serial_number, env_file_path=None, extra_env=None):
+    ensure_executable(script_path)
     env = build_subprocess_env(env_file_path, extra_env) if env_file_path else extra_env
     cwd = os.path.dirname(script_path) or None
     rc, out, err = run_cmd([script_path, serial_number], timeout=30, env=env, cwd=cwd)
@@ -718,6 +801,7 @@ def run_dep_device_details(script_path, serial_number, env_file_path=None, extra
 
 def stream_check_vpp_license(script_path, env_file_path=None):
     """以 generator 方式逐行讀取 check_vpp_license.sh 的輸出 (供 SSE 使用)"""
+    ensure_executable(script_path)
     env = build_subprocess_env(env_file_path) if env_file_path else None
     cwd = os.path.dirname(script_path) or None
     proc = subprocess.Popen(
@@ -740,6 +824,40 @@ def stream_check_vpp_license(script_path, env_file_path=None):
     finally:
         if proc.poll() is None:
             proc.terminate()
+
+
+def fetch_app_version_info(adam_id, country="tw", timeout=10):
+    """查詢iTunes Lookup API,取得這個App目前在App Store上的版本號跟版本發布日期。
+
+    已知限制:Apple自己的API有時候對「版本發布日期」(currentVersionReleaseDate)
+    回傳不準確的資料(開發者論壇上有多起回報,實際查證過),這是Apple那邊API本身的
+    資料品質問題,不是我們這裡解析錯誤——顯示出來的日期如果偶爾跟App Store頁面
+    上看到的不一致,屬於已知情況。
+
+    country參數:某些App如果在美國(預設)以外的地區上架,不帶country參數可能會
+    查無資料,這裡預設帶tw(台灣),對學校情境比較適用。
+
+    回傳 (version, release_date)的tuple,查詢失敗或找不到資料時,兩者都回傳空字串。
+    """
+    try:
+        resp = requests.get(
+            "https://itunes.apple.com/lookup",
+            params={"id": adam_id, "country": country},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results") or []
+        if not results:
+            return "", ""
+        info = results[0]
+        version = info.get("version", "")
+        release_date_raw = info.get("currentVersionReleaseDate", "")
+        # 日期原始格式是ISO 8601(例如"2026-07-18T07:00:00Z"),只取日期部分,不需要精確到時分秒
+        release_date = release_date_raw.split("T")[0] if release_date_raw else ""
+        return version, release_date
+    except Exception:
+        return "", ""
 
 
 def parse_vpp_table_output(raw_text):
@@ -773,9 +891,14 @@ def write_vpp_cache_csv(path, rows):
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Adam ID", "Bundle ID", "軟體名稱", "總數量", "剩餘量"])
+        writer.writerow(["Adam ID", "Bundle ID", "軟體名稱", "當下版本", "版本日期", "總數量", "剩餘量", "自動更新"])
         for r in rows:
-            writer.writerow([r["adam_id"], r["bundle_id"], r["name"], r["total"], r["available"]])
+            writer.writerow([
+                r["adam_id"], r["bundle_id"], r["name"],
+                r.get("version", ""), r.get("release_date", ""),
+                r["total"], r["available"],
+                "true" if r.get("auto_update") else "false",
+            ])
     os.replace(tmp_path, path)
 
 
@@ -790,6 +913,41 @@ def read_vpp_cache_csv(path):
         for row in reader:
             rows.append(row)
     return rows, mtime
+
+
+def find_groups_bound_to_app(groups_path, adam_id):
+    """掃描groups.json,找出「apps」清單裡有包含這個adam_id的所有群組名稱。
+    adam_id用字串比對(groups.json裡存的通常也是字串),避免int/str型別不一致漏掉比對。
+    回傳群組名稱的list,找不到任何綁定的話回傳空list。
+    """
+    if not os.path.exists(groups_path):
+        return []
+    try:
+        with open(groups_path, encoding="utf-8") as f:
+            groups = json.load(f)
+    except Exception:
+        return []
+
+    adam_id_str = str(adam_id)
+    bound_groups = []
+    for group_name, group_data in groups.items():
+        if not isinstance(group_data, dict):
+            continue
+        apps = group_data.get("apps", [])
+        if any(str(a) == adam_id_str for a in apps):
+            bound_groups.append(group_name)
+    return bound_groups
+
+
+def find_devices_in_groups(devices_csv_path, group_names):
+    """掃描devices.csv,找出「group」欄位屬於指定群組清單裡任一個的所有裝置序號。
+    回傳序號的list。
+    """
+    if not group_names:
+        return []
+    devices = read_devices_csv(devices_csv_path)
+    group_set = set(group_names)
+    return [sn for sn, info in devices.items() if info.get("group") in group_set]
 
 
 def query_all_devices_latest_status(mysql_cfg, db_password, enrollment_id=None):
@@ -1418,31 +1576,18 @@ def lookup_vpp_app_info(vpp_cache_path, adam_id=None, bundle_id=None):
     return None
 
 
-def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, request_type=None, status=None, limit=1000):
-    """查詢「所有裝置」的指令派送與回應紀錄(不像query_command_history限定單一enrollment)。
-    給[系統紀錄]裡的「指派命令紀錄」彙整表用。
+def _build_command_history_where_clause(enrollment_ids=None, request_type=None, status=None):
+    """組出query_all_command_history跟count_all_command_history共用的WHERE條件,
+    避免兩處各自維護一份、容易改一邊忘了改另一邊導致總筆數跟實際資料筆數對不起來。
 
-    enrollment_ids: 選填,限定只查這些enrollment_id(用來支援依裝置名稱/序號/群組篩選,
-                     這些條件要先在Python端對照本地devices.csv/groups.json算出符合的
-                     enrollment_id清單,再傳進來,因為nanomdm的資料庫完全不知道群組/裝置名稱
-                     這些我們自己webui才有的概念)。
-    request_type/status: 選填,直接對應到SQL WHERE條件(這兩個nanomdm資料庫本身就有)。
-    limit: 避免一次撈出過多資料(資料庫實際可能有數萬筆歷史紀錄),預設500筆,依created_at
-           時間新到舊排序,只給「最近」的紀錄,不是要看完整歷史用這個。
-
-    回傳 (rows, rc, err)。
+    回傳 (where_sql, short_circuit_empty)。short_circuit_empty為True代表篩選條件
+    已知不會有任何結果(例如enrollment_ids算出來是空list),呼叫端應該直接回傳空結果,
+    不需要真的送出SQL查詢。
     """
-    try:
-        limit_int = int(limit)
-    except (TypeError, ValueError):
-        limit_int = 500
-
     where_clauses = []
     if enrollment_ids is not None:
         if not enrollment_ids:
-            # 篩選條件算出來是「沒有任何裝置符合」,直接回傳空結果,不用送一個IN ()的SQL
-            # (在部分SQL方言或組合下這樣容易出錯,直接短路處理更保險)
-            return [], 0, None
+            return "", True
         safe_ids = "','".join(eid.replace("'", "''") for eid in enrollment_ids)
         where_clauses.append(f"id IN ('{safe_ids}')")
     if request_type:
@@ -1463,6 +1608,66 @@ def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, reque
             where_clauses.append(f"status = '{safe_status}'")
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    return where_sql, False
+
+
+def count_all_command_history(mysql_cfg, db_password, enrollment_ids=None, request_type=None, status=None):
+    """查詢符合篩選條件的「總筆數」(不受LIMIT/OFFSET影響),給分頁計算總頁數用。
+    用跟query_all_command_history完全相同的WHERE條件(共用_build_command_history_where_clause),
+    確保總筆數跟實際分頁資料是同一個篩選條件算出來的,不會對不起來。
+    回傳 (count, rc, err)。
+    """
+    where_sql, short_circuit_empty = _build_command_history_where_clause(enrollment_ids, request_type, status)
+    if short_circuit_empty:
+        return 0, 0, None
+
+    sql = f"SELECT COUNT(*) FROM view_queue {where_sql};"
+    args = [
+        "docker", "exec",
+        mysql_cfg["docker_container"],
+        "mysql",
+        f"-u{mysql_cfg['db_user']}",
+        f"-p{db_password}",
+        "-N", "-B", "--raw",
+        mysql_cfg["db_name"],
+        "-e", sql,
+    ]
+    rc, out, err = run_cmd(args, timeout=30)
+    if rc != 0:
+        return 0, rc, (err or out)
+    try:
+        return int(out.strip()), 0, None
+    except (ValueError, TypeError):
+        return 0, -1, f"無法解析筆數: {out}"
+
+
+def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, request_type=None, status=None, limit=1000, offset=0):
+    """查詢「所有裝置」的指令派送與回應紀錄(不像query_command_history限定單一enrollment)。
+    給[系統紀錄]裡的「指派命令紀錄」彙整表用。
+
+    enrollment_ids: 選填,限定只查這些enrollment_id(用來支援依裝置名稱/序號/群組篩選,
+                     這些條件要先在Python端對照本地devices.csv/groups.json算出符合的
+                     enrollment_id清單,再傳進來,因為nanomdm的資料庫完全不知道群組/裝置名稱
+                     這些我們自己webui才有的概念)。
+    request_type/status: 選填,直接對應到SQL WHERE條件(這兩個nanomdm資料庫本身就有)。
+    limit/offset: 分頁用,依created_at時間新到舊排序,offset=0代表第一頁。
+
+    回傳 (rows, rc, err)。
+    """
+    try:
+        limit_int = int(limit)
+    except (TypeError, ValueError):
+        limit_int = 1000
+    try:
+        offset_int = int(offset)
+    except (TypeError, ValueError):
+        offset_int = 0
+
+    where_sql, short_circuit_empty = _build_command_history_where_clause(enrollment_ids, request_type, status)
+    if short_circuit_empty:
+        # 篩選條件算出來是「沒有任何裝置符合」,直接回傳空結果,不用送一個IN ()的SQL
+        # (在部分SQL方言或組合下這樣容易出錯,直接短路處理更保險)
+        return [], 0, None
 
     sql = (
         "SELECT JSON_ARRAYAGG(JSON_OBJECT("
@@ -1474,7 +1679,7 @@ def query_all_command_history(mysql_cfg, db_password, enrollment_ids=None, reque
         "'result_updated_at', DATE_FORMAT(CONVERT_TZ(result_updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
         ")) FROM (SELECT id, command_uuid, request_type, status, active, result, command, created_at, result_updated_at "
         f"FROM view_queue {where_sql} "
-        f"ORDER BY created_at DESC LIMIT {limit_int}) t;"
+        f"ORDER BY created_at DESC LIMIT {limit_int} OFFSET {offset_int}) t;"
     )
     args = [
         "docker", "exec",

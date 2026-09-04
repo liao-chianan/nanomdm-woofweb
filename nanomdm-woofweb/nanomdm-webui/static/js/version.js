@@ -1,65 +1,5 @@
 let pendingDiffTargetTag = null;
 
-/**
- * 輕量的Markdown轉HTML,涵蓋GitHub release note常見的語法。
- * 不是完整的CommonMark實作,只處理changelog常見的:標題、粗體、斜體、
- * 清單、連結、行內程式碼、程式碼區塊、換行。
- * 故意不依賴外部CDN函式庫(避免正式環境多一個外部相依,CDN掛掉畫面就壞掉)。
- *
- * 文字會先經過escapeHtml跳脫(release note內容來自GitHub,理論上只有repo擁有者
- * 能寫入,風險很低,但還是先做好基本的XSS防護),escapeHtml不會影響markdown語法
- * 用到的符號(*, _, `, #, -, [, ], (, )),所以可以放心在跳脫後的文字上跑正規表達式。
- */
-function simpleMarkdownToHtml(text) {
-  if (!text) return "";
-  let html = escapeHtml(text);
-
-  // 程式碼區塊 ```code``` (要在其他規則之前處理,避免區塊內的內容被誤判成其他語法)
-  const codeBlocks = [];
-  html = html.replace(/```([\s\S]*?)```/g, (match, code) => {
-    codeBlocks.push(code.trim());
-    return `\u0000CODEBLOCK${codeBlocks.length - 1}\u0000`;
-  });
-
-  // 標題(從長到短處理,避免###被誤判成##多加一個#)
-  html = html.replace(/^### (.+)$/gim, '<h3 style="font-size:14px; margin:10px 0 4px;">$1</h3>');
-  html = html.replace(/^## (.+)$/gim, '<h2 style="font-size:16px; margin:12px 0 4px;">$1</h2>');
-  html = html.replace(/^# (.+)$/gim, '<h1 style="font-size:18px; margin:14px 0 4px;">$1</h1>');
-
-  // 粗體、斜體(粗體要在斜體之前處理,避免**text**被斜體規則誤判成*text*多包一層)
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");
-  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  html = html.replace(/(?<![a-zA-Z0-9])_(.+?)_(?![a-zA-Z0-9])/g, "<em>$1</em>");
-
-  // 行內程式碼
-  html = html.replace(/`([^`]+)`/g, '<code style="background:#f3f4f6; padding:1px 4px; border-radius:3px; font-size:12px;">$1</code>');
-
-  // 連結 [文字](網址)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-
-  // 清單項目(- 或 * 開頭),連續的項目包進同一個<ul>
-  html = html.replace(/^[\-\*] (.+)$/gim, "<li>$1</li>");
-  html = html.replace(/(<li>.*?<\/li>(\n<li>.*?<\/li>)*)/gs, (match) =>
-    `<ul style="margin:4px 0; padding-left:20px;">${match.replace(/\n/g, "")}</ul>`
-  );
-
-  // 剩餘的換行轉成<br>(標題/清單自帶區塊邊界,這裡的換行主要是給一般段落用)
-  html = html.replace(/\n/g, "<br>");
-
-  // 清掉區塊層級元素(標題、清單)後面緊接著的<br>,這些元素本身已經有自己的上下間距,
-  // 不需要額外的換行,不然視覺上間距會偏大
-  html = html.replace(/(<\/h[1-3]>|<\/ul>)(<br>)+/g, "$1");
-
-  // 把程式碼區塊换回來(程式碼區塊內容不該被上面的<br>規則影響,所以用佔位符延後處理)
-  html = html.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (match, idx) =>
-    `<pre style="background:#f3f4f6; padding:8px; border-radius:4px; overflow-x:auto; font-size:12px;"><code>${codeBlocks[parseInt(idx, 10)]}</code></pre>`
-  );
-
-  return html;
-}
-
-
 async function loadCurrentVersion() {
   const res = await apiFetch("/api/version/current");
   if (!res.ok) {
@@ -130,38 +70,6 @@ async function checkForUpdate() {
   }
 }
 
-async function loadVersionList() {
-  const tbody = document.getElementById("version-list-tbody");
-  tbody.innerHTML = `<tr><td colspan="4">載入中...</td></tr>`;
-
-  const res = await apiFetch("/api/version/tags");
-  if (!res.ok) {
-    tbody.innerHTML = `<tr><td colspan="4" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
-    return;
-  }
-
-  const tags = res.data.tags || [];
-  if (tags.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4">GitHub 上目前沒有任何版本標籤</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = "";
-  tags.forEach((t) => {
-    const tr = document.createElement("tr");
-    const notesHtml = t.release_notes
-      ? `<div style="max-width:400px; line-height:1.6;">${simpleMarkdownToHtml(t.release_notes)}</div>`
-      : `<span style="color:#9ca3af;">(無說明)</span>`;
-    tr.innerHTML = `
-      <td style="font-family:var(--mono); font-size:13px;">${escapeHtml(t.name)}</td>
-      <td style="font-size:12px; color:#6b7280;">${escapeHtml(t.published_at || "-")}</td>
-      <td style="font-size:12px;">${notesHtml}</td>
-      <td><button class="secondary version-switch-btn" type="button" style="font-size:12px;" data-tag="${escapeHtml(t.name)}">切換到此版本</button></td>
-    `;
-    tbody.appendChild(tr);
-  });
-}
-
 async function openDiffModal(targetTag) {
   pendingDiffTargetTag = targetTag;
   document.getElementById("version-diff-target").textContent = targetTag;
@@ -229,18 +137,45 @@ async function confirmApplyUpdate() {
   }
 }
 
+async function loadUpdateHistory() {
+  const tbody = document.getElementById("version-history-tbody");
+  tbody.innerHTML = `<tr><td colspan="2">載入中...</td></tr>`;
+
+  const res = await apiFetch("/api/version/history");
+  if (!res.ok) {
+    tbody.innerHTML = `<tr><td colspan="2" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    return;
+  }
+
+  const history = res.data.history || [];
+  if (history.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="2" style="color:#9ca3af;">目前沒有任何更新歷程紀錄</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = history
+    .map((h) => {
+      const releaseUrl = `https://github.com/${window.GITHUB_OWNER}/${window.GITHUB_REPO}/releases/tag/${encodeURIComponent(h.target_version)}`;
+      return `
+        <tr>
+          <td style="font-size:13px;">${escapeHtml(h.timestamp)}</td>
+          <td style="font-family:var(--mono); font-size:13px;">
+            ${escapeHtml(h.target_version)}
+            <a href="${releaseUrl}" target="_blank" rel="noopener" style="margin-left:6px; font-size:12px;" title="查看這個版本的 release note">🔗</a>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   loadCurrentVersion();
-  loadVersionList();
+  loadUpdateHistory();
+  checkForUpdate(); // 一進頁面就自動檢測一次,不用使用者自己按按鈕
 
   document.getElementById("version-manual-save-btn").addEventListener("click", saveManualVersion);
   document.getElementById("version-check-btn").addEventListener("click", checkForUpdate);
-  document.getElementById("version-list-refresh-btn").addEventListener("click", loadVersionList);
+  document.getElementById("version-history-refresh-btn").addEventListener("click", loadUpdateHistory);
   document.getElementById("version-apply-confirm-btn").addEventListener("click", confirmApplyUpdate);
-
-  document.getElementById("version-list-tbody").addEventListener("click", (e) => {
-    if (e.target.classList.contains("version-switch-btn")) {
-      openDiffModal(e.target.dataset.tag);
-    }
-  });
 });

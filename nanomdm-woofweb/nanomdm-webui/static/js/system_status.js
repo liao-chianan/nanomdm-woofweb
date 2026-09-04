@@ -289,6 +289,64 @@ async function loadStaticFilesStatus() {
   container.innerHTML = html;
 }
 
+let shPermissionsMissingPaths = [];
+
+async function scanShPermissions() {
+  const resultContainer = document.getElementById("sh-permissions-result");
+  const tbody = document.getElementById("sh-permissions-tbody");
+  const summary = document.getElementById("sh-permissions-summary");
+  const grantBtn = document.getElementById("sh-permissions-grant-btn");
+  const scanBtn = document.getElementById("sh-permissions-scan-btn");
+
+  scanBtn.disabled = true;
+  scanBtn.textContent = "掃描中...";
+
+  const res = await apiFetch("/api/sysstatus/sh-permissions/scan");
+
+  scanBtn.disabled = false;
+  scanBtn.textContent = "掃描 .sh 檔案權限";
+
+  if (!res.ok) {
+    alert("掃描失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+
+  const files = res.data.files;
+  shPermissionsMissingPaths = files.filter((f) => !f.is_executable).map((f) => f.path);
+
+  resultContainer.style.display = "";
+  summary.textContent = `共掃描到 ${res.data.total_count} 個 .sh 檔案,其中 ${res.data.no_exec_count} 個缺少執行權限。`;
+
+  tbody.innerHTML = files
+    .map((f) => {
+      const statusBadge = f.is_executable
+        ? `<span class="badge ok">正常</span>`
+        : `<span class="badge warn">缺少執行權限</span>`;
+      return `<tr>
+        <td style="font-family: var(--mono); font-size:12px; word-break:break-all;">${escapeHtml(f.path)}</td>
+        <td style="font-family: var(--mono);">${escapeHtml(f.mode)}</td>
+        <td>${statusBadge}</td>
+      </tr>`;
+    })
+    .join("");
+
+  grantBtn.style.display = shPermissionsMissingPaths.length > 0 ? "" : "none";
+  grantBtn.textContent = `賦予執行權限(僅缺少的部分,共 ${shPermissionsMissingPaths.length} 個)`;
+}
+
+async function grantShPermissions() {
+  if (shPermissionsMissingPaths.length === 0) return;
+  if (!confirm(`確定要對這 ${shPermissionsMissingPaths.length} 個缺少執行權限的 .sh 檔案,補上執行權限嗎?`)) return;
+
+  const res = await apiFetchJSON("/api/sysstatus/sh-permissions/grant", "POST", { paths: shPermissionsMissingPaths });
+  if (res.ok) {
+    alert(`已完成:成功 ${res.data.success_count} 個` + (res.data.failed_paths.length > 0 ? `,失敗 ${res.data.failed_paths.length} 個: ${res.data.failed_paths.join(", ")}` : ""));
+    scanShPermissions(); // 重新掃描,讓畫面反映最新狀態
+  } else {
+    alert("授權失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   loadSystemStatus();
   loadDockerStatus();
@@ -304,6 +362,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("cleanup-save-settings-btn").addEventListener("click", saveCleanupSettings);
   document.getElementById("cleanup-preview-btn").addEventListener("click", previewCleanup);
   document.getElementById("cleanup-execute-btn").addEventListener("click", executeCleanup);
+  document.getElementById("sh-permissions-scan-btn").addEventListener("click", scanShPermissions);
+  document.getElementById("sh-permissions-grant-btn").addEventListener("click", grantShPermissions);
 
   document.getElementById("docker-tbody").addEventListener("click", (e) => {
     const name = e.target.dataset.name;

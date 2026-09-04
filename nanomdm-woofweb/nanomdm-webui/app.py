@@ -47,6 +47,33 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_prefix=1)
 # session cookie 限定在 /miniweb 路徑下,避免外洩到同網域(例如 nanomdm.your-school.edu.tw)其他服務
 app.config["SESSION_COOKIE_PATH"] = "/miniweb"
 
+
+@app.after_request
+def _add_security_headers(response):
+    """統一加上資安掃描要求的回應標頭。這是應用程式層級的防護,就算日後nginx設定被不小心改掉、
+    或有人繞過nginx直接打Flask,這幾個標頭依然會生效,不會只靠nginx單一層防護。
+
+    X-Content-Type-Options: 防止瀏覽器自己「猜」回應內容的MIME類型,避免例如把使用者上傳的
+    圖片誤判成HTML/JS執行,是瀏覽器端安全性的基本防護,不影響任何正常瀏覽/操作功能。
+
+    Cache-Control/Pragma: 防止登入頁、管理介面這類含有敏感資訊的頁面,被瀏覽器或中間的代理
+    伺服器快取下來——排除靜態檔案(CSS/JS),那些本身用?v=版本號做快取破壞,加上no-store只會
+    造成每次都重新下載,沒有實質安全效益,反而拖慢畫面載入速度。
+
+    Strict-Transport-Security(HSTS)刻意不在這裡設定——這個標頭改成只由nginx那一層負責
+    (nanomdm.nginx.example裡的add_header指令)。曾經同時在Flask跟nginx兩邊都加,結果nginx
+    反向代理預設不會覆蓋、只會疊加上游(Flask)已經設定的標頭,導致回應裡出現兩個一模一樣的
+    Strict-Transport-Security,反而被資安掃描工具判定成「不必要的HTTP回應標頭」。兩層只能
+    選一層負責,選nginx是因為它是最外層、真正做TLS終止的地方,不需要Flask這邊重複加。
+    """
+    response.headers["X-Content-Type-Options"] = "nosniff"
+
+    if not request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+
+    return response
+
 # Jinja2 的 {{ ... | tojson }} filter 預設會把 dict key 依字母順序重新排序
 # (這是 Jinja2 自己內建的 policies['json.dumps_kwargs']['sort_keys']=True 設定,
 # 跟 Flask 的 app.json.sort_keys 是兩條完全獨立的路徑,設定 app.json.sort_keys 不會生效)。
@@ -167,6 +194,12 @@ COMMAND_DEFS = {
         "label": "查詢App受管理狀態(診斷用)",
         "danger": False,
         "fields": [{"name": "Identifiers", "label": "Bundle ID(留空=查詢全部App)", "type": "text", "default": ""}],
+        "hidden": True,
+    },
+    "InstalledApplicationList": {
+        "label": "查詢已安裝App版本(比對是否有更新)",
+        "danger": False,
+        "fields": [],
         "hidden": True,
     },
 }
@@ -323,6 +356,13 @@ def system_logs_page():
 @login_required
 def api_system_logs():
     log_type = request.args.get("type", "login")
+    page = request.args.get("page", "1")
+    try:
+        page = max(1, int(page))
+    except ValueError:
+        page = 1
+    page_size = 1000
+
     if log_type == "login":
         entries = utils_logging.read_log_entries(CFG["system_logs"]["user_login_log"])
         retention_days = CFG["system_logs"]["user_login_retention_days"]
@@ -332,7 +372,18 @@ def api_system_logs():
     else:
         return jsonify({"ok": False, "message": f"不支援的紀錄類型: {log_type}"}), 400
 
-    return jsonify({"ok": True, "entries": entries, "retention_days": retention_days, "count": len(entries)})
+    # read_log_entries()已經依timestamp新到舊排序好,分頁只需要對排序後的清單做切片
+    total_count = len(entries)
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    page = min(page, total_pages)  # 避免頁碼超出範圍(例如篩選/資料量變動後,舊的頁碼參數卡在無效值)
+    start = (page - 1) * page_size
+    page_entries = entries[start:start + page_size]
+
+    return jsonify({
+        "ok": True, "entries": page_entries, "retention_days": retention_days,
+        "count": len(page_entries), "total_count": total_count,
+        "page": page, "total_pages": total_pages, "page_size": page_size,
+    })
 
 
 def _enrich_command_row_with_app_info(row, vpp_cache_path):
@@ -364,6 +415,25 @@ def _enrich_command_row_with_app_info(row, vpp_cache_path):
         return {"bundle_id": identifier, "name": vpp_info["name"] if vpp_info else None}
 
 
+@app.route("/api/system-logs/commands/filter-options")
+@login_required
+def api_system_logs_commands_filter_options():
+    """只回傳篩選選項(群組清單、命令類別、狀態),不觸碰指令歷史查詢——這三個選項
+    完全不依賴查詢結果:群組來自本地devices.csv,命令類別跟狀態都是寫死的固定清單。
+    給前端「進頁面先顯示篩選選項、不自動觸發昂貴查詢」的機制使用。
+    """
+    devices_csv = utils.read_devices_csv(CFG["paths"]["devices_csv"])
+    groups_available = sorted(set(v.get("group", "") for v in devices_csv.values() if v.get("group")))
+    return jsonify({
+        "ok": True,
+        "filter_options": {
+            "groups": groups_available,
+            "request_types": sorted(COMMAND_DEFS.keys()),
+            "statuses": ["__pending__", "__cancelled__", "Acknowledged", "NotNow", "Error", "CommandFormatError", "Idle"],
+        },
+    })
+
+
 @app.route("/api/system-logs/commands")
 @login_required
 def api_system_logs_commands():
@@ -371,6 +441,12 @@ def api_system_logs_commands():
     group_filter = request.args.get("group", "").strip()
     request_type_filter = request.args.get("request_type", "").strip()
     status_filter = request.args.get("status", "").strip()
+    page = request.args.get("page", "1")
+    try:
+        page = max(1, int(page))
+    except ValueError:
+        page = 1
+    page_size = 1000
 
     devices_csv = utils.read_devices_csv(CFG["paths"]["devices_csv"])
     env = get_env_dict()
@@ -396,12 +472,22 @@ def api_system_logs_commands():
                 continue
             enrollment_ids_filter.append(eid)
 
+    total_count, rc_count, err_count = utils.count_all_command_history(
+        CFG["mysql"], db_password,
+        enrollment_ids=enrollment_ids_filter, request_type=request_type_filter or None, status=status_filter or None,
+    )
+    if rc_count != 0:
+        return jsonify({"ok": False, "message": err_count}), 500
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    page = min(page, total_pages)  # 避免頁碼超出範圍(例如篩選條件改變後,舊的頁碼參數卡在無效值)
+
     rows, rc, err = utils.query_all_command_history(
         CFG["mysql"], db_password,
         enrollment_ids=enrollment_ids_filter,
         request_type=request_type_filter or None,
         status=status_filter or None,
-        limit=1000,
+        limit=page_size,
+        offset=(page - 1) * page_size,
     )
     if rc != 0:
         return jsonify({"ok": False, "message": err}), 500
@@ -434,6 +520,7 @@ def api_system_logs_commands():
 
     return jsonify({
         "ok": True, "rows": result_rows,
+        "total_count": total_count, "page": page, "total_pages": total_pages, "page_size": page_size,
         "filter_options": {
             "groups": groups_available,
             "request_types": sorted(COMMAND_DEFS.keys()),
@@ -1109,6 +1196,7 @@ def api_cert_dep_download_cert():
     直接把結果當檔案下載給使用者,不在畫面上顯示內容(避免複製貼上時漏字元或多空白)。
     """
     script = CFG["paths"]["cfg_get_cert_script"]
+    utils.ensure_executable(script)
     cn_label = request.args.get("cn", "depserver")
     validity_days = request.args.get("validity_days", "365")
 
@@ -1143,6 +1231,7 @@ def api_cert_dep_upload_token():
 
     try:
         script = CFG["paths"]["cfg_decrypt_tokens_script"]
+        utils.ensure_executable(script)
         env = get_nanodep_script_env()
         cwd = os.path.dirname(script) or None
         rc, out, err = utils.run_cmd([script, tmp_path], timeout=30, env=env, cwd=cwd)
@@ -1188,6 +1277,7 @@ def api_cert_nanoaxm_update():
 
     try:
         script = CFG["paths"]["cfg_authcreds_script"]
+        utils.ensure_executable(script)
         env = get_nanoaxm_script_env()
         cwd = os.path.dirname(script) or None
         rc, out, err = utils.run_cmd([script, client_id, key_id, tmp_path], timeout=20, env=env, cwd=cwd)
@@ -2400,6 +2490,13 @@ def build_mdm_command_params(request_type, params):
         identifiers = [x.strip() for x in identifiers_raw.split(",") if x.strip()]
         return "ManagedApplicationList", {"Identifiers": identifiers}
 
+    if request_type == "InstalledApplicationList":
+        # ManagedAppsOnly設True,聚焦在透過VPP/群組綁定安裝的受管理App,
+        # 不含裝置使用者自己安裝的個人App或系統內建App,避免比對結果被大量不相關的
+        # App淹沒。回應內容裡的HasUpdateAvailable是裝置自己判斷的結果(比對目前安裝
+        # 版本跟App Store上的最新版本),不是我們自己額外做比對,可靠度較高。
+        return "InstalledApplicationList", {"ManagedAppsOnly": True}
+
     if request_type == "DeviceLock":
         plist_params = {}
         message = (params.get("Message") or "").strip()
@@ -2566,6 +2663,7 @@ def api_devices_command():
 LATEST_INFO_RESULT_KEY = {
     "DeviceInformation": "QueryResponses",
     "AvailableOSUpdates": "AvailableOSUpdates",
+    "InstalledApplicationList": "InstalledApplicationList",
 }
 
 
@@ -3540,9 +3638,146 @@ def api_group_command(group_name):
 _vpp_cache_lock = threading.Lock()
 
 
+def dispatch_app_update_to_bound_devices_gen(adam_id, triggered_by_system=False):
+    """對指定的App(adam_id),找出所有綁定這個App的群組、以及這些群組裡的所有裝置,
+    逐台裝置重新送出InstallApplication指令(如果裝置上已經有這個App,裝置會判斷這是
+    更新而不是重新安裝——Apple官方沒有獨立的「更新」指令,重新送一次InstallApplication
+    就是觸發更新的正確做法)。
+
+    逐台裝置yield進度,方便SSE串流即時顯示給使用者看,也給背景自動更新使用(直接把
+    產生器跑完、不需要即時進度)。
+
+    triggered_by_system:是不是由系統自動偵測到新版本觸發的(不是使用者手動點擊「更新App」
+    按鈕)。這個函式可能在背景排程執行緒裡被呼叫(沒有Flask request context),這種情況下
+    不能使用log_activity_entry()(內部會呼叫session.get()/request.remote_addr,背景執行緒
+    呼叫會丟RuntimeError),要改用log_system_activity_entry()。
+
+    每一次yield的內容是一個dict:
+      {"stage": "start", "total": N}
+      {"stage": "progress", "current": i, "total": N, "serial": "...", "ok": bool, "message": "..."}
+      {"stage": "done", "success_count": N, "fail_count": M, "target_count": N}
+    """
+    log_fn = log_system_activity_entry if triggered_by_system else (
+        lambda command, success, detail=None: log_activity_entry(command, success, detail=detail)
+    )
+
+    vpp_info = utils.lookup_vpp_app_info(CFG["paths"]["vpp_cache_csv"], adam_id=adam_id)
+    app_name = vpp_info["name"] if vpp_info else adam_id
+
+    bound_groups = utils.find_groups_bound_to_app(CFG["paths"]["groups_json"], adam_id)
+    target_serials = utils.find_devices_in_groups(CFG["paths"]["devices_csv"], bound_groups)
+
+    if not target_serials:
+        yield {"stage": "done", "success_count": 0, "fail_count": 0, "target_count": 0,
+               "message": f"「{app_name}」目前沒有任何群組綁定,或綁定的群組裡沒有裝置,略過派送"}
+        return
+
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+    mdm_devices, rc, _, err = utils.query_devices_from_mysql(CFG["mysql"], db_password)
+    if rc != 0:
+        yield {"stage": "done", "success_count": 0, "fail_count": len(target_serials), "target_count": len(target_serials),
+               "message": f"查詢裝置對照表失敗,無法派送: {err}"}
+        return
+    enrollment_id_by_serial = {d["serial_number"]: d["enrollment_id"] for d in mdm_devices}
+
+    base_url, api_user, api_key = get_nanomdm_conn()
+    if not (base_url and api_key):
+        yield {"stage": "done", "success_count": 0, "fail_count": len(target_serials), "target_count": len(target_serials),
+               "message": "找不到 nanomdm 連線設定,無法派送"}
+        return
+
+    _, install_params = build_mdm_command_params("InstallApplication", {"iTunesStoreID": str(adam_id)})
+
+    yield {"stage": "start", "total": len(target_serials), "app_name": app_name}
+
+    success_count = 0
+    fail_count = 0
+    for i, serial in enumerate(target_serials):
+        enrollment_id = enrollment_id_by_serial.get(serial)
+        if not enrollment_id:
+            fail_count += 1
+            yield {"stage": "progress", "current": i + 1, "total": len(target_serials),
+                   "serial": serial, "ok": False, "message": "查無這個序號對應的裝置註冊資料"}
+            continue
+        try:
+            utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "InstallApplication", install_params)
+            success_count += 1
+            yield {"stage": "progress", "current": i + 1, "total": len(target_serials),
+                   "serial": serial, "ok": True, "message": "已送出"}
+        except Exception as e:
+            fail_count += 1
+            yield {"stage": "progress", "current": i + 1, "total": len(target_serials),
+                   "serial": serial, "ok": False, "message": str(e)}
+
+    log_fn(
+        "ASM軟體資訊-派送App更新", fail_count == 0,
+        detail=f"App={app_name}(adamId={adam_id}), 目標群組={bound_groups}, 成功={success_count}, 失敗={fail_count}"
+               + ("(系統自動偵測新版本觸發)" if triggered_by_system else ""),
+    )
+    yield {"stage": "done", "success_count": success_count, "fail_count": fail_count, "target_count": len(target_serials),
+           "message": f"「{app_name}」更新派送完成,成功 {success_count} 台,失敗 {fail_count} 台"}
+
+
+def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
+    """對每一列VPP資料,查詢iTunes Lookup API補上當下版本跟版本發布日期,逐一yield進度
+    (方便SSE串流即時顯示查詢進度給使用者看)。查詢失敗時,退回沿用既有快取裡的舊版本資訊,
+    不要因為單純的網路暫時性問題,就讓原本已經查到的版本資訊被清空。
+
+    同時做兩件事:
+    1. 保留既有的「自動更新」勾選狀態——每次同步整份CSV都會重新寫入,如果不從舊資料
+       carry over過來,使用者勾選過的設定會每次同步後就被清空,等於這個功能形同虛設。
+    2. 偵測版本是否「真的有變化」(不是第一次查到、也不是這次查詢失敗退回沿用舊資料
+       的情況),如果版本確實從舊版變成新版、且這個App有勾選自動更新,自動觸發派送更新
+       給所有綁定群組的裝置,不需要管理者手動按按鈕。
+
+    直接就地修改傳入的rows(每個dict多加version/release_date/auto_update三個key),
+    沒有回傳值。
+    """
+    existing_rows, _ = utils.read_vpp_cache_csv(cache_path)
+    existing_version_by_adam_id = {
+        r.get("Adam ID"): (r.get("當下版本", ""), r.get("版本日期", "")) for r in existing_rows
+    }
+    existing_auto_update_by_adam_id = {
+        r.get("Adam ID"): (r.get("自動更新", "") == "true") for r in existing_rows
+    }
+
+    total = len(rows)
+    for i, r in enumerate(rows):
+        old_version, old_release_date = existing_version_by_adam_id.get(r["adam_id"], ("", ""))
+        r["auto_update"] = existing_auto_update_by_adam_id.get(r["adam_id"], False)
+
+        version, release_date = utils.fetch_app_version_info(r["adam_id"])
+        query_succeeded = bool(version or release_date)
+        if not query_succeeded:
+            # 這次查詢沒有結果,退回沿用舊資料(如果有的話),不算是「版本有變化」
+            version, release_date = old_version, old_release_date
+
+        r["version"] = version
+        r["release_date"] = release_date
+
+        # 只有「這次查詢確實成功」、「先前已經有版本資訊可以比較(不是第一次查到)」、
+        # 「版本真的不一樣」,才算是偵測到新版本;第一次查到(舊版本是空字串)不算,
+        # 避免剛啟用這個功能的當下,把所有App都誤判成「新版本」而全部觸發派送
+        version_changed = query_succeeded and old_version and version and old_version != version
+        if version_changed and r["auto_update"]:
+            print(f"[ASM軟體資訊-自動更新] 偵測到「{r.get('name', '')}」版本從 {old_version} 更新為 {version},自動觸發派送")
+            try:
+                for _ in dispatch_app_update_to_bound_devices_gen(r["adam_id"], triggered_by_system=True):
+                    pass
+            except Exception as e:
+                print(f"[ASM軟體資訊-自動更新] 自動派送失敗: {e}")
+
+        yield {"current": i + 1, "total": total, "name": r.get("name", "")}
+        time.sleep(0.3)  # 避免短時間內大量呼叫iTunes Lookup API觸發速率限制
+
+
 def refresh_vpp_cache_once():
-    """實際執行 check_vpp_license.sh 並把結果寫入快取 CSV,回傳 (ok, message, row_count)"""
+    """實際執行 check_vpp_license.sh 並把結果寫入快取 CSV,回傳 (ok, message, row_count)。
+    除了VPP授權數量之外,額外查詢iTunes Lookup API取得每個App目前的版本號跟版本發布日期。
+    """
     script = CFG["paths"]["check_vpp_license_script"]
+    utils.ensure_executable(script)
     cache_path = CFG["paths"]["vpp_cache_csv"]
     cwd = os.path.dirname(script) or None
     env = utils.build_subprocess_env(CFG["paths"]["env_file"])
@@ -3550,6 +3785,10 @@ def refresh_vpp_cache_once():
     if rc != 0:
         return False, (err or out or "未知錯誤"), 0
     rows = utils.parse_vpp_table_output(out)
+
+    for _ in _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
+        pass  # 背景排程不需要即時進度,把產生器跑完即可
+
     with _vpp_cache_lock:
         utils.write_vpp_cache_csv(cache_path, rows)
     return True, None, len(rows)
@@ -3606,6 +3845,53 @@ def api_asm_download():
     return send_file(cache_path, as_attachment=True, download_name="vpp_license.csv")
 
 
+@app.route("/api/asm/toggle-auto-update", methods=["POST"])
+@login_required
+def api_asm_toggle_auto_update():
+    data = request.json or {}
+    adam_id = str(data.get("adam_id", "")).strip()
+    enabled = bool(data.get("enabled"))
+    if not adam_id:
+        return jsonify({"ok": False, "message": "缺少 adam_id"}), 400
+
+    cache_path = CFG["paths"]["vpp_cache_csv"]
+    rows, _ = utils.read_vpp_cache_csv(cache_path)
+    target = next((r for r in rows if r.get("Adam ID") == adam_id), None)
+    if target is None:
+        return jsonify({"ok": False, "message": "找不到這個 App,請先同步軟體清單"}), 404
+
+    # 轉成write_vpp_cache_csv預期的欄位名稱(adam_id/bundle_id/name/...)再整份寫回
+    write_rows = [{
+        "adam_id": r["Adam ID"], "bundle_id": r["Bundle ID"], "name": r["軟體名稱"],
+        "version": r.get("當下版本", ""), "release_date": r.get("版本日期", ""),
+        "total": r.get("總數量", ""), "available": r.get("剩餘量", ""),
+        "auto_update": (r.get("Adam ID") == adam_id and enabled) or (r.get("Adam ID") != adam_id and r.get("自動更新") == "true"),
+    } for r in rows]
+
+    with _vpp_cache_lock:
+        utils.write_vpp_cache_csv(cache_path, write_rows)
+
+    log_activity_entry("ASM軟體資訊-自動更新設定", True, detail=f"adamId={adam_id}, enabled={enabled}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/asm/update-app-stream")
+@login_required
+def api_asm_update_app_stream():
+    adam_id = request.args.get("adam_id", "").strip()
+    if not adam_id:
+        return jsonify({"ok": False, "message": "缺少 adam_id"}), 400
+
+    def generate():
+        try:
+            for progress in dispatch_app_update_to_bound_devices_gen(adam_id):
+                yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'stage': 'done', 'success_count': 0, 'fail_count': 0, 'target_count': 0, 'message': f'發生未預期錯誤: {e}'}, ensure_ascii=False)}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
 @app.route("/api/asm/stream")
 @login_required
 def api_asm_stream():
@@ -3622,6 +3908,11 @@ def api_asm_stream():
             full_output = "\n".join(collected_lines)
             rows = utils.parse_vpp_table_output(full_output)
             if rows:
+                yield f"data: {json.dumps({'line': '正在查詢各App目前版本資訊...'})}\n\n"
+                for progress in _enrich_vpp_rows_with_version_info_gen(rows, CFG["paths"]["vpp_cache_csv"]):
+                    progress_line = f"已查詢版本 {progress['current']}/{progress['total']}: {progress['name']}"
+                    yield f"data: {json.dumps({'line': progress_line})}\n\n"
+
                 with _vpp_cache_lock:
                     utils.write_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"], rows)
                 mtime = os.path.getmtime(CFG["paths"]["vpp_cache_csv"])
@@ -3649,71 +3940,82 @@ def sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5
     (不在這次查詢範圍內的)會因此掉失電量/系統版本等資料。這裡改成:先讀出完整的
     既有CSV,只替換這一台裝置對應的那一列,其他裝置原封不動地寫回去。
 
+    整個函式包在try/except裡:任何未預期的例外(不是前面幾個已知情境的if/return)
+    都會被攔截、完整記錄到伺服器log(方便從journalctl直接看到完整traceback,
+    不用等使用者回報畫面上的通用錯誤頁面才知道哪裡壞了),並回傳有意義的錯誤訊息,
+    不會讓Flask丟出完全沒有資訊的通用500錯誤頁面。
+
     回傳 (ok, message)。
     """
-    env = get_env_dict()
-    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
-
-    existing_cache, _ = utils.read_devices_status_cache(CFG["devices_status_cache"]["csv_path"])
-    old_row = existing_cache.get(serial, {})
-
-    base_url, api_user, api_key = get_nanomdm_conn()
-    if not (base_url and api_key):
-        return False, "找不到 nanomdm 連線設定"
-
-    _, di_params = build_mdm_command_params("DeviceInformation", {})
-    _, aou_params = build_mdm_command_params("AvailableOSUpdates", {})
-
     try:
-        utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceInformation", di_params)
-        utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "AvailableOSUpdates", aou_params)
-        utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "OSUpdateStatus", {})
-        # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,邏輯跟整批排程一致
-        if old_row.get("lost_mode_enabled") == "true":
-            utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceLocation", {})
-    except Exception as e:
-        return False, f"送出查詢指令失敗: {e}"
+        env = get_env_dict()
+        db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
 
-    if wait_for_response_seconds > 0:
-        time.sleep(wait_for_response_seconds)
+        existing_cache, _ = utils.read_devices_status_cache(CFG["devices_status_cache"]["csv_path"])
+        old_row = existing_cache.get(serial, {})
 
-    status_rows, rc, err = utils.query_all_devices_latest_status(CFG["mysql"], db_password, enrollment_id=enrollment_id)
-    if rc != 0:
-        return False, f"查詢最新狀態失敗: {err}"
+        base_url, api_user, api_key = get_nanomdm_conn()
+        if not (base_url and api_key):
+            return False, "找不到 nanomdm 連線設定"
 
-    updated_rows = utils.build_devices_status_rows(
-        status_rows, {enrollment_id: serial}, existing_cache={serial: old_row},
-    )
-    updated_row = next((r for r in updated_rows if r["serial_number"] == serial), None)
-    if updated_row is None:
-        return False, "查無這台裝置的最新狀態資料(裝置可能從未回應過任何查詢)"
+        _, di_params = build_mdm_command_params("DeviceInformation", {})
+        _, aou_params = build_mdm_command_params("AvailableOSUpdates", {})
 
-    # 從nanomdm的docker log解析這台裝置最後連線的來源IP(Apple MDM協定本身不提供這項
-    # 資訊,是從nanomdm服務自己的HTTP request log裡,用trace_id把x_forwarded_for的IP
-    # 兜出來的)。build_devices_status_rows()的existing_cache保留邏輯不包含ip_address
-    # 這個欄位,所以這裡沒查到新的IP時,要自己明確保留舊值,不然會被清空成空字串。
-    try:
-        container_name = CFG["nanomdm_docker"]["container_name"]
-        tail_lines = CFG["nanomdm_docker"]["log_tail_lines"]
-        log_rc, log_text, log_err = utils.run_docker_logs(container_name, tail=tail_lines)
-        if log_rc == 0:
-            ip_by_enrollment_id = utils.extract_device_ips_from_nanomdm_logs(log_text)
-            if enrollment_id in ip_by_enrollment_id:
-                updated_row["ip_address"] = ip_by_enrollment_id[enrollment_id]["ip"]
+        try:
+            utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceInformation", di_params)
+            utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "AvailableOSUpdates", aou_params)
+            utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "OSUpdateStatus", {})
+            # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,邏輯跟整批排程一致
+            if old_row.get("lost_mode_enabled") == "true":
+                utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceLocation", {})
+        except Exception as e:
+            return False, f"送出查詢指令失敗: {e}"
+
+        if wait_for_response_seconds > 0:
+            time.sleep(wait_for_response_seconds)
+
+        status_rows, rc, err = utils.query_all_devices_latest_status(CFG["mysql"], db_password, enrollment_id=enrollment_id)
+        if rc != 0:
+            return False, f"查詢最新狀態失敗: {err}"
+
+        updated_rows = utils.build_devices_status_rows(
+            status_rows, {enrollment_id: serial}, existing_cache={serial: old_row},
+        )
+        updated_row = next((r for r in updated_rows if r["serial_number"] == serial), None)
+        if updated_row is None:
+            return False, "查無這台裝置的最新狀態資料(裝置可能從未回應過任何查詢)"
+
+        # 從nanomdm的docker log解析這台裝置最後連線的來源IP(Apple MDM協定本身不提供這項
+        # 資訊,是從nanomdm服務自己的HTTP request log裡,用trace_id把x_forwarded_for的IP
+        # 兜出來的)。build_devices_status_rows()的existing_cache保留邏輯不包含ip_address
+        # 這個欄位,所以這裡沒查到新的IP時,要自己明確保留舊值,不然會被清空成空字串。
+        try:
+            container_name = CFG["nanomdm_docker"]["container_name"]
+            tail_lines = CFG["nanomdm_docker"]["log_tail_lines"]
+            log_rc, log_text, log_err = utils.run_docker_logs(container_name, tail=tail_lines)
+            if log_rc == 0:
+                ip_by_enrollment_id = utils.extract_device_ips_from_nanomdm_logs(log_text)
+                if enrollment_id in ip_by_enrollment_id:
+                    updated_row["ip_address"] = ip_by_enrollment_id[enrollment_id]["ip"]
+                else:
+                    # 這次的log範圍內沒找到這台裝置的連線紀錄,保留舊值,不要清空
+                    updated_row["ip_address"] = old_row.get("ip_address", "")
             else:
-                # 這次的log範圍內沒找到這台裝置的連線紀錄,保留舊值,不要清空
                 updated_row["ip_address"] = old_row.get("ip_address", "")
-        else:
+        except Exception:
+            # IP解析失敗不該讓整個同步失敗,保留舊值即可
             updated_row["ip_address"] = old_row.get("ip_address", "")
-    except Exception:
-        # IP解析失敗不該讓整個同步失敗,保留舊值即可
-        updated_row["ip_address"] = old_row.get("ip_address", "")
 
-    # 只替換這一台裝置在既有快取裡的那一列,其他裝置完全不動
-    existing_cache[serial] = updated_row
-    utils.write_devices_status_cache(CFG["devices_status_cache"]["csv_path"], list(existing_cache.values()))
+        # 只替換這一台裝置在既有快取裡的那一列,其他裝置完全不動
+        existing_cache[serial] = updated_row
+        utils.write_devices_status_cache(CFG["devices_status_cache"]["csv_path"], list(existing_cache.values()))
 
-    return True, "同步完成"
+        return True, "同步完成"
+    except Exception as e:
+        import traceback
+        tb_text = traceback.format_exc()
+        print(f"[單一裝置同步] 發生未預期的錯誤(serial={serial}, enrollment_id={enrollment_id}):\n{tb_text}")
+        return False, f"同步時發生未預期的錯誤: {type(e).__name__}: {e}(詳細內容已記錄到伺服器log,可用journalctl查看)"
 
 
 def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=False):
@@ -3993,7 +4295,11 @@ def start_nanomdm_cleanup_scheduler():
 @app.route("/version")
 @login_required
 def version_page():
-    return render_template("version.html", active="version")
+    cfg = CFG["update"]
+    return render_template(
+        "version.html", active="version",
+        github_owner=cfg["github_owner"], github_repo=cfg["github_repo"],
+    )
 
 
 def _get_github_token():
@@ -4027,23 +4333,15 @@ def api_version_set_current():
     return jsonify({"ok": True, "current_version": tag})
 
 
-@app.route("/api/version/tags")
+@app.route("/api/version/history")
 @login_required
-def api_version_tags():
-    cfg = CFG["update"]
-    token = _get_github_token()
-    tags, err = utils_version.fetch_github_tags(cfg["github_owner"], cfg["github_repo"], github_token=token)
-    if tags is None:
-        return jsonify({"ok": False, "message": err}), 500
-
-    releases_map = utils_version.fetch_github_releases_map(cfg["github_owner"], cfg["github_repo"], github_token=token)
-    tags_sorted = sorted(tags, key=lambda t: utils_version.version_sort_key(t["name"]), reverse=True)
-    for t in tags_sorted:
-        release_info = releases_map.get(t["name"])
-        t["release_notes"] = release_info["body"] if release_info else None
-        t["published_at"] = release_info["published_at"] if release_info else None
-
-    return jsonify({"ok": True, "tags": tags_sorted})
+def api_version_history():
+    backup_dir = "/opt/nanomdm-webui/.update_backups"
+    try:
+        history = utils_version.list_update_history(backup_dir)
+        return jsonify({"ok": True, "history": history})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
 
 
 @app.route("/api/version/check-update")
@@ -4514,6 +4812,41 @@ def api_sysstatus_static_files():
         return jsonify({"ok": True, "data": utils_sysstatus.get_static_files_status(CFG)})
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
+
+
+@app.route("/api/sysstatus/sh-permissions/scan")
+@login_required
+def api_sysstatus_sh_permissions_scan():
+    root_dirs = list(CFG["update"]["path_map"].values())
+    try:
+        results = utils.scan_sh_file_permissions(root_dirs)
+        no_exec_count = sum(1 for r in results if not r["is_executable"])
+        return jsonify({"ok": True, "files": results, "total_count": len(results), "no_exec_count": no_exec_count})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
+
+@app.route("/api/sysstatus/sh-permissions/grant", methods=["POST"])
+@login_required
+def api_sysstatus_sh_permissions_grant():
+    data = request.json or {}
+    paths = data.get("paths", [])
+    if not paths:
+        return jsonify({"ok": False, "message": "沒有指定要授權的檔案"}), 400
+
+    # 安全檢查:只允許對「掃描範圍內」的路徑做chmod,避免萬一前端傳來的路徑被竄改,
+    # 被拿去對專案目錄以外的任意檔案做權限變更
+    root_dirs = list(CFG["update"]["path_map"].values())
+    invalid_paths = [p for p in paths if not any(os.path.abspath(p).startswith(os.path.abspath(root) + os.sep) for root in root_dirs)]
+    if invalid_paths:
+        return jsonify({"ok": False, "message": f"以下路徑不在允許的專案目錄範圍內,拒絕處理: {invalid_paths}"}), 400
+
+    success_count, failed_paths = utils.grant_executable_to_sh_files(paths)
+    log_activity_entry(
+        "系統狀態-批次授權.sh執行權限", len(failed_paths) == 0,
+        detail=f"成功 {success_count} 個,失敗 {len(failed_paths)} 個" + (f",失敗清單: {failed_paths}" if failed_paths else ""),
+    )
+    return jsonify({"ok": True, "success_count": success_count, "failed_paths": failed_paths})
 
 
 if __name__ == "__main__":
