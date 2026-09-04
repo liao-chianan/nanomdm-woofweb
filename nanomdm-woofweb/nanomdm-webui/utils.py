@@ -723,6 +723,34 @@ def ensure_executable(script_path):
         pass
 
 
+def ensure_unix_line_endings(script_path):
+    """確保這支腳本檔案是Unix換行符(LF)格式,執行前自動把CRLF轉成LF。
+
+    這是實際發生過的問題:如果腳本檔案裡混有Windows換行符(CRLF),shebang那一行
+    (例如"#!/bin/sh")後面會接著一個看不見的\\r字元,系統嘗試尋找直譯器時,實際找的
+    路徑會變成"/bin/sh\\r"這種不存在的路徑,導致執行時誤報「找不到檔案」——即使檔案
+    本身確實存在、也有正確的執行權限,這個錯誤訊息本身具有高度誤導性,容易讓人誤以為
+    是路徑設定錯誤或檔案遺失。
+
+    只在檔案裡真的偵測到CRLF時才進行轉換跟寫入,已經是LF格式的檔案不會被觸碰,
+    避免不必要的檔案寫入動作。找不到檔案、或沒有權限修改時,靜默略過,原因跟
+    ensure_executable()一致:讓後續實際執行時依照真實的錯誤原因自然地失敗並回報。
+    """
+    try:
+        if not os.path.exists(script_path):
+            return
+        with open(script_path, "rb") as f:
+            content = f.read()
+        if b"\r\n" not in content:
+            return  # 已經是LF格式,不需要做任何事
+        fixed_content = content.replace(b"\r\n", b"\n")
+        with open(script_path, "wb") as f:
+            f.write(fixed_content)
+    except Exception:
+        pass
+
+
+
 # 掃描.sh檔案權限時要排除的目錄名稱——這些是第三方套件/虛擬環境自己管理的內容,
 # 不是我們自己專案的腳本,不該被我們的掃描工具動到權限(而且這些目錄底下常常有大量檔案,
 # 掃描會很慢,也沒有意義)
@@ -785,6 +813,7 @@ def grant_executable_to_sh_files(paths):
 
 def run_dep_account_detail(script_path, env_file_path=None, extra_env=None):
     ensure_executable(script_path)
+    ensure_unix_line_endings(script_path)
     env = build_subprocess_env(env_file_path, extra_env) if env_file_path else extra_env
     cwd = os.path.dirname(script_path) or None
     rc, out, err = run_cmd([script_path], timeout=20, env=env, cwd=cwd)
@@ -793,6 +822,7 @@ def run_dep_account_detail(script_path, env_file_path=None, extra_env=None):
 
 def run_dep_device_details(script_path, serial_number, env_file_path=None, extra_env=None):
     ensure_executable(script_path)
+    ensure_unix_line_endings(script_path)
     env = build_subprocess_env(env_file_path, extra_env) if env_file_path else extra_env
     cwd = os.path.dirname(script_path) or None
     rc, out, err = run_cmd([script_path, serial_number], timeout=30, env=env, cwd=cwd)
@@ -802,6 +832,7 @@ def run_dep_device_details(script_path, serial_number, env_file_path=None, extra
 def stream_check_vpp_license(script_path, env_file_path=None):
     """以 generator 方式逐行讀取 check_vpp_license.sh 的輸出 (供 SSE 使用)"""
     ensure_executable(script_path)
+    ensure_unix_line_endings(script_path)
     env = build_subprocess_env(env_file_path) if env_file_path else None
     cwd = os.path.dirname(script_path) or None
     proc = subprocess.Popen(

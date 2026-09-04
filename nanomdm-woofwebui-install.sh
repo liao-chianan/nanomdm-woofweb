@@ -146,10 +146,10 @@ log_ok "專案下載並部署到 /opt/nanomdm-webui 與 /opt/nanomdm-deployment 
 # (zip/git在某些流程下不一定會保留unix執行權限,這是實際部署時遇到過的問題:
 #  這些腳本是被我們的程式直接呼叫路徑執行,不是透過bash/sh間接執行,缺execute bit會直接
 #  收到 Permission denied)
-sudo chmod +x /opt/nanomdm-deployment/nanodep-release/tools/*.sh 2>/dev/null || true
-sudo chmod +x /opt/nanomdm-deployment/nanoaxm-tools/*.sh 2>/dev/null || true
-sudo chmod +x /opt/nanomdm-deployment/check_vpp_license.sh 2>/dev/null || true
-sudo chmod +x /opt/nanomdm-deployment/check-cert-expiry.sh 2>/dev/null || true
+chmod +x /opt/nanomdm-deployment/nanodep-release/tools/*.sh 2>/dev/null || true
+chmod +x /opt/nanomdm-deployment/nanoaxm-tools/*.sh 2>/dev/null || true
+chmod +x /opt/nanomdm-deployment/check_vpp_license.sh 2>/dev/null || true
+chmod +x /opt/nanomdm-deployment/check-cert-expiry.sh 2>/dev/null || true
 log_ok "已設定必要腳本的執行權限"
 
 # =============================================================================
@@ -621,12 +621,6 @@ cd /opt/nanomdm-webui
 
 [ -f /opt/nanomdm-webui/webui_config.json ] || die "webui_config.json 沒有被正確建立,nanomdm-webui.service 稍後會無法啟動。請重新執行: cd /opt/nanomdm-webui && ./venv/bin/python3 scripts/setup_config.py"
 log_ok "管理者帳號設定完成"
-
-# =============================================================================
-# 記錄初始安裝版本(給webui的[版本與更新]功能使用)
-# =============================================================================
-echo "v0.8" > /opt/nanomdm-webui/VERSION
-log_ok "已記錄初始安裝版本: v0.8"
 
 # =============================================================================
 # 10. 啟用並啟動所有服務

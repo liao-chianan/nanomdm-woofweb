@@ -1197,6 +1197,7 @@ def api_cert_dep_download_cert():
     """
     script = CFG["paths"]["cfg_get_cert_script"]
     utils.ensure_executable(script)
+    utils.ensure_unix_line_endings(script)
     cn_label = request.args.get("cn", "depserver")
     validity_days = request.args.get("validity_days", "365")
 
@@ -1232,6 +1233,7 @@ def api_cert_dep_upload_token():
     try:
         script = CFG["paths"]["cfg_decrypt_tokens_script"]
         utils.ensure_executable(script)
+        utils.ensure_unix_line_endings(script)
         env = get_nanodep_script_env()
         cwd = os.path.dirname(script) or None
         rc, out, err = utils.run_cmd([script, tmp_path], timeout=30, env=env, cwd=cwd)
@@ -1278,6 +1280,7 @@ def api_cert_nanoaxm_update():
     try:
         script = CFG["paths"]["cfg_authcreds_script"]
         utils.ensure_executable(script)
+        utils.ensure_unix_line_endings(script)
         env = get_nanoaxm_script_env()
         cwd = os.path.dirname(script) or None
         rc, out, err = utils.run_cmd([script, client_id, key_id, tmp_path], timeout=20, env=env, cwd=cwd)
@@ -3778,6 +3781,7 @@ def refresh_vpp_cache_once():
     """
     script = CFG["paths"]["check_vpp_license_script"]
     utils.ensure_executable(script)
+    utils.ensure_unix_line_endings(script)
     cache_path = CFG["paths"]["vpp_cache_csv"]
     cwd = os.path.dirname(script) or None
     env = utils.build_subprocess_env(CFG["paths"]["env_file"])
