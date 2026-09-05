@@ -108,6 +108,15 @@
   </div>
 </div>
 
+<!-- 清理改派裝置本地資料 - 進度 Modal -->
+<div class="modal-overlay hidden" id="asm-reassigned-cleanup-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('asm-reassigned-cleanup-modal')">✕</span>
+    <h3 id="asm-reassigned-cleanup-title">清理本地資料</h3>
+    <div id="asm-reassigned-cleanup-progress"></div>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block extra_js %}

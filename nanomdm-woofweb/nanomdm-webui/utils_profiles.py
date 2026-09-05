@@ -348,6 +348,45 @@ def _extract_subject_attr(subject_array, attr_name):
     return ""
 
 
+_BYTES_MARKER_KEY = "__bytes_b64__"
+
+
+def _sanitize_bytes_for_json(obj):
+    """遞迴走訪plist結構(dict/list/其他純值),把任何bytes值轉成帶標記的base64字串
+    ({"__bytes_b64__": "..."}),讓整個結構能安全地被json.dumps()/jsonify()序列化。
+
+    給unmanaged_payloads使用——「看不懂的payload類型,原樣保留」這個機制原本沒有
+    考慮到內容裡可能藏著原始二進位資料(例如CA憑證payload的PayloadContent就是
+    DER格式的原始bytes),直接回傳給前端會讓jsonify()噴出
+    "Object of type bytes is not JSON serializable"這個錯誤——這是實際發生過的問題,
+    不是理論上的邊界情況。
+
+    用遞迴處理是因為plist結構可能任意深度巢狀(dict包list包dict...),不能只處理
+    最外層,不然依然會在更深層的地方踩到同樣的問題。
+    """
+    if isinstance(obj, bytes):
+        return {_BYTES_MARKER_KEY: base64.b64encode(obj).decode("ascii")}
+    if isinstance(obj, dict):
+        return {k: _sanitize_bytes_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_bytes_for_json(v) for v in obj]
+    return obj
+
+
+def _restore_bytes_from_json(obj):
+    """_sanitize_bytes_for_json()的反向操作:把帶標記的base64字串,轉換回原始bytes。
+    存檔時要用這個把unmanaged_payloads還原成plistlib.dumps()能正確處理的格式,
+    不然二進位內容(例如CA憑證)會被誤存成base64文字字串,而不是原本的二進位資料。
+    """
+    if isinstance(obj, dict):
+        if set(obj.keys()) == {_BYTES_MARKER_KEY}:
+            return base64.b64decode(obj[_BYTES_MARKER_KEY])
+        return {k: _restore_bytes_from_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_restore_bytes_from_json(v) for v in obj]
+    return obj
+
+
 def read_mobileconfig_as_form(dir_path, filename):
     """讀取既有的 .mobileconfig,盡量對應回 PAYLOAD_SCHEMA 的表單結構。
     無法辨識的 payload 類型會原樣保留在 unmanaged_payloads,存檔時會照樣寫回去,
@@ -372,7 +411,7 @@ def read_mobileconfig_as_form(dir_path, filename):
         ptype = payload.get("PayloadType")
         schema_key = type_to_key.get(ptype)
         if not schema_key:
-            unmanaged_payloads.append(payload)
+            unmanaged_payloads.append(_sanitize_bytes_for_json(payload))
             continue
 
         schema = PAYLOAD_SCHEMA[schema_key]
@@ -560,7 +599,7 @@ def build_mobileconfig(top_level, payloads, unmanaged_payloads=None, existing_uu
                      避免每次存檔都被裝置當成新描述檔重新安裝
     回傳 (plist_bytes, warnings) - warnings 是字串list,不會阻擋存檔,但要顯示給使用者看
     """
-    unmanaged_payloads = unmanaged_payloads or []
+    unmanaged_payloads = [_restore_bytes_from_json(p) for p in (unmanaged_payloads or [])]
     existing_uuids = existing_uuids or {}
     warnings = []
 

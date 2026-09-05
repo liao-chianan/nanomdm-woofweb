@@ -32,6 +32,11 @@ MOBILECONFIG_DIR = "/opt/nanomdm-deployment/mobileconfig"
 # VPP Token檔案路徑改成可從.env的VPP_TOKEN_PATH覆寫,沒設定的話才用這個通用檔名當後備,
 # 避免這裡跟webui的config.py各自寫死一份、日後可能各自被改動卻沒有同步更新。
 VPP_TOKEN_FILE = os.environ.get("VPP_TOKEN_PATH", "/opt/nanomdm-deployment/vpp_token.vpptoken")
+# SCEP CA憑證路徑,跟enroll-server.py用同一組預設路徑約定。用來建立獨立的CA信任描述檔,
+# 透過MDM通道推送(裝置完成註冊後才有的、已經建立好信任關係的管道),讓CA能被正確
+# 自動信任——跟直接塞進enroll-template.mobileconfig不同,那個管道還沒建立MDM信任關係,
+# 沒辦法讓憑證自動被列入信任清單。
+SCEP_CA_PATH = os.environ.get("SCEP_CA_PATH", "/opt/nanomdm-deployment/scep-depot/ca.pem")
 LOG_PATH = "/opt/nanomdm-deployment/webhook-automation.log"
 # 暫存「UDID -> 序號」對應關係的本機檔案（在 Authenticate 事件時寫入，
 # 在 TokenUpdate 事件時讀取），不需要查詢任何資料庫
@@ -240,6 +245,59 @@ def build_install_app_plist(adam_id: str) -> str:
 </plist>"""
 
 
+def build_ca_trust_profile(ca_cert_path: str):
+    """建立一份只含CA憑證的獨立.mobileconfig,透過MDM通道推送用。
+
+    跟直接把CA憑證塞進enroll-template.mobileconfig不同——這裡是在裝置完成MDM註冊、
+    透過已經建立好信任關係的MDM通道推送,才能讓憑證正確被自動列入信任清單。
+
+    Apple要求憑證payload裡的內容要是DER格式(不是PEM的base64文字),所以要先用openssl
+    把PEM轉成DER。找不到CA檔案、或轉換失敗,回傳None,呼叫端據此略過這個步驟即可,
+    不應該讓整個自動化流程因為這個失敗。
+
+    回傳完整的.mobileconfig內容(bytes)或None。
+    """
+    if not os.path.exists(ca_cert_path):
+        log(f"找不到CA憑證檔案({ca_cert_path}),略過推送CA信任描述檔這個步驟")
+        return None
+
+    try:
+        result = subprocess.run(
+            ["openssl", "x509", "-in", ca_cert_path, "-outform", "der"],
+            capture_output=True, timeout=15,
+        )
+        if result.returncode != 0:
+            log(f"CA憑證PEM轉DER失敗: {result.stderr.decode(errors='replace')}")
+            return None
+        ca_der_bytes = result.stdout
+    except Exception as e:
+        log(f"CA憑證PEM轉DER時發生例外: {e}")
+        return None
+
+    profile = {
+        "PayloadContent": [
+            {
+                "PayloadCertificateFileName": "nanomdm-ca.cer",
+                "PayloadContent": ca_der_bytes,
+                "PayloadDescription": "讓裝置信任這張CA,之後用這張CA簽署過的描述檔才會顯示為已驗證",
+                "PayloadDisplayName": "NanoMDM CA 根憑證",
+                "PayloadIdentifier": "tw.edu.nanomdm.ca-trust.root",
+                "PayloadType": "com.apple.security.root",
+                "PayloadUUID": str(uuid.uuid4()).upper(),
+                "PayloadVersion": 1,
+            }
+        ],
+        "PayloadDescription": "讓裝置信任NanoMDM的CA,透過MDM通道推送才能正確自動信任",
+        "PayloadDisplayName": "NanoMDM CA Trust",
+        "PayloadIdentifier": "tw.edu.nanomdm.ca-trust",
+        "PayloadRemovalDisallowed": True,
+        "PayloadType": "Configuration",
+        "PayloadUUID": str(uuid.uuid4()).upper(),
+        "PayloadVersion": 1,
+    }
+    return plistlib.dumps(profile)
+
+
 def build_install_profile_plist(profile_content: bytes) -> str:
     cmd_uuid = str(uuid.uuid4()).upper()
     encoded = base64.b64encode(profile_content).decode("ascii")
@@ -300,6 +358,16 @@ def process_enrollment(udid: str):
     # 1. 改名
     enqueue_command(udid, build_rename_plist(device_name))
     time.sleep(2)
+
+    # 1.5 推送CA信任描述檔(透過MDM通道,才能讓CA正確自動被信任;放在baseline之前,
+    # 這樣如果baseline/群組描述檔有簽署,才有機會顯示為已驗證,不是先送簽署過的內容
+    # 卻還沒建立信任關係)
+    ca_trust_profile = build_ca_trust_profile(SCEP_CA_PATH)
+    if ca_trust_profile:
+        enqueue_command(udid, build_install_profile_plist(ca_trust_profile))
+        time.sleep(2)
+    else:
+        log("略過推送CA信任描述檔")
 
     # 2. 派送 baseline
     with open(BASELINE_PLIST, "rb") as f:

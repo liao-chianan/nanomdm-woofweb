@@ -113,6 +113,7 @@ TEMPLATE_CONTENT = _load_template_content()
 
 def extract_unique_cn(raw_body: bytes) -> str:
     """用 openssl 解開 CMS 訊息，取出 plist 內的 SERIAL 欄位，組成唯一 CN"""
+
     with tempfile.NamedTemporaryFile(suffix=".p7", delete=False) as f:
         f.write(raw_body)
         p7_path = f.name
@@ -120,7 +121,7 @@ def extract_unique_cn(raw_body: bytes) -> str:
     plist_path = p7_path + ".plist"
     try:
         result = subprocess.run(
-            ["openssl", "smime", "-verify", "-noverify", "-inform", "DER",
+            ["openssl", "smime", "-verify", "-noverify", "-binary", "-inform", "DER",
              "-in", p7_path, "-out", plist_path],
             capture_output=True, timeout=10
         )
@@ -169,7 +170,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # 任何一個位元組被更動,簽名就會失效),而且每台裝置的unique_cn都不同,
         # 沒辦法只在啟動時簽署一次,必須每次請求都重新簽署這次專屬的內容。
         final_bytes = encoded
-        if _SIGNING_AVAILABLE and utils_signing.signing_cert_exists(SIGNING_CERT_PATH, SIGNING_KEY_PATH):
+
+        if _SIGNING_AVAILABLE:
+            cert_exists = utils_signing.signing_cert_exists(SIGNING_CERT_PATH, SIGNING_KEY_PATH)
+        else:
+            cert_exists = False
+
+        if _SIGNING_AVAILABLE and cert_exists:
             signed_bytes, sign_err = utils_signing.sign_plist_bytes(
                 encoded, SIGNING_CERT_PATH, SIGNING_KEY_PATH, ca_cert_path=SCEP_CA_PATH,
             )

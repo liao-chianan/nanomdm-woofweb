@@ -216,6 +216,54 @@ while true; do
 done
 log_ok "Certbot email: $CERTBOT_EMAIL"
 
+# ---- 5.3b 憑證機構(CA)環境選擇 ----
+echo ""
+echo "Let's Encrypt 憑證申請有次數限制(同一個網域一週內申請太多次會被暫時擋住)。"
+echo "如果只是要反覆測試這個安裝腳本本身能不能順利跑完(不是要測試真正的裝置註冊),"
+echo "建議選測試環境,額度高很多,不容易撞到限制。"
+echo ""
+echo "  1) 正式環境(預設 Let's Encrypt) - 完全自動、不需要額外註冊帳號,但申請次數有限制"
+echo "  2) 正式環境(ZeroSSL)             - 沒有申請次數限制,但需要先到 ZeroSSL 網站"
+echo "                                     (https://app.zerossl.com/developer) 手動產生一組"
+echo "                                     EAB 認證資訊(只需要做一次,之後可以重複使用)"
+echo "  3) 測試環境                      - 額度高很多,但簽發的憑證裝置不會信任,只適合測試"
+echo "                                     安裝流程本身,沒辦法拿來測試真正的iPad裝置註冊"
+echo ""
+read -rp "請選擇 [1/2/3,直接按Enter預設選1]: " CA_ENV_CHOICE
+
+CERTBOT_CA_ARGS=""
+CERTBOT_STAGING_FLAG=""
+case "$CA_ENV_CHOICE" in
+    2)
+        echo ""
+        echo "麻煩先到 https://app.zerossl.com/developer 登入(沒有帳號的話先免費註冊一個),"
+        echo "在「Developer」頁面底部按「Generate」產生一組EAB認證資訊(Key ID + HMAC Key)。"
+        echo "這組資訊產生一次就能重複使用,不用每次安裝都重新產生。"
+        echo ""
+        while true; do
+            read -rp "EAB Key ID: " ZEROSSL_EAB_KID
+            ZEROSSL_EAB_KID="$(echo "$ZEROSSL_EAB_KID" | xargs)"  # 去除頭尾空白,避免複製貼上時帶入多餘空格
+            [ -n "$ZEROSSL_EAB_KID" ] && break
+            log_warn "不能是空白,請重新輸入"
+        done
+        while true; do
+            read -rp "EAB HMAC Key: " ZEROSSL_EAB_HMAC
+            ZEROSSL_EAB_HMAC="$(echo "$ZEROSSL_EAB_HMAC" | xargs)"
+            [ -n "$ZEROSSL_EAB_HMAC" ] && break
+            log_warn "不能是空白,請重新輸入"
+        done
+        CERTBOT_CA_ARGS="--server https://acme.zerossl.com/v2/DV90 --eab-kid $ZEROSSL_EAB_KID --eab-hmac-key $ZEROSSL_EAB_HMAC"
+        log_ok "已選擇正式環境(ZeroSSL)"
+        ;;
+    3)
+        CERTBOT_STAGING_FLAG="--staging"
+        log_warn "已選擇測試環境,簽發的憑證不受裝置信任,僅適合測試安裝流程本身"
+        ;;
+    *)
+        log_ok "已選擇正式環境(Let's Encrypt)"
+        ;;
+esac
+
 # ---- 5.4 API金鑰(nanomdm/nanodep/nanoaxm共用同一組) ----
 echo ""
 DEFAULT_API_KEY=$(openssl rand -hex 24)
@@ -517,9 +565,12 @@ nginx -t || die "nginx 簡化版設定測試失敗,請檢查 $NGINX_SITE"
 systemctl reload nginx
 log_ok "nginx 簡化版設定(僅HTTP)已套用"
 
-echo "  正在透過 certbot 申請憑證(需要 ${SERVER_DOMAIN} 的DNS已經正確指向本機)..."
-certbot --nginx -d "$SERVER_DOMAIN" --non-interactive --agree-tos -m "$CERTBOT_EMAIL" --redirect \
-    || die "certbot 申請憑證失敗。常見原因:DNS還沒生效、80port被防火牆擋住、或網域拼錯。可以之後手動執行 certbot --nginx -d ${SERVER_DOMAIN} 重試"
+ca_env_label=""
+[ -n "$CERTBOT_STAGING_FLAG" ] && ca_env_label=" [測試環境]"
+[ -n "$CERTBOT_CA_ARGS" ] && ca_env_label=" [ZeroSSL]"
+echo "  正在透過 certbot 申請憑證(需要 ${SERVER_DOMAIN} 的DNS已經正確指向本機)...${ca_env_label}"
+certbot --nginx -d "$SERVER_DOMAIN" --non-interactive --agree-tos -m "$CERTBOT_EMAIL" --redirect $CERTBOT_STAGING_FLAG $CERTBOT_CA_ARGS \
+    || die "certbot 申請憑證失敗。常見原因:DNS還沒生效、80port被防火牆擋住、網域拼錯、EAB認證資訊填錯,或撞到Let's Encrypt的申請次數限制(如果是最後這個原因,可以重新執行安裝腳本、這次選擇測試環境或ZeroSSL)。可以之後手動執行 certbot --nginx -d ${SERVER_DOMAIN} 重試"
 
 [ -f "/etc/letsencrypt/live/${SERVER_DOMAIN}/fullchain.pem" ] || die "certbot執行完成但找不到憑證檔案,請檢查 /var/log/letsencrypt/letsencrypt.log"
 log_ok "Let's Encrypt 憑證申請成功"
@@ -653,6 +704,13 @@ echo ""
 echo "  webui 網址:      https://${SERVER_DOMAIN}/miniweb/"
 echo "  .env 位置:       /opt/nanomdm-deployment/.env(已設定權限僅root可讀寫)"
 echo ""
+if [ -n "$CERTBOT_STAGING_FLAG" ]; then
+    echo -e "  ${C_YELLOW}⚠ 這次選擇的是 Let's Encrypt 測試環境,簽發的憑證不受任何瀏覽器/裝置信任。${C_RESET}"
+    echo -e "  ${C_YELLOW}  webui 網頁本身可以正常瀏覽測試(瀏覽器會顯示憑證不受信任的警告,直接略過即可),${C_RESET}"
+    echo -e "  ${C_YELLOW}  但無法用來測試真正的iPad裝置註冊(iOS會拒絕不受信任的憑證)。${C_RESET}"
+    echo -e "  ${C_YELLOW}  確認安裝流程沒問題後,可以重新執行一次安裝腳本、這次選擇正式環境。${C_RESET}"
+    echo ""
+fi
 echo "以下項目 webui 本身已經可以運作,但還需要你登入後手動完成才會有完整的裝置管理能力:"
 echo "  1. APNs Push 憑證(到 identity.apple.com/pushcert 申請後,在「憑證狀態檢視」頁面上傳)"
 echo "  2. VPP Content Token(到 school.apple.com 下載後上傳)"

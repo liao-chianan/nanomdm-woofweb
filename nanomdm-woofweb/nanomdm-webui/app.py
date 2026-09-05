@@ -1794,6 +1794,22 @@ def api_asm_devices_cache():
     server_rows, device_by_server, unassigned, mtime = utils_asm.read_asm_devices_cache(
         CFG["asm_devices_cache"]["servers_csv"], CFG["asm_devices_cache"]["devices_csv"]
     )
+
+    # 取得「這台伺服器自己」在Apple DEP裡註冊的server_name,用來讓前端比對、
+    # 標示出哪一筆是自己這台MDM Server,不需要額外再手動設定一次。
+    # dep_account_detail呼叫失敗(例如.env沒設定NANODEP)時優雅降級成None,
+    # 前端收到None就不特別標示,不影響其他既有功能正常顯示。
+    current_server_name = None
+    try:
+        script = CFG["paths"]["dep_account_detail_script"]
+        rc, out, err = utils.run_dep_account_detail(
+            script, env_file_path=CFG["paths"]["env_file"], extra_env=get_nanodep_script_env()
+        )
+        if rc == 0:
+            current_server_name = json.loads(out).get("server_name")
+    except Exception:
+        pass
+
     return jsonify({
         "ok": True,
         "servers": server_rows,
@@ -1801,6 +1817,7 @@ def api_asm_devices_cache():
         "unassigned_devices": unassigned,
         "unassigned_count": len(unassigned),
         "last_sync": _format_last_sync(mtime) if mtime else None,
+        "current_server_name": current_server_name,
     })
 
 
@@ -1967,6 +1984,121 @@ def api_asm_devices_reassign_progress(activity_id):
                 yield f"data: {json.dumps(update, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e), 'done': True}, ensure_ascii=False)}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
+@app.route("/api/asm-devices/reassign-cleanup-stream")
+@login_required
+def api_asm_devices_reassign_cleanup_stream():
+    """裝置改派到別台MDM Server「之後」,管理者確認過改派結果沒問題,主動觸發的
+    本地資料清理——比照「裝置退場」機制,但刻意獨立成這支函式,完全不呼叫任何
+    ASM解除指派相關的API,從程式碼結構上就排除掉「不小心動到ASM指派狀態」的風險
+    (裝置已經在ASM那邊指派給新伺服器了,這裡不需要、也不應該碰ASM)。
+
+    serials: 逗號分隔的序號清單,一次可以處理多台裝置(對應改派時勾選的那批裝置)。
+    每台裝置各自獨立回報4個步驟的結果(清Activation Lock、撤銷VPP、清nanomdm註冊、
+    清本地檔案),單一裝置或單一步驟失敗,不會擋住其他裝置/步驟繼續處理。
+    """
+    serials_param = request.args.get("serials", "")
+    serials = [s.strip() for s in serials_param.split(",") if s.strip()]
+    if not serials:
+        return jsonify({"ok": False, "message": "缺少序號清單"}), 400
+
+    def generate():
+        env = get_env_dict()
+        db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+
+        # 一次查出所有序號對應的enrollment_id,比逐一查詢有效率
+        enrollment_id_by_serial = {}
+        try:
+            merged, rc, _ = utils.query_and_merge_devices(CFG["mysql"], db_password, CFG["paths"]["devices_csv"])
+            if rc == 0:
+                enrollment_id_by_serial = {r["serial_number"]: r["enrollment_id"] for r in merged}
+        except Exception:
+            pass  # 查不到就每台裝置的enrollment_id都是空字串,各步驟會各自優雅處理缺少的情況
+
+        for serial in serials:
+            enrollment_id = enrollment_id_by_serial.get(serial, "")
+            devices_before = utils.read_devices_csv(CFG["paths"]["devices_csv"])
+            current_group = devices_before.get(serial, {}).get("group", "")
+            current_device_name = devices_before.get(serial, {}).get("device_name", "")
+            overall_ok = True
+
+            yield f"data: {json.dumps({'serial': serial, 'step': 'start', 'status': 'running', 'done': False}, ensure_ascii=False)}\n\n"
+
+            # 步驟1: 清除Activation Lock bypass code
+            if not enrollment_id:
+                yield f"data: {json.dumps({'serial': serial, 'step': 1, 'step_name': '清除Activation Lock', 'status': 'skipped', 'message': '這台裝置沒有enrollment_id,略過此步驟', 'done': False}, ensure_ascii=False)}\n\n"
+            else:
+                try:
+                    base_url, api_user, api_key = get_nanomdm_conn()
+                    if not base_url or not api_key:
+                        yield f"data: {json.dumps({'serial': serial, 'step': 1, 'step_name': '清除Activation Lock', 'status': 'skipped', 'message': '.env 內缺少 NANOMDM 設定', 'done': False}, ensure_ascii=False)}\n\n"
+                    else:
+                        status_code, cmd_result = utils.send_mdm_command(
+                            base_url, api_user, api_key, enrollment_id, "ClearActivationLockBypassCode", {}
+                        )
+                        ok = status_code < 400
+                        if not ok:
+                            overall_ok = False
+                        msg = "已送出清除指令" if ok else f"送出失敗: {cmd_result}"
+                        yield f"data: {json.dumps({'serial': serial, 'step': 1, 'step_name': '清除Activation Lock', 'status': 'done' if ok else 'error', 'message': msg, 'done': False}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    overall_ok = False
+                    yield f"data: {json.dumps({'serial': serial, 'step': 1, 'step_name': '清除Activation Lock', 'status': 'error', 'message': str(e), 'done': False}, ensure_ascii=False)}\n\n"
+
+            # 步驟2: 撤銷VPP授權
+            try:
+                groups = utils.load_groups(CFG["paths"]["groups_json"])
+                group_apps = (groups.get(current_group, {}) or {}).get("apps", []) if current_group else []
+                if not group_apps:
+                    yield f"data: {json.dumps({'serial': serial, 'step': 2, 'step_name': '撤銷VPP授權', 'status': 'skipped', 'message': '沒有需要撤銷的授權', 'done': False}, ensure_ascii=False)}\n\n"
+                else:
+                    revoke_results = []
+                    for adam_id in group_apps:
+                        try:
+                            r = utils.revoke_vpp_license(CFG["cert_status"]["vpp_token_path"], serial, adam_id)
+                            revoke_results.append(f"{adam_id}: {'成功' if r.get('status') in (0, '0', None) else r}")
+                        except Exception as e:
+                            revoke_results.append(f"{adam_id}: 失敗({e})")
+                    yield f"data: {json.dumps({'serial': serial, 'step': 2, 'step_name': '撤銷VPP授權', 'status': 'done', 'message': '; '.join(revoke_results), 'done': False}, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                overall_ok = False
+                yield f"data: {json.dumps({'serial': serial, 'step': 2, 'step_name': '撤銷VPP授權', 'status': 'error', 'message': str(e), 'done': False}, ensure_ascii=False)}\n\n"
+
+            # 步驟3: 清除nanomdm的enrollment註冊紀錄
+            if not enrollment_id:
+                yield f"data: {json.dumps({'serial': serial, 'step': 3, 'step_name': 'nanomdm註冊紀錄清除', 'status': 'skipped', 'message': '這台裝置沒有enrollment_id,略過此步驟', 'done': False}, ensure_ascii=False)}\n\n"
+            else:
+                try:
+                    ok, msg = utils.delete_nanomdm_enrollment(CFG["mysql"], db_password, enrollment_id)
+                    if ok:
+                        yield f"data: {json.dumps({'serial': serial, 'step': 3, 'step_name': 'nanomdm註冊紀錄清除', 'status': 'done', 'message': '已刪除enrollment紀錄', 'done': False}, ensure_ascii=False)}\n\n"
+                    else:
+                        overall_ok = False
+                        yield f"data: {json.dumps({'serial': serial, 'step': 3, 'step_name': 'nanomdm註冊紀錄清除', 'status': 'error', 'message': msg, 'done': False}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    overall_ok = False
+                    yield f"data: {json.dumps({'serial': serial, 'step': 3, 'step_name': 'nanomdm註冊紀錄清除', 'status': 'error', 'message': str(e), 'done': False}, ensure_ascii=False)}\n\n"
+
+            # 步驟4: 清理webui本地檔案
+            try:
+                utils.delete_device_row(CFG["paths"]["devices_csv"], serial)
+                utils.delete_devices_status_row(CFG["devices_status_cache"]["csv_path"], serial)
+                if enrollment_id:
+                    utils.remove_from_udid_serial_cache(
+                        CFG["paths"]["udid_serial_cache"], CFG["paths"]["udid_serial_cache_lock"], enrollment_id
+                    )
+                yield f"data: {json.dumps({'serial': serial, 'step': 4, 'step_name': '清理本地檔案', 'status': 'done', 'message': '已移除devices.csv / devices-status.csv裡的紀錄', 'done': False}, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                overall_ok = False
+                yield f"data: {json.dumps({'serial': serial, 'step': 4, 'step_name': '清理本地檔案', 'status': 'error', 'message': str(e), 'done': False}, ensure_ascii=False)}\n\n"
+
+            log_activity_entry("ASM裝置改派-清理本地資料", overall_ok, serial=serial, device_name=current_device_name, group=current_group)
+            yield f"data: {json.dumps({'serial': serial, 'step': 'end', 'done': False, 'overall_ok': overall_ok}, ensure_ascii=False)}\n\n"
+
+        yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
@@ -2423,6 +2555,7 @@ def api_devices_save():
     # (wifi_mac傳None給upsert_device_row代表「不異動」,只有真的查到新值時才會覆蓋)
     wifi_mac = None
     existing = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial_number, {})
+    old_group = existing.get("group", "")
     if not existing.get("wifi_mac"):
         found_mac = get_wifi_mac_lookup().get(serial_number)
         if found_mac:
@@ -2430,11 +2563,30 @@ def api_devices_save():
 
     try:
         saved = utils.upsert_device_row(CFG["paths"]["devices_csv"], serial_number, device_name, group, wifi_mac=wifi_mac)
-        return jsonify({"ok": True, "message": f"已儲存 {serial_number}", "data": saved})
     except ValueError as e:
         return jsonify({"ok": False, "message": str(e)}), 400
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
+
+    response = {"ok": True, "message": f"已儲存 {serial_number}", "data": saved}
+
+    # 群組真的有變更時,比照[裝置註冊狀態]頁面的做法,同步套用新群組配對的
+    # DEP profile重新指派、mobileconfig推送——之前這裡漏掉了這一步,導致從這個頁面
+    # (不是[裝置註冊狀態])編輯群組時,DEP profile_uuid不會跟著更新。
+    if group != old_group and group:
+        log_activity_entry("裝置與命令-變更群組", True, detail=f"舊群組={old_group or '(未分類)'} -> 新群組={group}", serial=serial_number, device_name=device_name, group=group)
+        enrollment_id = ""
+        try:
+            env = get_env_dict()
+            db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+            merged, rc, _ = utils.query_and_merge_devices(CFG["mysql"], db_password, CFG["paths"]["devices_csv"])
+            if rc == 0:
+                enrollment_id = next((r["enrollment_id"] for r in merged if r["serial_number"] == serial_number), "")
+        except Exception:
+            pass  # 查不到enrollment_id時,apply_group_change_effects()本身能正確處理空字串的情況
+        response["sync_steps"] = apply_group_change_effects(serial_number, group, enrollment_id)
+
+    return jsonify(response)
 
 
 @app.route("/api/devices/details/<serial_number>")

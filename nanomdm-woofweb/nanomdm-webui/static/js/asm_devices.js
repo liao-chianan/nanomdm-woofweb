@@ -13,11 +13,33 @@ function renderAsmServersTable() {
     tbody.innerHTML = `<tr><td colspan="5">目前 ASM 底下沒有任何 MDM Server</td></tr>`;
     return;
   }
-  ASM_DATA.servers.forEach((s) => {
+
+  // 把「自己這台」(serverName跟current_server_name相符)排到最前面,其餘維持原本順序
+  const currentName = ASM_DATA.current_server_name;
+  const servers = [...ASM_DATA.servers];
+  if (currentName) {
+    servers.sort((a, b) => {
+      const aIsSelf = a.serverName === currentName;
+      const bIsSelf = b.serverName === currentName;
+      if (aIsSelf && !bIsSelf) return -1;
+      if (!aIsSelf && bIsSelf) return 1;
+      return 0;
+    });
+  }
+
+  servers.forEach((s) => {
+    const isSelf = currentName && s.serverName === currentName;
     const tr = document.createElement("tr");
+    if (isSelf) {
+      tr.style.background = "#eef6ff";
+      tr.style.fontWeight = "600";
+    }
+    const selfBadge = isSelf
+      ? ` <span style="background:#2563eb; color:#fff; font-size:11px; font-weight:600; padding:1px 8px; border-radius:10px; margin-left:6px;">本機</span>`
+      : "";
     tr.innerHTML = `
       <td style="font-family:var(--mono); font-size:11px;">${escapeHtml(s.id)}</td>
-      <td><span class="serial-link" data-action="server-detail" data-server-id="${escapeHtml(s.id)}">${escapeHtml(s.serverName)}</span></td>
+      <td><span class="serial-link" data-action="server-detail" data-server-id="${escapeHtml(s.id)}">${escapeHtml(s.serverName)}</span>${selfBadge}</td>
       <td>${escapeHtml(s.serverType)}</td>
       <td>${escapeHtml(s.status)}</td>
       <td><span class="serial-link" data-action="server-devices" data-server-id="${escapeHtml(s.id)}">${s.device_count}</span></td>
@@ -25,6 +47,7 @@ function renderAsmServersTable() {
     tbody.appendChild(tr);
   });
 }
+
 
 async function loadAsmCache() {
   const tbody = document.getElementById("asm-servers-tbody");
@@ -252,7 +275,7 @@ function renderDeviceListRows(devices) {
   devices.forEach((d) => {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><input type="checkbox" class="asm-device-checkbox" value="${escapeHtml(d.id)}"></td>
+      <td><input type="checkbox" class="asm-device-checkbox" value="${escapeHtml(d.id)}" data-serial="${escapeHtml(d.serialNumber)}"></td>
       <td style="font-family:var(--mono);">${escapeHtml(d.serialNumber)}</td>
       <td>${escapeHtml(d.deviceModel)}</td>
       <td>${escapeHtml(d.color)}</td>
@@ -289,6 +312,10 @@ function getSelectedDeviceIds() {
   return Array.from(document.querySelectorAll(".asm-device-checkbox:checked")).map((el) => el.value);
 }
 
+function getSelectedDeviceSerials() {
+  return Array.from(document.querySelectorAll(".asm-device-checkbox:checked")).map((el) => el.dataset.serial);
+}
+
 function renderReassignProgress(update) {
   const container = document.getElementById("asm-reassign-progress");
   const statusText = update.status || (update.error ? "錯誤" : "查詢中");
@@ -303,8 +330,69 @@ function renderReassignProgress(update) {
   `;
 }
 
+function startReassignCleanup(serials) {
+  const modal = document.getElementById("asm-reassigned-cleanup-modal");
+  const title = document.getElementById("asm-reassigned-cleanup-title");
+  const container = document.getElementById("asm-reassigned-cleanup-progress");
+  title.textContent = `清理本地資料 (${serials.length} 台裝置)`;
+  container.innerHTML = "";
+  modal.classList.remove("hidden");
+
+  const stepDivs = {};
+  const params = new URLSearchParams({ serials: serials.join(",") });
+  const es = new EventSource(apiUrl(`/api/asm-devices/reassign-cleanup-stream?${params.toString()}`));
+
+  es.onmessage = (event) => {
+    let update;
+    try {
+      update = JSON.parse(event.data);
+    } catch (e) {
+      return;
+    }
+
+    if (update.done !== undefined && update.serial === undefined) {
+      // 全部裝置都處理完畢的最終訊息
+      const finalDiv = document.createElement("div");
+      finalDiv.style.cssText = "margin-top:8px; font-weight:600; color:#1c7c3f;";
+      finalDiv.textContent = "✅ 全部裝置的本地資料清理已完成";
+      container.appendChild(finalDiv);
+      es.close();
+      return;
+    }
+
+    if (update.step === "start") {
+      const header = document.createElement("div");
+      header.style.cssText = "margin-top:14px; font-weight:600; font-size:13px;";
+      header.textContent = `序號 ${update.serial}`;
+      container.appendChild(header);
+      return;
+    }
+    if (update.step === "end") {
+      return; // 每台裝置的個別步驟已經逐一顯示過,結尾訊息不用重複呈現
+    }
+
+    const stepKey = `${update.serial}-step-${update.step}`;
+    let stepDiv = stepDivs[stepKey];
+    if (!stepDiv) {
+      stepDiv = document.createElement("div");
+      stepDiv.style.cssText = "border:1px solid var(--border-color); border-radius:6px; padding:8px 12px; margin-top:6px; font-size:13px;";
+      container.appendChild(stepDiv);
+      stepDivs[stepKey] = stepDiv;
+    }
+    const iconMap = { running: "⏳", done: "✅", skipped: "➖", error: "❌" };
+    const icon = iconMap[update.status] || "•";
+    const msgText = update.message ? `: ${escapeHtml(update.message)}` : "";
+    stepDiv.innerHTML = `${icon} 步驟${update.step} - ${escapeHtml(update.step_name)}${msgText}`;
+  };
+
+  es.onerror = () => {
+    es.close();
+  };
+}
+
 async function reassignSelectedDevices() {
   const deviceIds = getSelectedDeviceIds();
+  const serials = getSelectedDeviceSerials();
   const targetServerId = document.getElementById("asm-target-server-select").value;
 
   if (deviceIds.length === 0) { alert("請至少勾選一台裝置"); return; }
@@ -343,6 +431,35 @@ async function reassignSelectedDevices() {
       btn.textContent = "改派";
       es.close();
       loadAsmCache();
+
+      // 只有「目前開啟的裝置清單,正好是本機這台伺服器」時,才顯示清理本地資料的提示——
+      // 查看別台伺服器的清單、或未指派裝置清單時改派,不該出現這個按鈕(裝置本來就不是
+      // 從本機移出去的,沒有本機資料需要清理)。
+      const isFromThisServer =
+        currentDeviceListContext &&
+        currentDeviceListContext.type === "server" &&
+        ASM_DATA.current_server_name &&
+        (ASM_DATA.servers || []).some(
+          (s) => s.id === currentDeviceListContext.serverId && s.serverName === ASM_DATA.current_server_name
+        );
+
+      if (!isFromThisServer) return;
+
+      // 不自動觸發本地資料清理——改派作業的確切成功/失敗狀態,Apple回傳的字串我們沒有
+      // 100%把握判讀,所以在上方顯示完整原始狀態讓管理者自己確認,這裡改成額外顯示一個
+      // 按鈕,由管理者看過結果後自己決定要不要清理,不自動猜測、自動觸發。
+      const progressEl = document.getElementById("asm-reassign-progress");
+      const cleanupPrompt = document.createElement("div");
+      cleanupPrompt.style.cssText = "margin-top:10px; padding:10px 14px; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; font-size:13px;";
+      cleanupPrompt.innerHTML = `
+        請先確認上方改派結果是否成功,如果確定裝置已經成功改派到別台伺服器,
+        可以點下方按鈕清理這批裝置在本機的本地資料(不會去動 ASM 的指派狀態)。<br>
+        <button type="button" id="asm-reassign-cleanup-trigger-btn" style="margin-top:6px; font-size:12px;">清理本地資料</button>
+      `;
+      progressEl.appendChild(cleanupPrompt);
+      document.getElementById("asm-reassign-cleanup-trigger-btn").addEventListener("click", () => {
+        startReassignCleanup(serials);
+      });
     }
   };
   es.onerror = () => {
