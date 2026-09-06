@@ -26,30 +26,6 @@
 </div>
 
 <div class="panel">
-  <h2>描述檔簽署<span style="color:#dc2626; font-size:14px; font-weight:normal; margin-left:6px;">(非必要)</span></h2>
-  <div style="background:#fef3c7; border:1px solid #fde68a; border-radius:6px; padding:10px 14px; margin-bottom:12px; font-size:13px; font-weight:600; color:#92400e;">
-    ⚠️ 請在啟用簽署後把 CA 加入註冊模板,裝置重新註冊後就能生效
-  </div>
-  <p style="color:#6b7280; font-size:13px; margin-bottom:14px;">
-    未簽署的描述檔(.mobileconfig)在裝置上會顯示「未驗證」,不影響任何實際功能,純粹是外觀上的差異。
-    啟用簽署後,系統會用自己的 SCEP CA 簽發一張專用憑證來簽署每一份描述檔。
-    <strong>但裝置透過 SCEP 拿到自己的身分憑證,不代表裝置會自動信任這張 CA</strong>
-    (那只是裝置與 MDM 伺服器之間的身分驗證,跟「一般信任根憑證清單」是兩回事)——
-    還需要按下面的「把 CA 加入註冊模板」,讓裝置在完成初次註冊的同時就信任這張 CA,
-    之後簽署過的描述檔才會在裝置上才不會顯示「未驗證」。這個信任僅限於你自己的裝置生態圈內,
-    不是廣泛意義上任何裝置都會信任的公開簽署。
-  </p>
-  <div id="profile-signing-status" style="margin-bottom:12px;">載入中...</div>
-  <button id="profile-signing-generate-btn" class="secondary" type="button">產生簽署憑證</button>
-  <button id="profile-signing-toggle-btn" class="secondary" type="button">啟用簽署</button>
-  <button id="profile-signing-add-ca-btn" class="secondary" type="button">把 CA 加入註冊模板</button>
-  <p style="color:#9ca3af; font-size:12px; margin-top:6px;">
-    只需要做一次,除非 SCEP CA 本身重新產生過。做完之後,裝置需要重新清空註冊,
-    才會拿到含有這張 CA 的新版註冊模板。
-  </p>
-</div>
-
-<div class="panel">
   <h2>憑證說明與更新方法</h2>
   <div id="cert-status-details">載入中...</div>
 </div>
@@ -139,6 +115,21 @@
     <div class="field-row"><label>請再次輸入您目前登入的密碼以確認</label><input type="password" id="nanoaxm-password-input"></div>
     <button id="nanoaxm-update-confirm-btn" type="button" style="margin-top:10px;">更新</button>
   </div>
+</div>
+
+<div class="panel">
+  <h2>描述檔簽署<span style="color:#dc2626; font-size:14px; font-weight:normal; margin-left:6px;">(非必要)</span></h2>
+  <p style="color:#6b7280; font-size:13px; margin-bottom:14px;">
+    未簽署的描述檔(.mobileconfig)在裝置上會顯示「未驗證」,不影響任何實際功能,純粹是外觀上的差異。
+    啟用簽署後,系統會用自己的 SCEP CA 簽發一張專用憑證來簽署每一份描述檔。
+    <strong>CA 信任的建立,是在裝置完成 MDM 註冊後,透過已經建立好信任關係的 MDM 通道自動推送</strong>
+    (裝置註冊完成時會自動處理,不需要在這裡手動操作)——
+    之後簽署過的描述檔,才會在裝置上正確顯示「已驗證」。這個信任僅限於你自己的裝置生態圈內,
+    不是廣泛意義上任何裝置都會信任的公開簽署。
+  </p>
+  <div id="profile-signing-status" style="margin-bottom:12px;">載入中...</div>
+  <button id="profile-signing-generate-btn" class="secondary" type="button">產生簽署憑證</button>
+  <button id="profile-signing-toggle-btn" class="secondary" type="button">啟用簽署</button>
 </div>
 
 {% endblock %}

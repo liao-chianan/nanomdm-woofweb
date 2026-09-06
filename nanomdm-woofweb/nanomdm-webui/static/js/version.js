@@ -1,4 +1,5 @@
 let pendingDiffTargetTag = null;
+let currentDiffFiles = []; // 存放目前開啟的更新確認modal裡,每個檔案的patch內容,供展開/收合時取用
 
 async function loadCurrentVersion() {
   const res = await apiFetch("/api/version/current");
@@ -92,14 +93,36 @@ async function openDiffModal(targetTag) {
 
   const statusLabel = { added: "新增", modified: "修改", removed: "刪除" };
   const files = data.files || [];
+  currentDiffFiles = files; // 存起來給展開/收合時取用patch內容,避免大檔案的diff內容塞進HTML屬性
   if (files.length === 0) {
     document.getElementById("version-diff-file-list").innerHTML = "";
     document.getElementById("version-diff-empty-hint").textContent = "這兩個版本之間,沒有任何符合條件的檔案差異。";
   } else {
-    document.getElementById("version-diff-file-list").innerHTML = files.map((f) =>
-      `<div style="font-size:12px; font-family:var(--mono); padding:2px 0;">[${statusLabel[f.status] || f.status}] ${escapeHtml(f.repo_path)}</div>`
-    ).join("");
+    document.getElementById("version-diff-file-list").innerHTML = files.map((f, idx) => `
+      <div style="border-bottom:1px solid var(--border-color);">
+        <div class="version-diff-file-row" data-idx="${idx}" style="font-size:12px; font-family:var(--mono); padding:4px 0; cursor:pointer; display:flex; align-items:center; gap:6px;">
+          <span class="version-diff-toggle-icon">▶</span>
+          <span>[${statusLabel[f.status] || f.status}] ${escapeHtml(f.repo_path)}</span>
+        </div>
+        <div class="version-diff-patch-container hidden" style="padding:4px 0 10px 20px;"></div>
+      </div>
+    `).join("");
   }
+}
+
+function renderDiffPatch(idx) {
+  const f = currentDiffFiles[idx];
+  if (!f.patch) {
+    return `<p style="color:#9ca3af; font-size:12px;">(無法顯示逐行差異——可能是二進位內容,或差異過大,GitHub沒有提供diff內容)</p>`;
+  }
+  const lines = f.patch.split("\n").map((line) => {
+    let color = "#374151";
+    if (line.startsWith("+") && !line.startsWith("+++")) color = "#1c7c3f";
+    else if (line.startsWith("-") && !line.startsWith("---")) color = "#d64545";
+    else if (line.startsWith("@@")) color = "#6b7280";
+    return `<div style="color:${color};">${escapeHtml(line)}</div>`;
+  }).join("");
+  return `<pre style="font-size:11px; font-family:var(--mono); background:#f8f9fb; border:1px solid var(--border-color); border-radius:4px; padding:8px 10px; overflow-x:auto; white-space:pre; margin:4px 0 0 0;">${lines}</pre>`;
 }
 
 async function confirmApplyUpdate() {
@@ -178,4 +201,21 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("version-check-btn").addEventListener("click", checkForUpdate);
   document.getElementById("version-history-refresh-btn").addEventListener("click", loadUpdateHistory);
   document.getElementById("version-apply-confirm-btn").addEventListener("click", confirmApplyUpdate);
+
+  document.getElementById("version-diff-file-list").addEventListener("click", (e) => {
+    const row = e.target.closest(".version-diff-file-row");
+    if (!row) return;
+    const idx = Number(row.dataset.idx);
+    const container = row.nextElementSibling;
+    const icon = row.querySelector(".version-diff-toggle-icon");
+    const isHidden = container.classList.contains("hidden");
+    if (isHidden) {
+      container.innerHTML = renderDiffPatch(idx);
+      container.classList.remove("hidden");
+      icon.textContent = "▼";
+    } else {
+      container.classList.add("hidden");
+      icon.textContent = "▶";
+    }
+  });
 });

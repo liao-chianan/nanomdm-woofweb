@@ -198,7 +198,12 @@ def compare_versions(owner, repo, base_tag, head_tag, cfg, timeout=20, github_to
             continue  # 對應不到任何本地目錄,略過(理論上不該發生,防禦性寫法)
 
         status = f.get("status", "modified")
-        files.append({"repo_path": relative_path, "local_path": local_path, "status": status})
+        # GitHub Compare API 對修改過的檔案,本身就會附上patch欄位(標準unified diff格式的
+        # 逐行差異內容),不需要額外呼叫或自己重新計算diff。二進位檔案、或diff內容過大時,
+        # GitHub不會提供這個欄位(官方文件明確說明),這裡優雅處理成None,呼叫端可以據此
+        # 顯示「無法顯示差異」的提示,不會因為缺少這個欄位就出錯。
+        patch = f.get("patch")
+        files.append({"repo_path": relative_path, "local_path": local_path, "status": status, "patch": patch})
 
     return files, None
 

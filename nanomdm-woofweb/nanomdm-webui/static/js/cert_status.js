@@ -548,23 +548,12 @@ async function toggleProfileSigning() {
   }
 }
 
-async function addCaToEnrollTemplate() {
-  if (!confirm("確定要把 CA 根憑證加進註冊模板嗎?\n\n做完之後,裝置需要重新清空註冊,才會拿到含有這張 CA 的新版本,之前已經完成註冊的裝置不會自動套用。")) return;
-  const res = await apiFetchJSON("/api/profile-signing/add-ca-to-enroll-template", "POST");
-  if (res.ok) {
-    alert(res.data.message || "已完成");
-  } else {
-    alert("失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-  }
-}
-
 document.addEventListener("DOMContentLoaded", () => {
   loadCertStatus();
   loadProfileSigningStatus();
   document.getElementById("refresh-cert-btn").addEventListener("click", loadCertStatus);
   document.getElementById("profile-signing-generate-btn").addEventListener("click", generateProfileSigningCert);
   document.getElementById("profile-signing-toggle-btn").addEventListener("click", toggleProfileSigning);
-  document.getElementById("profile-signing-add-ca-btn").addEventListener("click", addCaToEnrollTemplate);
 
   document.getElementById("cert-status-details").addEventListener("click", (e) => {
     if (e.target.classList.contains("cert-nginx-renew-btn")) renewNginxCert();

@@ -1056,19 +1056,6 @@ def api_profile_signing_generate():
     return jsonify({"ok": True, "message": message})
 
 
-@app.route("/api/profile-signing/add-ca-to-enroll-template", methods=["POST"])
-@login_required
-def api_profile_signing_add_ca_to_enroll_template():
-    scep_ca_path = CFG["cert_status"]["scep_ca_path"]
-    ok, message = utils_profiles.add_ca_cert_to_enroll_template(
-        CFG["paths"]["mobileconfig_dir"], scep_ca_path,
-    )
-    log_activity_entry("描述檔簽署-CA加入註冊模板", ok, detail=message)
-    if not ok:
-        return jsonify({"ok": False, "message": message}), 500
-    return jsonify({"ok": True, "message": message})
-
-
 @app.route("/api/profile-signing/toggle", methods=["POST"])
 @login_required
 def api_profile_signing_toggle():
