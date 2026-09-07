@@ -22,7 +22,9 @@
 wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm-woofwebui-install.sh -O nanomdm-woofwebui-install.sh && sudo bash nanomdm-woofwebui-install.sh
 ```
 
-> P.S.專案安裝過程會用到的docker image，為了保持版本穩定性，主要是用我測試過的docker image直接提供 (直接用官方最新版可能會導致相容性問題)
+> P.S.專案安裝過程會用到的docker image，為了保持版本穩定性，主要是用我測試過的docker image直接提供 (直接用官方最新版可能會導致相容性問題)  
+
+> P.S.專案安裝過程會自動透過certbot申請憑證，let's encrypt經實測有機會撞到教育網域的每周申請上限，故再提供ZeroSSL的申請管道(需先註冊ZeroSSL取得EAB資料)，另補上一個測試用的let's encrypt管道，單純是測試能否成功安裝，無法作為正式環境使用
 
 ### 2. 互動式設定
 
