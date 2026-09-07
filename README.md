@@ -76,24 +76,26 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 
 ---
 
-## mdmcert 搭配 mdmctl 利用方式與前提說明
+## mdmcert 搭配 mdmctl 工具與前提說明
 
-大多數憑證都可以透過 ASM/ABM 平台直接取得，但 APNs 的推播憑證是最難取得的憑證，標準管道是透過付費訂閱 Apple Developer Program 取得。
+大多數憑證都可以透過 ASM/ABM 平台直接取得，但 APNs 的推播憑證是最難取得的憑證，標準管道是透過付費訂閱 Apple Developer Program 取得，教育單位也可以申請免費 Apple Developer Program方案，藉此產生 MDM 憑證，但需要許多額外的申請步驟，這邊暫不說明。
 
-但我們可以利用免費 MDM cert 工具 **mdmctl**，這是由 micromdm/nanomdm 的開發者 [Jesse Peterson](https://github.com/jessepeterson) 所提供的免費平台與工具。
+nanomdm提供了 MDM cert 工具 **mdmctl**，這是由 micromdm/nanomdm 的開發者 [Jesse Peterson](https://github.com/jessepeterson) 所提供的工具，可以搭配已訂閱 Apple Developer Program的使用者或想利用[Jesse Peterson](https://github.com/jessepeterson) 免費平台的使用者。
 
-- 如果需要 Linux / macOS 版本，可以到原始官方網站下載 release zip 檔案：[github.com/micromdm/micromdm/releases](https://github.com/micromdm/micromdm/releases)
-- mdmctl 官方操作說明：[mdmctl-signing-profiles.md](https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md)
+- 原始官方網站提供 Linux / macOS 版本，可下載 release zip 檔案：[github.com/micromdm/micromdm/releases](https://github.com/micromdm/micromdm/releases)
+  
+- mdmctl 官方操作說明(這是針對已經訂閱Apple Developer Program方案的說明)：[mdmctl-signing-profiles.md](https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md)
 
-> P.S. 教育單位也可以申請免費 Apple Developer 方案，藉此產生 MDM 憑證，但需要許多額外的申請步驟。
+
 
 ---
 
-## 自製的 mdmcert-free-cert-apply_win-x64.zip 操作說明
+## 自製的 mdmcert-free-cert-apply_win-x64.zip 操作說明  
+## (完全免費的APNs取得管道)
 
 下載連結：[mdmcert-free-cert-apply_win-x64.zip](https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free-cert-apply_win-x64.zip)
 
-這個檔案是透過 mdmctl 的原始碼自製的 Windows x64 編譯執行檔與自動化 PowerShell，讓使用者可以在 Windows 環境底下處理取得 APNs 推播憑證。
+這個檔案是透過 mdmctl 的原始碼自製的 Windows x64 編譯執行檔與自動化 PowerShell，讓使用者可以在 Windows 環境底下搭配[mdmcert.download]網站，用教育體系email申請並取得 APNs 推播憑證。
 
 1. 請先到 [mdmcert.download](https://mdmcert.download/) 註冊與驗證，email 需要是 `.edu` 網域，需要收信驗證
 2. 驗證成功後請下載並解壓縮mdmcert-free-cert-apply_win-x64.zip這個檔案，用 PowerShell 執行 `01-mdmctl-freecert-email.ps1`，再次輸入你申請的 email申請p7檔案
