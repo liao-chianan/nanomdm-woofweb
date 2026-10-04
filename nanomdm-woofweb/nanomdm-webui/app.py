@@ -1001,6 +1001,54 @@ def api_cert_status():
         return jsonify({"ok": False, "message": f"檢查過程發生未預期錯誤: {e}"}), 500
 
 
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$")
+
+
+def get_server_reverse_domain():
+    """回傳本台伺服器網域的反向格式(例如 mdm3.syps.tp.edu.tw -> tw.edu.tp.syps.mdm3),
+    給描述檔的PayloadIdentifier用。
+
+    網域的來源(依序嘗試):
+    1. .env 的 SERVER_DOMAIN(選填,明確指定時優先使用)
+    2. 從 NGINX_CERT_PATH 推出來——標準Let's Encrypt路徑是 /etc/letsencrypt/live/<網域>/fullchain.pem,
+       安裝腳本寫進.env的就是這個格式。certbot遇到同名憑證衝突時目錄會變成「網域-0001」,
+       這裡會把結尾的 -四位數字 去掉。
+    兩種都取不到、或取到的內容不像合法網域時,拋出ValueError,由呼叫端回報給使用者,
+    不會硬猜一個值寫進描述檔。
+    """
+    domain = (get_env_dict().get("SERVER_DOMAIN") or "").strip()
+    if not domain:
+        m = re.search(r"/live/([^/]+)/", CFG["cert_status"].get("nginx_cert_path") or "")
+        if m:
+            domain = re.sub(r"-\d{4}$", "", m.group(1))
+    if not domain or not _HOSTNAME_RE.match(domain):
+        raise ValueError(
+            "無法判斷本台伺服器的網域,沒辦法產生描述檔的 PayloadIdentifier。"
+            "請在 .env 加上 SERVER_DOMAIN=你的伺服器網域(例如 mdm.example.edu.tw)後再試一次"
+        )
+    return ".".join(reversed(domain.split(".")))
+
+
+def build_duplicate_mobileconfig_overrides(name):
+    """組出「再製描述檔」時,新檔案頂層欄位要套用的值。name是新的群組名稱,
+    或新的mobileconfig檔名(已去掉.mobileconfig副檔名)。
+      PayloadDisplayName  = "{name} baseline setting"
+      PayloadDescription  = name
+      PayloadOrganization = .env的SCHOOL_NAME(沒設定或是空的,就不覆寫,沿用來源檔案的值)
+      PayloadIdentifier   = "{本台伺服器網域的反向格式}.baseline.{name}"
+    網域判斷不出來時拋出ValueError(見get_server_reverse_domain)。
+    """
+    overrides = {
+        "PayloadDisplayName": f"{name} baseline setting",
+        "PayloadDescription": name,
+        "PayloadIdentifier": f"{get_server_reverse_domain()}.baseline.{name}",
+    }
+    school_name = (get_env_dict().get("SCHOOL_NAME") or "").strip()
+    if school_name:
+        overrides["PayloadOrganization"] = school_name
+    return overrides
+
+
 def get_profile_signing_kwargs():
     """依照目前系統的描述檔簽署設定,組出可以直接**展開傳給save_mobileconfig()/
     duplicate_mobileconfig()的簽署參數dict。沒啟用簽署、或簽署憑證不存在時,
@@ -2419,8 +2467,10 @@ def api_device_enrollment_status_import_preview():
     except Exception as e:
         return jsonify({"ok": False, "message": f"CSV 格式解析失敗: {e}"}), 400
 
-    changes, mismatches = utils.diff_device_enrollment_import(uploaded_rows, rows, groups)
-    return jsonify({"ok": True, "changes": changes, "mismatches": mismatches})
+    # 逐列檢查(序號是否存在、群組是否有值且已建立、DEP profile_uuid / MDM UUID 是否一致),
+    # 每一列的結果都會回報(通過的也列出來)。群組有問題的列會讓blocked=True,整批匯入停止
+    result = utils.check_device_enrollment_import(uploaded_rows, rows, groups)
+    return jsonify({"ok": True, **result, "available_groups": sorted(groups.keys())})
 
 
 @app.route("/api/device-enrollment-status/import/apply-stream", methods=["POST"])
@@ -2428,6 +2478,24 @@ def api_device_enrollment_status_import_preview():
 def api_device_enrollment_status_import_apply_stream():
     data = request.json or {}
     changes = data.get("changes") or []
+
+    # 預覽階段已經檢查過一次,這裡在伺服器端再檢查一次(不能只信任前端送來的資料):
+    # 群組空白或不存在的變更,整批都不套用,避免裝置被誤清掉群組或指派到不存在的群組
+    groups_now = utils.load_groups(CFG["paths"]["groups_json"])
+    bad_changes = [
+        {"serial_number": ch.get("serial_number") or "", "device_name": ch.get("device_name") or "",
+         "group": ch.get("group") or "", "line_no": None,
+         "reason": "缺少群組值(群組欄位是空白的)" if not (ch.get("group") or "").strip()
+                   else f"群組「{ch.get('group')}」不存在"}
+        for ch in changes
+        if not (ch.get("group") or "").strip() or ch.get("group") not in groups_now
+    ]
+    if bad_changes:
+        return jsonify({
+            "ok": False,
+            "message": f"有 {len(bad_changes)} 筆變更的群組是空白或不存在,整批都沒有套用,請重新匯入",
+            "group_issues": bad_changes,
+        }), 400
 
     def generate():
         total = len(changes)
@@ -3128,8 +3196,11 @@ def api_profiles_duplicate():
     source_filename = (data.get("source_filename") or "").strip()
     new_filename = (data.get("new_filename") or "").strip()
     try:
+        # 頂層欄位(顯示名稱/說明/組織名稱/PayloadIdentifier)改用新檔名(去掉.mobileconfig)帶入
+        overrides = build_duplicate_mobileconfig_overrides(os.path.splitext(new_filename)[0])
         utils_profiles.duplicate_mobileconfig(
-            CFG["paths"]["mobileconfig_dir"], source_filename, new_filename, **get_profile_signing_kwargs()
+            CFG["paths"]["mobileconfig_dir"], source_filename, new_filename,
+            top_level_overrides=overrides, **get_profile_signing_kwargs()
         )
         log_activity_entry("群組描述檔-再製", True, detail=f"來源={source_filename}, 新檔名={new_filename}")
         return jsonify({"ok": True, "message": f"已複製為 {new_filename}"})
@@ -3232,6 +3303,61 @@ def api_dep_profiles_save():
         return jsonify({"ok": False, "message": f"儲存失敗: {e}"}), 500
 
 
+def auto_define_dep_profile(filename):
+    """再製註冊檔(或再製群組)之後的自動套用:向Apple定義這份profile、拿到profile_uuid,
+    並把profile_uuid跟時間寫回這份註冊檔,這樣再製出來的檔案不會一直顯示「尚未套用過」。
+
+    刻意只做「定義profile」這一步,不呼叫完整的apply_dep_profile():完整流程對沒有配對群組的
+    非預設檔案,會把它設成預設assigner(悄悄換掉新裝置預設拿到的profile);而且再製出來的
+    新群組本來就沒有任何裝置,沒有東西需要指派。之後裝置被移進這個群組時,
+    apply_group_change_effects()會讀這份檔案裡記錄的profile_uuid去重新指派裝置。
+
+    自動套用失敗不該讓再製本身失敗(檔案已經複製成功了),所以這裡不拋出例外,
+    一律回傳dict: {"ok": bool, "profile_uuid": str或None, "message": str}。
+    """
+    base_url, api_key, dep_name, _ = get_nanodep_conn()
+    if not base_url or not api_key or not dep_name:
+        result = {"ok": False, "profile_uuid": None,
+                  "message": ".env 內缺少 NANODEP_BASE_URL / NANODEP_API_KEY / NANODEP_NAME"}
+        log_activity_entry(f"再製後自動套用註冊檔-{filename}", False, detail=result["message"])
+        return result
+
+    try:
+        profile_data = utils_depprofile.read_dep_profile(CFG["paths"]["dep_profiles_dir"], filename)
+        profile_uuid, _ = utils_depprofile.define_dep_profile(
+            base_url, api_key, dep_name, profile_data["apple_profile"]
+        )
+    except utils_depprofile.ApplyError as e:
+        result = {"ok": False, "profile_uuid": None, "message": str(e)}
+        log_activity_entry(f"再製後自動套用註冊檔-{filename}", False, detail=str(e))
+        return result
+    except Exception as e:
+        result = {"ok": False, "profile_uuid": None, "message": f"未預期錯誤: {e}"}
+        log_activity_entry(f"再製後自動套用註冊檔-{filename}", False, detail=result["message"])
+        return result
+
+    profile_data["last_applied_uuid"] = profile_uuid
+    profile_data["last_applied_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        utils_depprofile.save_dep_profile(CFG["paths"]["dep_profiles_dir"], filename, profile_data)
+    except Exception as e:
+        result = {"ok": False, "profile_uuid": profile_uuid,
+                  "message": f"已向Apple定義profile(UUID={profile_uuid}),但寫回本地紀錄時發生錯誤: {e}"}
+        log_activity_entry(f"再製後自動套用註冊檔-{filename}", False, detail=result["message"])
+        return result
+
+    log_activity_entry(f"再製後自動套用註冊檔-{filename}", True, detail=f"profile_uuid={profile_uuid}")
+    return {"ok": True, "profile_uuid": profile_uuid, "message": ""}
+
+
+def describe_auto_apply(apply_info, subject=""):
+    """把auto_define_dep_profile()的結果,轉成接在再製成功訊息後面的一段文字。
+    subject是選填的主詞(例如「註冊檔」),用來讓成功/失敗兩種句子都唸起來通順。"""
+    if apply_info["ok"]:
+        return f"{subject}已自動套用(profile UUID: {apply_info['profile_uuid']})"
+    return f"但{subject}自動套用失敗: {apply_info['message']}(可以稍後在「群組註冊檔」手動按套用)"
+
+
 @app.route("/api/dep-profiles/duplicate", methods=["POST"])
 @login_required
 def api_dep_profiles_duplicate():
@@ -3239,9 +3365,18 @@ def api_dep_profiles_duplicate():
     source_filename = (data.get("source_filename") or "").strip()
     new_filename = (data.get("new_filename") or "").strip()
     try:
-        utils_depprofile.duplicate_dep_profile(CFG["paths"]["dep_profiles_dir"], source_filename, new_filename)
+        # Profile 名稱直接用新的json檔名(去掉.json副檔名),避免副本跟來源帶著一模一樣的名稱
+        utils_depprofile.duplicate_dep_profile(
+            CFG["paths"]["dep_profiles_dir"], source_filename, new_filename,
+            profile_name=os.path.splitext(new_filename)[0],
+        )
         log_activity_entry("群組註冊檔-再製", True, detail=f"來源={source_filename}, 新檔名={new_filename}")
-        return jsonify({"ok": True, "message": f"已複製為 {new_filename}"})
+        # 複製成功後自動套用(向Apple定義profile、記錄profile_uuid)。套用失敗不影響複製本身的成功
+        apply_info = auto_define_dep_profile(new_filename)
+        return jsonify({
+            "ok": True, "message": f"已複製為 {new_filename},{describe_auto_apply(apply_info)}",
+            "apply": apply_info,
+        })
     except (FileNotFoundError, ValueError) as e:
         log_activity_entry("群組註冊檔-再製", False, detail=f"來源={source_filename}, 新檔名={new_filename}, error={e}")
         return jsonify({"ok": False, "message": str(e)}), 400
@@ -3485,11 +3620,24 @@ def api_groups_duplicate():
 
     source_info = groups[source_group]
 
+    # 描述檔頂層欄位要用的值,在動任何檔案之前先算好:網域判斷不出來時直接回報錯誤,
+    # 不會留下「註冊檔已經複製了、描述檔卻失敗」這種複製到一半的狀態
+    mobileconfig_overrides = None
+    if source_info.get("mobileconfig"):
+        try:
+            mobileconfig_overrides = build_duplicate_mobileconfig_overrides(new_group_name)
+        except ValueError as e:
+            return jsonify({"ok": False, "message": str(e)}), 400
+
     new_enroll_json = None
     if source_info.get("enroll_json"):
         new_enroll_json = f"{new_group_name}-enroll.json"
         try:
-            utils_depprofile.duplicate_dep_profile(CFG["paths"]["dep_profiles_dir"], source_info["enroll_json"], new_enroll_json)
+            # Profile 名稱直接用新的群組名稱
+            utils_depprofile.duplicate_dep_profile(
+                CFG["paths"]["dep_profiles_dir"], source_info["enroll_json"], new_enroll_json,
+                profile_name=new_group_name,
+            )
         except Exception as e:
             return jsonify({"ok": False, "message": f"複製註冊檔失敗: {e}"}), 500
 
@@ -3499,7 +3647,7 @@ def api_groups_duplicate():
         try:
             utils_profiles.duplicate_mobileconfig(
                 CFG["paths"]["mobileconfig_dir"], source_info["mobileconfig"], new_mobileconfig,
-                **get_profile_signing_kwargs()
+                top_level_overrides=mobileconfig_overrides, **get_profile_signing_kwargs()
             )
         except Exception as e:
             return jsonify({"ok": False, "message": f"複製描述檔失敗: {e}"}), 500
@@ -3518,9 +3666,17 @@ def api_groups_duplicate():
         utils_profiles.assign_mobileconfig_to_group(CFG["paths"]["groups_json"], new_mobileconfig, new_group_name)
 
     log_activity_entry("群組-再製", True, detail=f"來源群組={source_group}, 新註冊檔={new_enroll_json}, 新描述檔={new_mobileconfig}", group=new_group_name)
+
+    # 有複製註冊檔的話,自動套用(向Apple定義profile、記錄profile_uuid);套用失敗不影響群組已經建立成功
+    message = f"已複製群組為 {new_group_name}"
+    apply_info = None
+    if new_enroll_json:
+        apply_info = auto_define_dep_profile(new_enroll_json)
+        message += f",{describe_auto_apply(apply_info, '註冊檔')}"
     return jsonify({
-        "ok": True, "message": f"已複製群組為 {new_group_name}",
+        "ok": True, "message": message,
         "new_enroll_json": new_enroll_json, "new_mobileconfig": new_mobileconfig,
+        "apply": apply_info,
     })
 
 
@@ -3889,8 +4045,14 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
         old_version, old_release_date = existing_version_by_adam_id.get(r["adam_id"], ("", ""))
         r["auto_update"] = existing_auto_update_by_adam_id.get(r["adam_id"], False)
 
-        version, release_date = utils.fetch_app_version_info(r["adam_id"])
+        store_info = utils.fetch_app_store_info(r["adam_id"])
+        version, release_date = store_info.get("version", ""), store_info.get("release_date", "")
         query_succeeded = bool(version or release_date)
+
+        # 圖示:用同一次查詢拿到的網址,快取到app_image目錄(已經有而且沒過期就不會重新下載)。
+        # 查詢失敗(沒有網址)時不另外再查一次;圖示失敗也不影響版本資訊與後續流程
+        if store_info.get("artwork_url"):
+            utils.get_app_icon(r["adam_id"], CFG["paths"]["app_image_dir"], artwork_url=store_info["artwork_url"])
         if not query_succeeded:
             # 這次查詢沒有結果,退回沿用舊資料(如果有的話),不算是「版本有變化」
             version, release_date = old_version, old_release_date
@@ -3986,6 +4148,20 @@ def api_asm_download():
     if not os.path.exists(cache_path):
         return jsonify({"ok": False, "message": "尚無快取檔案,請先執行一次查詢"}), 404
     return send_file(cache_path, as_attachment=True, download_name="vpp_license.csv")
+
+
+@app.route("/api/app-icon/<adam_id>")
+@login_required
+def api_app_icon(adam_id):
+    """提供App圖示(從app_image目錄)。圖示還沒快取時,這裡會即時到App Store抓一次,
+    這樣剛升級、還沒跑過同步的時候,畫面上也能直接看到圖示,不用等下次排程同步。
+    找不到(沒有App Store頁面、或抓取失敗)回傳404,前端會改顯示灰色佔位方塊。"""
+    if not utils.is_valid_adam_id(adam_id):
+        return "", 404
+    path = utils.get_app_icon(adam_id, CFG["paths"]["app_image_dir"])
+    if not path:
+        return "", 404
+    return send_file(path)
 
 
 @app.route("/api/asm/toggle-auto-update", methods=["POST"])
@@ -4915,6 +5091,53 @@ def api_sysstatus_systemd_restart():
     if not ok:
         return jsonify({"ok": False, "message": err}), 500
     return jsonify({"ok": True, "message": f"已重啟服務 {service_name}"})
+
+
+@app.route("/api/sysstatus/restart-all-stream")
+@login_required
+def api_sysstatus_restart_all_stream():
+    """重啟所有服務(docker容器+systemd服務),即時回報每一項的重啟進度。
+
+    nanomdm-webui.service刻意排到最後才重啟——這是目前正在提供這個管理介面本身的服務,
+    重啟它會讓目前這支程式碼的程序被砍掉。restart_systemd_service()對這個服務已經有
+    特殊處理(延遲2秒才真正觸發重啟,避免程序被砍掉的時間點早於回應送出),但為了保險起見,
+    這裡依然把它排在最後一個,確保前面所有其他服務的重啟進度,都能完整透過這條SSE串流
+    回報給前端,不會因為程序中途被砍斷而漏掉。
+    """
+    def generate():
+        docker_containers = list(CFG["sysstatus"]["docker_containers"])
+        systemd_services = [s["name"] for s in CFG["sysstatus"]["systemd_services"]]
+        # 把nanomdm-webui.service移到最後(如果它原本就在清單裡的話)
+        systemd_services_ordered = [s for s in systemd_services if s != "nanomdm-webui.service"]
+        if "nanomdm-webui.service" in systemd_services:
+            systemd_services_ordered.append("nanomdm-webui.service")
+
+        overall_ok = True
+
+        for name in docker_containers:
+            yield f"data: {json.dumps({'category': 'docker', 'name': name, 'status': 'running', 'done': False}, ensure_ascii=False)}\n\n"
+            try:
+                ok, err = utils_sysstatus.restart_docker_container(name)
+            except Exception as e:
+                ok, err = False, str(e)
+            if not ok:
+                overall_ok = False
+            yield f"data: {json.dumps({'category': 'docker', 'name': name, 'status': 'done' if ok else 'error', 'message': err, 'done': False}, ensure_ascii=False)}\n\n"
+
+        for name in systemd_services_ordered:
+            yield f"data: {json.dumps({'category': 'systemd', 'name': name, 'status': 'running', 'done': False}, ensure_ascii=False)}\n\n"
+            try:
+                ok, err = utils_sysstatus.restart_systemd_service(name)
+            except Exception as e:
+                ok, err = False, str(e)
+            if not ok:
+                overall_ok = False
+            yield f"data: {json.dumps({'category': 'systemd', 'name': name, 'status': 'done' if ok else 'error', 'message': err, 'done': False}, ensure_ascii=False)}\n\n"
+
+        log_activity_entry("系統狀態-重啟所有服務", overall_ok)
+        yield f"data: {json.dumps({'done': True, 'overall_ok': overall_ok}, ensure_ascii=False)}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
 @app.route("/api/sysstatus/mysql")

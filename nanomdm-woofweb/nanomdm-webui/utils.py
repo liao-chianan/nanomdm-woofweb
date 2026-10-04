@@ -10,6 +10,7 @@
 import base64
 import csv
 import datetime
+import difflib
 import fcntl
 import io
 import json
@@ -17,6 +18,7 @@ import os
 import stat
 import re
 import subprocess
+import time
 import uuid
 import plistlib
 
@@ -222,6 +224,9 @@ def parse_device_enrollment_import_csv(content_text):
     rows = []
     for row in reader:
         rows.append({
+            # 這一列在CSV檔案裡的行號(標題列是第1行),給使用者對照檔案找出有問題的那一列用。
+            # 用reader.line_num而不是自己計數,空白行或欄位內有換行時行號才會對得上
+            "line_no": reader.line_num,
             "serial_number": (row.get("序號") or "").strip(),
             "device_name": (row.get("裝置名稱") or "").strip(),
             "group": (row.get("群組") or "").strip(),
@@ -232,53 +237,124 @@ def parse_device_enrollment_import_csv(content_text):
     return rows
 
 
-def diff_device_enrollment_import(uploaded_rows, current_rows, groups_dict):
-    """比對上傳的CSV跟目前即時狀態的差異。
-    會先驗證 DEP profile_uuid 與 MDM UUID 是否跟目前狀態一致(避免拿舊資料誤蓋新狀態),
-    不一致的直接標記成 mismatch 不會被套用;群組欄位也會驗證是否為目前存在的群組。
-    回傳 (changes, mismatches) 兩個 list。
+def _check_import_group_value(group, groups_dict):
+    """檢查單一個群組欄位的值:必須有值,而且必須是已經建立好的群組。
+    有問題回傳原因字串,沒問題回傳None。
+
+    群組空白不能放行——套用時空白會被當成「清除這台裝置的群組」,CSV裡漏填就會讓裝置被誤清掉群組。
+    群組名稱打錯(或大小寫不同)時,原因裡會附上相近的已建立群組名稱,方便直接對照修正。
+    """
+    if not group:
+        return "缺少群組值(群組欄位是空白的)"
+    if group in groups_dict:
+        return None
+
+    group_names = list(groups_dict.keys())
+    lower_map = {g.lower(): g for g in group_names}
+    if group.lower() in lower_map:
+        suggestions = [lower_map[group.lower()]]
+    else:
+        suggestions = difflib.get_close_matches(group, group_names, n=3, cutoff=0.6)
+    reason = f"群組「{group}」不存在"
+    if suggestions:
+        reason += f"(是不是想填: {'、'.join(suggestions)}?)"
+    return reason
+
+
+def check_device_enrollment_import(uploaded_rows, current_rows, groups_dict):
+    """逐列檢查匯入的CSV,「每一列」都會回報檢查結果(通過的也列出來,不是只列出錯誤的)。
+
+    每一列會做這幾項檢查,全部都跑完、所有問題都列出(不是遇到第一個問題就停):
+      1. 序號:必須存在於目前系統。找不到的話,後面的比對沒有基準,這一列直接排除
+      2. 群組:必須有值,而且是已建立的群組(有問題會「擋住整批匯入」,見下面的blocked)
+      3. DEP profile_uuid:必須跟目前狀態一致(避免拿舊資料誤蓋新狀態),不一致的列會被排除
+      4. MDM UUID:同上
+    每一列的status:
+      pass     全部檢查通過(可能有變更、也可能沒有變更)
+      blocked  群組有問題。只要有任何一列是blocked,整批匯入就停止,不會套用任何變更
+      excluded 序號找不到,或UUID不一致。這一列不會套用,但不影響其他列
+      skipped  序號欄位是空白的,這一列略過
+
+    回傳dict:
+      rows     每一列的檢查報告(list,順序跟CSV一致)
+      changes  通過檢查、而且有變更(裝置名稱或群組不同)的列,給後續套用用;blocked時是空list
+      blocked  是否有任何一列群組有問題
+      summary  各種狀態的筆數統計
     """
     current_by_serial = {r["serial_number"]: r for r in current_rows}
+    report = []
     changes = []
-    mismatches = []
+    summary = {"total": 0, "pass": 0, "pass_with_change": 0, "blocked": 0, "excluded": 0, "skipped": 0}
 
     for row in uploaded_rows:
         serial = row["serial_number"]
-        if not serial:
-            continue
-        current = current_by_serial.get(serial)
-        if not current:
-            mismatches.append({**row, "reason": "目前系統裡找不到這個序號(可能已被移除)"})
-            continue
-
-        if row["profile_uuid"] != (current.get("profile_uuid") or ""):
-            mismatches.append({**row, "reason": "DEP profile_uuid 跟目前狀態不一致,資料可能已過時,請重新匯出後再編輯"})
-            continue
-        if row["enrollment_id"] != (current.get("enrollment_id") or ""):
-            mismatches.append({**row, "reason": "MDM UUID 跟目前狀態不一致,資料可能已過時,請重新匯出後再編輯"})
-            continue
-        if row["group"] and row["group"] not in groups_dict:
-            mismatches.append({**row, "reason": f"群組「{row['group']}」不存在,請確認拼字或先建立這個群組"})
-            continue
-
-        name_changed = row["device_name"] != (current.get("device_name") or "")
-        group_changed = row["group"] != (current.get("group") or "")
-        if not name_changed and not group_changed:
-            continue
-
-        changes.append({
+        entry = {
+            "line_no": row.get("line_no"),
             "serial_number": serial,
             "device_name": row["device_name"],
             "group": row["group"],
-            "wifi_mac": current.get("wifi_mac") or "",
-            "enrollment_id": current.get("enrollment_id") or "",
-            "name_changed": name_changed,
-            "group_changed": group_changed,
-            "old_device_name": current.get("device_name") or "",
-            "old_group": current.get("group") or "",
-        })
+            "status": "pass",
+            "problems": [],
+            "change": None,
+        }
+        summary["total"] += 1
 
-    return changes, mismatches
+        if not serial:
+            entry["status"] = "skipped"
+            entry["problems"].append({"check": "序號", "reason": "序號欄位是空白的,這一列已略過", "blocking": False})
+            summary["skipped"] += 1
+            report.append(entry)
+            continue
+
+        current = current_by_serial.get(serial)
+        if not current:
+            entry["problems"].append({"check": "序號", "reason": "目前系統裡找不到這個序號(可能已被移除)", "blocking": False})
+        else:
+            group_reason = _check_import_group_value(row["group"], groups_dict)
+            if group_reason:
+                entry["problems"].append({"check": "群組", "reason": group_reason, "blocking": True})
+            if row["profile_uuid"] != (current.get("profile_uuid") or ""):
+                entry["problems"].append({
+                    "check": "DEP profile_uuid",
+                    "reason": "跟目前狀態不一致,資料可能已過時,請重新匯出後再編輯", "blocking": False,
+                })
+            if row["enrollment_id"] != (current.get("enrollment_id") or ""):
+                entry["problems"].append({
+                    "check": "MDM UUID",
+                    "reason": "跟目前狀態不一致,資料可能已過時,請重新匯出後再編輯", "blocking": False,
+                })
+
+        if any(p["blocking"] for p in entry["problems"]):
+            entry["status"] = "blocked"
+            summary["blocked"] += 1
+        elif entry["problems"]:
+            entry["status"] = "excluded"
+            summary["excluded"] += 1
+        else:
+            summary["pass"] += 1
+            name_changed = row["device_name"] != (current.get("device_name") or "")
+            group_changed = row["group"] != (current.get("group") or "")
+            if name_changed or group_changed:
+                summary["pass_with_change"] += 1
+                entry["change"] = {
+                    "name_changed": name_changed, "group_changed": group_changed,
+                    "old_device_name": current.get("device_name") or "", "old_group": current.get("group") or "",
+                }
+                changes.append({
+                    "serial_number": serial,
+                    "device_name": row["device_name"],
+                    "group": row["group"],
+                    "wifi_mac": current.get("wifi_mac") or "",
+                    "enrollment_id": current.get("enrollment_id") or "",
+                    "name_changed": name_changed,
+                    "group_changed": group_changed,
+                    "old_device_name": current.get("device_name") or "",
+                    "old_group": current.get("group") or "",
+                })
+        report.append(entry)
+
+    blocked = summary["blocked"] > 0
+    return {"rows": report, "changes": [] if blocked else changes, "blocked": blocked, "summary": summary}
 
 
 def parse_env_file_lines(path):
@@ -857,8 +933,9 @@ def stream_check_vpp_license(script_path, env_file_path=None):
             proc.terminate()
 
 
-def fetch_app_version_info(adam_id, country="tw", timeout=10):
-    """查詢iTunes Lookup API,取得這個App目前在App Store上的版本號跟版本發布日期。
+def fetch_app_store_info(adam_id, country="tw", timeout=10):
+    """查詢iTunes Lookup API,一次取得這個App在App Store上的版本號、版本發布日期、圖示網址。
+    (版本跟圖示共用同一次查詢,不用為了圖示再多打一次API。)
 
     已知限制:Apple自己的API有時候對「版本發布日期」(currentVersionReleaseDate)
     回傳不準確的資料(開發者論壇上有多起回報,實際查證過),這是Apple那邊API本身的
@@ -868,7 +945,8 @@ def fetch_app_version_info(adam_id, country="tw", timeout=10):
     country參數:某些App如果在美國(預設)以外的地區上架,不帶country參數可能會
     查無資料,這裡預設帶tw(台灣),對學校情境比較適用。
 
-    回傳 (version, release_date)的tuple,查詢失敗或找不到資料時,兩者都回傳空字串。
+    回傳dict: {"version", "release_date", "artwork_url"},缺少的欄位是空字串;
+    查詢失敗或找不到資料時回傳空dict。
     """
     try:
         resp = requests.get(
@@ -880,15 +958,121 @@ def fetch_app_version_info(adam_id, country="tw", timeout=10):
         data = resp.json()
         results = data.get("results") or []
         if not results:
-            return "", ""
+            return {}
         info = results[0]
-        version = info.get("version", "")
         release_date_raw = info.get("currentVersionReleaseDate", "")
-        # 日期原始格式是ISO 8601(例如"2026-07-18T07:00:00Z"),只取日期部分,不需要精確到時分秒
-        release_date = release_date_raw.split("T")[0] if release_date_raw else ""
-        return version, release_date
+        return {
+            "version": info.get("version", ""),
+            # 日期原始格式是ISO 8601(例如"2026-07-18T07:00:00Z"),只取日期部分,不需要精確到時分秒
+            "release_date": release_date_raw.split("T")[0] if release_date_raw else "",
+            # 顯示尺寸很小(幾十px),100x100已經夠清楚(高解析螢幕也夠),檔案也小;
+            # 沒有100的話依序退而求其次用512、60
+            "artwork_url": info.get("artworkUrl100") or info.get("artworkUrl512") or info.get("artworkUrl60") or "",
+        }
     except Exception:
-        return "", ""
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# App圖示快取(存在專案的app_image目錄,檔名是adamId加上圖片副檔名)
+# ---------------------------------------------------------------------------
+_ADAM_ID_RE = re.compile(r"[0-9]{1,20}")
+_ICON_CONTENT_TYPE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+APP_ICON_EXTENSIONS = tuple(_ICON_CONTENT_TYPE_EXT.values())
+APP_ICON_MAX_BYTES = 2 * 1024 * 1024
+APP_ICON_STALE_SECONDS = 30 * 24 * 3600     # 圖示很少換,超過30天才重新抓一次
+APP_ICON_RETRY_SECONDS = 24 * 3600          # 抓不到(查無資料/下載失敗)之後,24小時內不重試
+
+
+def is_valid_adam_id(adam_id):
+    """adamId只能是純數字(同時也是檔名的一部分,這個檢查順便防止路徑穿越)。
+    用正規表示式而不是str.isdigit():isdigit()對上標數字這類字元也會回傳True。"""
+    return bool(_ADAM_ID_RE.fullmatch(str(adam_id)))
+
+
+def find_cached_app_icon(adam_id, image_dir):
+    """找出這個App已經快取的圖示檔案路徑,沒有的話回傳None。"""
+    for ext in APP_ICON_EXTENSIONS:
+        path = os.path.join(image_dir, f"{adam_id}{ext}")
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def download_app_icon(adam_id, image_dir, artwork_url, timeout=10):
+    """下載圖示並原子寫入image_dir(目錄不存在會自動建立)。成功回傳檔案路徑,失敗回傳None。
+    只接受https網址、只接受png/jpeg/webp、大小有上限,避免寫入不是圖片的內容。"""
+    if not artwork_url or not artwork_url.lower().startswith("https://"):
+        return None
+    resp = requests.get(artwork_url, timeout=timeout)
+    if resp.status_code != 200:
+        return None
+    content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    ext = _ICON_CONTENT_TYPE_EXT.get(content_type)
+    data = resp.content
+    if not ext or not data or len(data) > APP_ICON_MAX_BYTES:
+        return None
+
+    os.makedirs(image_dir, exist_ok=True)
+    path = os.path.join(image_dir, f"{adam_id}{ext}")
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+    os.replace(tmp_path, path)
+
+    # 同一個App可能因為圖片格式改變,留下不同副檔名的舊檔,清掉免得同時有兩份
+    for other_ext in APP_ICON_EXTENSIONS:
+        if other_ext != ext:
+            try:
+                os.remove(os.path.join(image_dir, f"{adam_id}{other_ext}"))
+            except FileNotFoundError:
+                pass
+    return path
+
+
+def get_app_icon(adam_id, image_dir, artwork_url=None, country="tw", timeout=10):
+    """取得App圖示的本機檔案路徑(沒有快取、或快取超過30天,就到App Store抓)。
+    回傳檔案路徑,拿不到時回傳None。這個函式不會拋出例外——圖示只是畫面美觀用的附加功能,
+    抓不到就是沒有圖示,不該影響呼叫端(例如ASM軟體資訊的同步流程)。
+
+    artwork_url:呼叫端如果已經從iTunes Lookup拿到圖示網址,可以直接帶進來,省下再查詢一次。
+    沒帶的話,需要抓圖示時會自己查一次。
+
+    抓不到時會在image_dir留一個「{adamId}.none」標記檔,24小時內不重試——避免像沒有
+    App Store頁面的App,每次開頁面都重新打一次Apple的API。不過呼叫端有帶artwork_url的話
+    代表剛拿到新的有效網址,會無視標記直接重試。快取超過30天但重新抓取失敗時,繼續使用舊圖示。
+    """
+    adam_id = str(adam_id)
+    if not is_valid_adam_id(adam_id):
+        return None
+    try:
+        os.makedirs(image_dir, exist_ok=True)
+        cached = find_cached_app_icon(adam_id, image_dir)
+        now = time.time()
+        if cached and now - os.path.getmtime(cached) < APP_ICON_STALE_SECONDS:
+            return cached
+
+        marker = os.path.join(image_dir, f"{adam_id}.none")
+        if artwork_url is None and os.path.exists(marker) and now - os.path.getmtime(marker) < APP_ICON_RETRY_SECONDS:
+            return cached
+
+        url = artwork_url
+        if not url:
+            url = fetch_app_store_info(adam_id, country=country, timeout=timeout).get("artwork_url", "")
+        path = download_app_icon(adam_id, image_dir, url, timeout=timeout) if url else None
+        if path:
+            try:
+                os.remove(marker)
+            except FileNotFoundError:
+                pass
+            return path
+
+        with open(marker, "w"):
+            pass  # 建立(或更新時間)標記檔
+        return cached
+    except Exception as e:
+        print(f"[App圖示] 取得 adamId={adam_id} 的圖示時發生例外(不影響其他功能): {e}")
+        return None
 
 
 def parse_vpp_table_output(raw_text):

@@ -10,7 +10,7 @@ const ENROLLMENT_TABLE_COLUMNS = [
   { key: "device_name", label: "裝置名稱", type: "text" },
   { key: "group", label: "群組", type: "text" },
   { key: "profile_uuid", label: "DEP profile_uuid", type: "text" },
-  { key: "profile_filename", label: "對應範本", type: "text" },
+  { key: "profile_filename", label: "對應註冊檔", type: "text" },
   { key: "enrollment_id", label: "MDM UUID", type: "text" },
   { key: "profile_status", label: "指派狀態", type: "text" },
 ];
@@ -271,31 +271,111 @@ async function handleImportFileSelected(e) {
     return;
   }
 
-  enrollmentImportChanges = data.changes || [];
-  renderImportMismatches(data.mismatches || []);
-  renderImportPreview(enrollmentImportChanges);
-  document.getElementById("enrollment-import-apply-progress").innerHTML = "";
-
-  if (enrollmentImportChanges.length === 0 && (!data.mismatches || data.mismatches.length === 0)) {
-    alert("比對結果:沒有發現任何需要變更的項目");
+  const report = data.rows || [];
+  if (report.length === 0) {
+    alert("CSV 裡沒有任何資料列");
     return;
   }
+
+  // 群組有問題(blocked)時整批停止:不給變更預覽、也不給套用按鈕。
+  // 但不管有沒有blocked,每一列的檢查結果都會列出來(通過的也列)
+  enrollmentImportChanges = data.blocked ? [] : (data.changes || []);
+  setImportModalBlocked(!!data.blocked);
+  renderImportCheckResults(report, data.summary || {}, !!data.blocked, data.available_groups || []);
+  renderImportPreview(enrollmentImportChanges);
+  document.getElementById("enrollment-import-apply-progress").innerHTML = "";
   openModal("enrollment-import-modal");
 }
 
-function renderImportMismatches(mismatches) {
-  const container = document.getElementById("enrollment-import-mismatches");
-  if (mismatches.length === 0) {
-    container.innerHTML = "";
-    return;
-  }
-  let html = `<div style="background:#fdeee0; color:#b45309; padding:10px 14px; border-radius:6px; font-size:12px;">
-    <strong>⚠️ 以下 ${mismatches.length} 筆因為資料不一致,已自動排除:</strong>`;
-  mismatches.forEach((m) => {
-    html += `<div style="margin-top:4px;">${escapeHtml(m.serial_number)}: ${escapeHtml(m.reason)}</div>`;
-  });
-  html += `</div>`;
-  container.innerHTML = html;
+// 匯入視窗有兩種模式:正常的「變更預覽」,以及群組檢查沒過時的「匯入已停止」
+function setImportModalBlocked(blocked) {
+  document.getElementById("enrollment-import-title").textContent = blocked ? "匯入已停止:群組欄位有問題" : "匯入變更預覽";
+  document.getElementById("enrollment-import-preview-table").style.display = blocked ? "none" : "";
+  document.getElementById("enrollment-import-actions").style.display = blocked ? "none" : "";
+}
+
+// 列出CSV「每一列」的檢查結果(通過的也列,不是只列出錯誤的)
+function renderImportCheckResults(report, summary, blocked, availableGroups) {
+  const container = document.getElementById("enrollment-import-check-results");
+  const rowStyle = {
+    pass: "",
+    blocked: "background:#fdecec;",
+    excluded: "background:#fdf3e3;",
+    skipped: "background:#f3f4f6; color:#6b7280;",
+  };
+
+  const rowsHtml = report.map((r) => {
+    let resultHtml;
+    if (r.status === "pass") {
+      resultHtml = `<span style="color:#1c7c3f;">✅ 全部通過</span>`;
+    } else {
+      resultHtml = r.problems.map((p) => {
+        const icon = p.blocking ? "❌" : (r.status === "skipped" ? "➖" : "⚠️");
+        return `<div>${icon} ${escapeHtml(p.check)}: ${escapeHtml(p.reason)}</div>`;
+      }).join("");
+    }
+
+    let changeHtml = "—";
+    if (r.status === "pass") {
+      if (r.change) {
+        const parts = [];
+        if (r.change.name_changed) parts.push(`名稱: ${escapeHtml(r.change.old_device_name || "(空)")} → ${escapeHtml(r.device_name || "(空)")}`);
+        if (r.change.group_changed) parts.push(`群組: ${escapeHtml(r.change.old_group || "(未分類)")} → ${escapeHtml(r.group || "(未分類)")}`);
+        changeHtml = parts.join("<br>");
+      } else {
+        changeHtml = `<span style="color:#6b7280;">(無變更)</span>`;
+      }
+    }
+
+    return `
+      <tr style="${rowStyle[r.status] || ""}">
+        <td>${r.line_no || "-"}</td>
+        <td style="font-family:var(--mono);">${r.serial_number ? escapeHtml(r.serial_number) : "(空白)"}</td>
+        <td>${escapeHtml(r.device_name || "(空)")}</td>
+        <td>${r.group ? escapeHtml(r.group) : "(空白)"}</td>
+        <td>${resultHtml}</td>
+        <td style="font-size:12px;">${changeHtml}</td>
+      </tr>
+    `;
+  }).join("");
+
+  const s = summary;
+  const summaryHtml = `
+    <div style="font-size:13px; margin-bottom:6px;">
+      共 <strong>${s.total || 0}</strong> 列:
+      ✅ 通過 <strong>${s.pass || 0}</strong> 列(其中 ${s.pass_with_change || 0} 列有變更)　
+      ❌ 群組有問題 <strong>${s.blocked || 0}</strong> 列　
+      ⚠️ 已排除 <strong>${s.excluded || 0}</strong> 列　
+      ➖ 略過 <strong>${s.skipped || 0}</strong> 列
+    </div>
+  `;
+
+  const blockedHtml = blocked ? `
+    <div style="background:#fdecec; color:#991b1b; padding:10px 14px; border-radius:6px; font-size:13px; margin-bottom:8px;">
+      <strong>❌ 有 ${s.blocked || 0} 列的「群組」欄位缺漏或不正確,本次匯入已停止,沒有變更任何資料。</strong>
+      <div style="margin-top:4px;">請修正下表標示 ❌ 的列(行號是 CSV 檔案裡的行數,標題列是第 1 行),存檔後重新匯入。</div>
+    </div>
+  ` : "";
+
+  const groupsHint = blocked ? `
+    <div style="margin-top:8px; font-size:12px; color:#6b7280;">
+      ${availableGroups.length
+        ? `目前已建立的群組: ${availableGroups.map((g) => escapeHtml(g)).join("、")}`
+        : "目前還沒有建立任何群組,請先到「所有群組」頁面建立"}
+    </div>
+  ` : "";
+
+  container.innerHTML = `
+    ${blockedHtml}
+    ${summaryHtml}
+    <div style="max-height:320px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px;">
+      <table class="data-table" style="margin:0;">
+        <thead><tr><th>CSV 行號</th><th>序號</th><th>裝置名稱</th><th>群組</th><th>檢查結果</th><th>變更內容</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+    ${groupsHint}
+  `;
 }
 
 function renderImportPreview(changes) {
@@ -338,6 +418,17 @@ async function applyImportChanges() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ changes: enrollmentImportChanges }),
   });
+
+  // 伺服器端群組檢查沒過(或其他錯誤)時回的是一般JSON錯誤,不是SSE串流,
+  // 要在這裡處理掉,不然按鈕會一直卡在「套用中...」
+  if (!resp.ok) {
+    let errData = {};
+    try { errData = await resp.json(); } catch (e) { /* 回應不是JSON,沿用空物件 */ }
+    btn.disabled = false;
+    btn.textContent = "套用變更";
+    alert("套用失敗: " + (errData.message || `HTTP ${resp.status}`));
+    return;
+  }
 
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();

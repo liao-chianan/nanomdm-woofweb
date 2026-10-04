@@ -306,6 +306,29 @@ def get_systemd_logs(service_name, lines=200):
 
 
 def restart_systemd_service(service_name):
+    # 特殊處理:如果重啟目標正是「目前正在執行這支程式碼」的服務本身(nanomdm-webui.service),
+    # 不能直接呼叫systemctl restart——不管有沒有加--no-block,程序被systemd實際砍掉的時間點,
+    # 都有可能早於這次HTTP回應真正完整送到瀏覽器手上,這是一個race condition,只是機率高低
+    # 的差異,不是保證解決(--no-block只保證systemctl指令本身很快回傳,不保證kill動作會延後)。
+    #
+    # 改成:另外開一個完全獨立、跟目前這個Flask程序脫勾的子程序(start_new_session=True,
+    # 讓它自成一個新的process group,不會被systemd連同目前這個服務程序一起中斷),讓它先
+    # 睡2秒之後才真正觸發重啟——這2秒足夠讓這次的HTTP回應完整送到瀏覽器手上,不受這個
+    # Flask程序稍後被砍掉這件事影響。
+    #
+    # service_name透過bash的位置參數($0)傳遞給子shell,不用字串插值組指令,避免注入疑慮
+    # (即使目前呼叫端在app.py已經對service_name做過allowlist驗證,這裡還是採取比較保守的寫法)。
+    if service_name == "nanomdm-webui.service":
+        try:
+            subprocess.Popen(
+                ["bash", "-c", 'sleep 2 && systemctl restart "$0"', service_name],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            return False, f"無法排程延遲重啟: {e}"
+        return True, None
+
     rc, out, err = run_cmd(["systemctl", "restart", service_name], timeout=30)
     if rc != 0:
         return False, (err or out or "重啟失敗")

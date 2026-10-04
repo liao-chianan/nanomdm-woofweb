@@ -360,3 +360,22 @@ table.kv-table td.k { color: var(--text-muted); width: 38%; }
 .login-box .field-row { margin-bottom: 14px; }
 .login-box input[type="text"], .login-box input[type="password"] { width: 100%; }
 .login-error { color: var(--accent-danger); font-size: 13px; margin-bottom: 10px; }
+
+/* ---- App圖示(ASM軟體資訊的名稱欄位) ---- */
+.app-name-cell { display: flex; align-items: center; gap: 10px; }
+.app-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 8px;            /* iOS圖示的圓角比例約22%,36px對應約8px */
+  object-fit: cover;
+  background: #f3f4f6;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+.app-icon-placeholder { display: inline-block; }
+
+/* ---- 可排序的表格欄位標題、外部連結 ---- */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--accent); }
+.bundle-link { color: var(--accent); text-decoration: none; }
+.bundle-link:hover { text-decoration: underline; }

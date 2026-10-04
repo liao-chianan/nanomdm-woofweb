@@ -88,12 +88,11 @@ nanomdm提供了 MDM cert 工具 **mdmctl**，這是由 micromdm/nanomdm 的開�
   
 - mdmctl 官方操作說明(這是針對已經訂閱Apple Developer Program方案的說明)：[mdmctl-signing-profiles.md](https://github.com/micromdm/micromdm/blob/main/docs/user-guide/mdmctl-signing-profiles.md)
 
-
+**如果沒有訂閱Apple Developer Program方案，建議直接參考下方說明**
 
 ---
 
-## 自製的 mdmcert-free-cert-apply_win-x64.zip 操作說明  
-## (完全免費的APNs取得管道)
+## 適用windows x64作業系統，搭配自製的 mdmcert-free-cert-apply_win-x64.zip ，完全免費的APNs取得管道操作說明  
 
 下載連結：[mdmcert-free-cert-apply_win-x64.zip](https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/mdmcert-free-cert-apply_win-x64.zip)
 
@@ -112,6 +111,106 @@ nanomdm提供了 MDM cert 工具 **mdmctl**，這是由 micromdm/nanomdm 的開�
 >
 > pem 效期只有一年，到期前需要再重跑一次完整的mdmctl流程取得 `push.req` 再重新產生一次 pem 憑證。
 > （`push.req`上傳後，Vendor會是[Jesse Peterson]，這是因為作者免費開放給大家使用他的訂閱方案 ）
+
+
+
+## 適用Linux / macOS 版 搭配官方版本的mdmctl，完全免費的APNs取得管道操作說明 
+
+
+### 步驟 1：下載mdmctl  
+
+前往 [micromdm/micromdm Releases](https://github.com/micromdm/micromdm/releases)，下載最新版release
+(目前最新版本為 v1.13.1  https://github.com/micromdm/micromdm/releases/download/v1.13.1/micromdm_v1.13.1.zip)
+
+下載並解壓縮後，在終端機切換到該資料夾並賦予執行權限：
+
+```bash
+wget https://github.com/micromdm/micromdm/releases/download/v1.13.1/micromdm_v1.13.1.zip
+
+unzip unzip micromdm_v1.13.1.zip
+```
+
+解壓縮後會得到build資料夾，其中有兩種版本linux與darwin(macOS用)，視你的作業環境進入對應資料夾
+
+```bash
+cd build/linux 或者 cd build/darwin
+chmod +x mdmctl
+```
+
+**macOS 補充**：若首次執行跳出「無法打開，因為無法驗證開發者」：
+
+- 到「系統設定 → 隱私權與安全性」允許執行，或
+- 執行以下指令移除隔離標記：
+  ```bash
+  xattr -d com.apple.quarantine ./mdmctl
+  ```
+
+### 步驟 2：建立離線設定檔  
+
+```bash
+mkdir -p ~/.micromdm
+echo '{}' > ~/.micromdm/servers.json
+```
+### 步驟 3：發起 mdmcert.download CSR 請求
+
+把 email 換成你在 [mdmcert.download](https://mdmcert.download) 註冊並完成驗證的信箱：
+
+```bash
+./mdmctl mdmcert.download -new -email=xxx@oo.xx.edu.tw
+```
+
+執行成功後，會在當前資料夾下產生：
+
+```
+mdm-certificates/mdmcert.download.push.key
+```
+
+這是你的 **push 私鑰**，請妥善保留，後續匯入 MDM 時會用到。
+
+### 步驟 4：收信並下載附件
+
+1. 前往上述信箱收信。
+2. 找到 mdmcert.download 寄來的信，下載附件檔（`.p7` 結尾，例如 `mdm_signed_request.xxxx.plist.b64.p7`）。
+3. 把這個 `.p7` 檔案放到跟 `mdmctl` **同一個資料夾**內。
+
+
+### 步驟 5：解密附件
+
+先確認附件檔名（可用 `ls *.p7` 查看），再執行：
+
+```bash
+./mdmctl mdmcert.download -decrypt=./mdm_signed_request.xxxx.plist.b64.p7
+```
+
+成功後會產生：
+
+```
+mdm-certificates/mdmcert.download.push.req
+```
+
+
+### 步驟 6：到 Apple Push Certificates Portal 申請 APNs 憑證
+
+1. 前往 <https://identity.apple.com/pushcert>
+2. 用學校/機構專用的 Apple ID 登入。
+3. 點選「**Create a Certificate**」（若是續簽既有憑證，選「**Renew**」）。
+4. 上傳步驟 5 產生的檔案：
+   ```
+   mdm-certificates/mdmcert.download.push.req
+   ```
+5. 下載 Apple 簽發的 APNs 憑證（`.pem` 或 `.cer`）。
+
+
+
+## 步驟 7：整理最終檔案
+
+匯入到 MDM 系統（NanoMDM）時，需要搭配以下兩個檔案：
+
+- 🔑 **私鑰**：`mdm-certificates/mdmcert.download.push.key`（步驟 3 產生）
+- 📄 **憑證**：剛從 Apple 下載的 `.pem` / `.cer` 檔
+
+⚠️ **請務必將這兩個檔案一起妥善備份**，遺失私鑰會導致該張 APNs 憑證無法繼續使用。  
+⚠️ **此步驟每年需重做更新一次，確保憑證到期前處理，避免裝置需要全部重新註冊**
 
 ---
 

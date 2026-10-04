@@ -22,14 +22,29 @@
   </div>
   <div id="vpp-last-sync" style="font-size:13px; color:#6b7280; margin-bottom:12px;">載入中...</div>
 
+  <div style="display:flex; gap:16px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:6px; flex:1; min-width:220px;">
+      <label style="font-size:13px; color:#6b7280;">搜尋 Bundle ID/軟體名稱:</label>
+      <input type="text" id="vpp-filter-search" placeholder="輸入 Bundle ID 或軟體名稱..." style="flex:1;">
+    </div>
+    <div id="vpp-filter-count" style="font-size:12px; color:#9ca3af;"></div>
+  </div>
+  <div style="margin-bottom:14px;">
+    <label style="font-size:13px; color:#6b7280; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+      <input type="checkbox" id="vpp-hide-unknown" checked autocomplete="off">
+      隱藏未知 App
+      <span style="font-size:12px; color:#9ca3af;">(名稱與 Bundle ID 顯示「未知」的軟體,代表已經從 App Store 下架)</span>
+    </label>
+  </div>
+
   <table class="data-table" id="vpp-table">
     <thead>
       <tr>
-        <th>Adam ID</th>
-        <th>Bundle ID</th>
-        <th>軟體名稱</th>
+        <th class="sortable" data-sort-key="Adam ID">Adam ID<span class="sort-arrow"></span></th>
+        <th class="sortable" data-sort-key="Bundle ID">Bundle ID<span class="sort-arrow"></span></th>
+        <th class="sortable" data-sort-key="軟體名稱">軟體名稱<span class="sort-arrow"></span></th>
         <th>當下版本</th>
-        <th>版本日期</th>
+        <th class="sortable" data-sort-key="版本日期">版本日期<span class="sort-arrow"></span></th>
         <th>總數量</th>
         <th>剩餘量</th>
         <th>更新 App</th>

@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
         "mobileconfig_dir": "/opt/nanomdm-deployment/mobileconfig",
         "dep_profiles_dir": "/opt/nanomdm-deployment/dep-profiles",
         "logo_dir": "/opt/nanomdm-webui/logo",
+        "app_image_dir": "/opt/nanomdm-webui/app_image",
         "udid_serial_cache": "/opt/nanomdm-deployment/udid-serial-cache.json",
         "udid_serial_cache_lock": "/opt/nanomdm-deployment/udid-serial-cache.lock"
     },

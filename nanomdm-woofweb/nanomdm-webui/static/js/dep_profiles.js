@@ -39,6 +39,7 @@ async function loadDepProfilesList() {
       : `<span style="color:#b45309;">尚未套用過</span>`;
     div.innerHTML = `
       <div style="font-family:var(--mono); font-size:13px; font-weight:600;">${escapeHtml(f.filename)}${protectedBadge}</div>
+      <div style="font-family:var(--mono); font-size:11px; color:#9ca3af;">${f.last_applied_uuid ? escapeHtml(f.last_applied_uuid) : "(尚未套用過,沒有 profile UUID)"}</div>
       <div style="font-size:12px; color:#6b7280;">${escapeHtml(f.profile_name || "(無名稱)")} · 配對群組: ${escapeHtml(f.assigned_group_label)}</div>
       <div style="font-size:11px; color:#9ca3af;">跳過 ${f.skip_count || 0} 個設定畫面 · ${appliedLabel}</div>
       <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
@@ -88,7 +89,8 @@ async function confirmDuplicateDepProfile() {
   if (res.ok) {
     closeModal("dep-duplicate-modal");
     loadDepProfilesList();
-    alert(`已複製為 ${newFilename},請記得到編輯畫面把它指派給正確的群組`);
+    // 後端訊息已經包含「已複製」跟自動套用的結果(成功或失敗原因),直接顯示,再補上指派群組的提醒
+    alert(`${res.data.message}\n\n請記得到編輯畫面把它指派給正確的群組`);
   } else {
     alert("複製失敗: " + ((res.data && res.data.message) || "未知錯誤"));
   }

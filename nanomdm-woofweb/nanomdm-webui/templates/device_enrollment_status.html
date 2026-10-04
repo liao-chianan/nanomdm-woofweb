@@ -64,11 +64,13 @@
 <div class="modal-overlay hidden" id="enrollment-import-modal">
   <div class="modal-box" style="width:820px;">
     <span class="modal-close" onclick="closeModal('enrollment-import-modal')">✕</span>
-    <h3>匯入變更預覽</h3>
+    <h3 id="enrollment-import-title">匯入變更預覽</h3>
     <p style="color:#6b7280; font-size:13px;">
-      已比對 DEP profile_uuid 與 MDM UUID 是否跟目前狀態一致,不一致的項目會被自動排除、不會套用。
+      下表列出 CSV 裡「每一列」的檢查結果:序號是否存在於系統、群組欄位是否有值且是已建立的群組、
+      DEP profile_uuid 與 MDM UUID 是否跟目前狀態一致。標示 ⚠️ 的列會被自動排除、不會套用;
+      標示 ❌(群組有問題)的列只要出現一列,整批匯入就會停止。
     </p>
-    <div id="enrollment-import-mismatches" style="margin-bottom:10px;"></div>
+    <div id="enrollment-import-check-results" style="margin-bottom:10px;"></div>
     <table class="data-table" id="enrollment-import-preview-table">
       <thead>
         <tr>
@@ -79,7 +81,7 @@
       </thead>
       <tbody id="enrollment-import-preview-tbody"></tbody>
     </table>
-    <div class="modal-actions" style="justify-content:flex-start;">
+    <div class="modal-actions" id="enrollment-import-actions" style="justify-content:flex-start;">
       <button id="enrollment-import-apply-btn" type="button">套用變更</button>
     </div>
     <div id="enrollment-import-apply-progress" style="margin-top:12px; max-height:300px; overflow-y:auto;"></div>

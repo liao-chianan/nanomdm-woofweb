@@ -203,9 +203,13 @@ def delete_dep_profile(dir_path, filename, groups_path=None):
         utils.clear_group_paired_file(groups_path, "enroll_json", filename)
 
 
-def duplicate_dep_profile(dir_path, source_filename, new_filename):
+def duplicate_dep_profile(dir_path, source_filename, new_filename, profile_name=None):
     """複製一份現有範本另存新檔,重置 last_applied_uuid/at(因為這是全新、尚未套用過的副本,
-    要指派給不同的群組,不該延用來源檔案的套用紀錄)。"""
+    要指派給不同的群組,不該延用來源檔案的套用紀錄)。
+
+    profile_name:選填。有提供的話,副本裡 apple_profile.profile_name(畫面上的「Profile 名稱」)
+    會直接設成這個值,不沿用來源檔案的名稱——否則多份副本會帶著一模一樣的Profile名稱,
+    在Apple那邊分不出誰是誰。沒提供(None)時維持沿用來源的值。"""
     validate_filename(source_filename)
     validate_filename(new_filename)
     source_path = os.path.join(dir_path, source_filename)
@@ -221,6 +225,10 @@ def duplicate_dep_profile(dir_path, source_filename, new_filename):
 
     data["last_applied_uuid"] = None
     data["last_applied_at"] = None
+    if profile_name is not None:
+        if not isinstance(data.get("apple_profile"), dict):
+            data["apple_profile"] = {}
+        data["apple_profile"]["profile_name"] = profile_name
 
     tmp_path = new_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -298,6 +306,37 @@ def assign_single_device(nanodep_base_url, nanodep_api_key, dep_name, profile_uu
         return {"raw": resp.text}
 
 
+def define_dep_profile(nanodep_base_url, nanodep_api_key, dep_name, apple_profile):
+    """只做「定義profile」這一步(等同dep-define-profile.sh,POST /proxy/{name}/profile),
+    向Apple註冊這份profile並拿到新的profile_uuid,不做任何裝置指派、也不動預設assigner。
+    apply_dep_profile()的第一步就是呼叫這個函式;再製註冊檔後的自動套用也只用這一步
+    (新再製出來的註冊檔還沒有配對任何有裝置的群組,不能走完整套用流程——沒有配對群組時,
+    完整流程會把它設成預設assigner,等於悄悄換掉新裝置預設會拿到的profile)。
+
+    回傳 (profile_uuid, Apple的原始回應dict)。失敗時丟出ApplyError。
+    """
+    auth = ("depserver", nanodep_api_key)
+    headers = {"User-Agent": "nanodep-tools/0", "Content-Type": "application/json;charset=UTF8"}
+
+    payload = build_apple_profile_payload(apple_profile)
+    define_url = f"{nanodep_base_url.rstrip('/')}/proxy/{dep_name}/profile"
+    try:
+        resp = requests.post(define_url, json=payload, auth=auth, headers=headers, timeout=30)
+    except requests.RequestException as e:
+        raise ApplyError(f"定義 profile 失敗(連線錯誤): {e}")
+    if resp.status_code >= 400:
+        raise ApplyError(f"定義 profile 失敗(HTTP {resp.status_code}): {resp.text}")
+    try:
+        define_result = resp.json()
+    except ValueError:
+        raise ApplyError(f"定義 profile 回應不是合法JSON: {resp.text}")
+
+    new_uuid = define_result.get("profile_uuid")
+    if not new_uuid:
+        raise ApplyError(f"定義 profile 的回應裡沒有 profile_uuid: {define_result}")
+    return new_uuid, define_result
+
+
 def apply_dep_profile(nanodep_base_url, nanodep_api_key, dep_name, apple_profile,
                        target_group, group_serials_lookup, depsyncer_restart_cmd, run_cmd_func):
     """完整套用流程,依序等同於:
@@ -315,22 +354,7 @@ def apply_dep_profile(nanodep_base_url, nanodep_api_key, dep_name, apple_profile
     steps = {}
 
     # Step 1: define profile
-    payload = build_apple_profile_payload(apple_profile)
-    define_url = f"{nanodep_base_url.rstrip('/')}/proxy/{dep_name}/profile"
-    try:
-        resp = requests.post(define_url, json=payload, auth=auth, headers=headers, timeout=30)
-    except requests.RequestException as e:
-        raise ApplyError(f"定義 profile 失敗(連線錯誤): {e}")
-    if resp.status_code >= 400:
-        raise ApplyError(f"定義 profile 失敗(HTTP {resp.status_code}): {resp.text}")
-    try:
-        define_result = resp.json()
-    except ValueError:
-        raise ApplyError(f"定義 profile 回應不是合法JSON: {resp.text}")
-
-    new_uuid = define_result.get("profile_uuid")
-    if not new_uuid:
-        raise ApplyError(f"定義 profile 的回應裡沒有 profile_uuid: {define_result}")
+    new_uuid, define_result = define_dep_profile(nanodep_base_url, nanodep_api_key, dep_name, apple_profile)
     steps["define"] = define_result
 
     # Step 2: 設定assigner 或 指派給特定群組的裝置
