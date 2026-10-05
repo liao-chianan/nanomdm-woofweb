@@ -274,7 +274,8 @@ def delete_mobileconfig(dir_path, filename, groups_path=None):
 
 
 def duplicate_mobileconfig(dir_path, source_filename, new_filename,
-                            sign_with_cert_path=None, sign_with_key_path=None, sign_with_ca_path=None):
+                            sign_with_cert_path=None, sign_with_key_path=None, sign_with_ca_path=None,
+                            top_level_overrides=None):
     """複製一份現有描述檔另存新檔。
     1. 所有 PayloadUUID(含頂層跟每個payload,多實例的wifi/webclip每一份也都要)全部重新產生,
        不能沿用來源檔案的UUID,否則裝置可能會把兩份檔案搞混,或者其中一份被判定成同一個payload的更新。
@@ -282,6 +283,12 @@ def duplicate_mobileconfig(dir_path, source_filename, new_filename,
        附加到來源檔案原本的PayloadIdentifier結尾。如果不這樣做,複製出來的新檔案會跟來源檔案
        用一模一樣的PayloadIdentifier,推送到裝置上時,後推送的那份會直接取代先推送的那份
        (不是疊加),而不是像期望的那樣是兩份互相獨立、各自套用在不同群組的描述檔。
+
+    top_level_overrides:選填dict,把複製出來的新檔案「頂層」欄位直接設成指定的值
+    (例如PayloadDisplayName/PayloadDescription/PayloadOrganization/PayloadIdentifier),
+    不沿用來源檔案的內容。其中PayloadIdentifier有指定時,會取代上面第2點「來源識別碼.檔名」
+    的預設做法,子payload的識別碼前綴也會跟著換成這個新的頂層識別碼。沒提供(None)時維持
+    原本的行為。
 
     sign_with_cert_path/sign_with_key_path:選填,邏輯跟save_mobileconfig()一致——提供的話,
     寫入新檔案前會套用簽署;不提供則寫入未簽署版本。這是為了修正曾經發生過的問題:
@@ -303,9 +310,18 @@ def duplicate_mobileconfig(dir_path, source_filename, new_filename,
     parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
 
     suffix = os.path.splitext(new_filename)[0]
+    overrides = top_level_overrides or {}
     old_top_identifier = parsed.get("PayloadIdentifier", "")
-    new_top_identifier = f"{old_top_identifier}.{suffix}" if old_top_identifier else suffix
+    if overrides.get("PayloadIdentifier"):
+        new_top_identifier = overrides["PayloadIdentifier"]
+    else:
+        new_top_identifier = f"{old_top_identifier}.{suffix}" if old_top_identifier else suffix
     parsed["PayloadIdentifier"] = new_top_identifier
+
+    # 其餘的頂層欄位(顯示名稱/說明/組織名稱等)直接設成呼叫端指定的值
+    for key, value in overrides.items():
+        if key != "PayloadIdentifier":
+            parsed[key] = value
 
     parsed["PayloadUUID"] = str(uuid.uuid4()).upper()
     for payload in parsed.get("PayloadContent", []):

@@ -306,19 +306,28 @@ def get_systemd_logs(service_name, lines=200):
 
 
 def restart_systemd_service(service_name):
-    # 特殊處理:如果重啟目標正是「目前正在執行這支程式碼」的服務本身(nanomdm-webui.service),
-    # 不能直接呼叫systemctl restart——不管有沒有加--no-block,程序被systemd實際砍掉的時間點,
-    # 都有可能早於這次HTTP回應真正完整送到瀏覽器手上,這是一個race condition,只是機率高低
-    # 的差異,不是保證解決(--no-block只保證systemctl指令本身很快回傳,不保證kill動作會延後)。
+    # 特殊處理:如果重啟目標是「跟目前這次HTTP請求的傳遞路徑有關」的服務,不能直接呼叫
+    # systemctl restart(阻塞式,等到真正重啟完成才回傳)——包含兩種情況:
+    #
+    # 1. nanomdm-webui.service:目前正在執行這支程式碼的服務本身,程序被砍掉的時間點,
+    #    有可能早於這次HTTP回應真正完整送到瀏覽器手上。
+    # 2. nginx.service:這個管理介面對外的反向代理,所有經過瀏覽器來的請求(包含這支
+    #    SSE進度串流本身)都是透過nginx轉發的——重啟nginx的瞬間,正在進行中的代理連線
+    #    會直接被砍斷,導致前端收不到後續任何進度訊息(即使後端程式碼其實繼續正常執行,
+    #    後面的服務也確實有重啟成功,前端畫面上還是會像卡住一樣,這是實際發生過的問題)。
+    #
+    # 不管加不加--no-block都無法保證解決,這是race condition,只是機率高低的差異
+    # (--no-block只保證systemctl指令本身很快回傳,不保證kill動作會延後)。
     #
     # 改成:另外開一個完全獨立、跟目前這個Flask程序脫勾的子程序(start_new_session=True,
     # 讓它自成一個新的process group,不會被systemd連同目前這個服務程序一起中斷),讓它先
-    # 睡2秒之後才真正觸發重啟——這2秒足夠讓這次的HTTP回應完整送到瀏覽器手上,不受這個
-    # Flask程序稍後被砍掉這件事影響。
+    # 睡2秒之後才真正觸發重啟——這2秒足夠讓這次的HTTP回應(或SSE串流的後續訊息)完整送到
+    # 瀏覽器手上,不受這個服務稍後被重啟這件事影響。
     #
     # service_name透過bash的位置參數($0)傳遞給子shell,不用字串插值組指令,避免注入疑慮
     # (即使目前呼叫端在app.py已經對service_name做過allowlist驗證,這裡還是採取比較保守的寫法)。
-    if service_name == "nanomdm-webui.service":
+    services_needing_delayed_restart = {"nanomdm-webui.service", "nginx.service"}
+    if service_name in services_needing_delayed_restart:
         try:
             subprocess.Popen(
                 ["bash", "-c", 'sleep 2 && systemctl restart "$0"', service_name],

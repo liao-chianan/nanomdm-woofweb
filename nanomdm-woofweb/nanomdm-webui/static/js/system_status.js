@@ -347,6 +347,70 @@ async function grantShPermissions() {
   }
 }
 
+function restartAllServices() {
+  if (!confirm("確定要重啟所有服務嗎?這會依序重啟所有 Docker 容器與 systemd 服務,短暫中斷所有服務的運作,包含這個管理介面本身。")) return;
+
+  const btn = document.getElementById("restart-all-btn");
+  const container = document.getElementById("restart-all-progress");
+  btn.disabled = true;
+  container.innerHTML = "";
+
+  const categoryLabel = { docker: "Docker容器", systemd: "systemd服務" };
+  const statusRows = {};
+  const es = new EventSource(apiUrl("/api/sysstatus/restart-all-stream"));
+
+  es.onmessage = (event) => {
+    let update;
+    try {
+      update = JSON.parse(event.data);
+    } catch (e) {
+      return;
+    }
+
+    if (update.done !== undefined && update.category === undefined) {
+      const finalDiv = document.createElement("div");
+      finalDiv.style.cssText = `margin-top:8px; font-weight:600; color:${update.overall_ok ? "#1c7c3f" : "#b45309"};`;
+      finalDiv.textContent = update.overall_ok
+        ? "✅ 所有服務都已經重啟完成"
+        : "⚠️ 重啟流程已經跑完,但有部分服務失敗,請往上檢查每一項的結果";
+      container.appendChild(finalDiv);
+      btn.disabled = false;
+      es.close();
+      // 重啟nanomdm-webui.service之後,這個頁面本身也會短暫斷線,稍微延遲一下再重新整理
+      // 兩個狀態表格,給服務一點時間完全啟動完成
+      setTimeout(() => {
+        loadDockerStatus();
+        loadSystemdStatus();
+      }, 3000);
+      return;
+    }
+
+    const rowKey = `${update.category}-${update.name}`;
+    let row = statusRows[rowKey];
+    if (!row) {
+      row = document.createElement("div");
+      row.style.cssText = "border:1px solid var(--border-color); border-radius:6px; padding:8px 12px; margin-top:6px; font-size:13px;";
+      container.appendChild(row);
+      statusRows[rowKey] = row;
+    }
+    const iconMap = { running: "⏳", done: "✅", error: "❌" };
+    const icon = iconMap[update.status] || "•";
+    const msgText = update.message ? `: ${escapeHtml(update.message)}` : "";
+    row.innerHTML = `${icon} [${categoryLabel[update.category] || update.category}] ${escapeHtml(update.name)}${msgText}`;
+  };
+
+  es.onerror = () => {
+    // nanomdm-webui.service重啟後,連線中斷是預期中的行為(服務本身正在重啟),
+    // 不當作錯誤處理,只是把按鈕解鎖、稍後重新整理狀態表格
+    btn.disabled = false;
+    es.close();
+    setTimeout(() => {
+      loadDockerStatus();
+      loadSystemdStatus();
+    }, 3000);
+  };
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   loadSystemStatus();
   loadDockerStatus();
@@ -356,6 +420,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadCleanupSettings();
 
   document.getElementById("refresh-system-btn").addEventListener("click", loadSystemStatus);
+  document.getElementById("restart-all-btn").addEventListener("click", restartAllServices);
   document.getElementById("refresh-mysql-btn").addEventListener("click", () => loadMysqlStatus(false));
   document.getElementById("refresh-mysql-exact-btn").addEventListener("click", () => loadMysqlStatus(true));
   document.getElementById("refresh-static-files-btn").addEventListener("click", loadStaticFilesStatus);

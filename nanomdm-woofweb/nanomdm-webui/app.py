@@ -4637,6 +4637,43 @@ def api_version_current():
     return jsonify({"ok": True, "current_version": current})
 
 
+@app.route("/api/version/verify")
+@login_required
+def api_version_verify():
+    """版本校驗:比對本地端程式碼,跟GitHub上「同一個版本」(目前記錄的版本號)的內容是否一致。
+    只需要呼叫1次GitHub API(用檔案雜湊值比對,不下載檔案內容),列出不一致的檔案。"""
+    cfg = CFG["update"]
+    current = utils_version.get_current_version(cfg["version_file"])
+    if not current:
+        return jsonify({
+            "ok": False,
+            "message": "目前版本未知,不知道要跟 GitHub 上哪個版本比對。請先在上方手動設定目前版本",
+        }), 400
+    result, err = utils_version.verify_version_files(
+        cfg["github_owner"], cfg["github_repo"], current, cfg, github_token=_get_github_token(),
+    )
+    if result is None:
+        return jsonify({"ok": False, "message": err}), 500
+    return jsonify({"ok": True, "current_version": current, **result})
+
+
+@app.route("/api/version/verify/diff")
+@login_required
+def api_version_verify_diff():
+    """版本校驗裡,單一檔案「GitHub同版本 vs 本地端」的逐行差異(使用者展開那個檔案時才呼叫)。"""
+    cfg = CFG["update"]
+    current = utils_version.get_current_version(cfg["version_file"])
+    if not current:
+        return jsonify({"ok": False, "message": "目前版本未知"}), 400
+    path = (request.args.get("path") or "").strip()
+    result, err = utils_version.build_verify_diff(
+        cfg["github_owner"], cfg["github_repo"], current, path, cfg, github_token=_get_github_token(),
+    )
+    if result is None:
+        return jsonify({"ok": False, "message": err}), 400
+    return jsonify({"ok": True, **result})
+
+
 @app.route("/api/version/set-current", methods=["POST"])
 @login_required
 def api_version_set_current():

@@ -4,10 +4,13 @@
 Release的版本說明當作選配的加分資訊,有的話顯示,沒有的話優雅顯示「沒有額外說明」。
 """
 import datetime
+import difflib
+import hashlib
 import os
 import re
 import shutil
 import time
+import urllib.parse
 
 import requests
 
@@ -224,6 +227,226 @@ def fetch_raw_file_content(owner, repo, ref, repo_path_with_subfolder, timeout=1
     if resp.status_code != 200:
         return None, f"下載失敗: HTTP {resp.status_code}"
     return resp.content, None
+
+
+# ---------------------------------------------------------------------------
+# 版本校驗:比對本地端程式碼,跟GitHub上「同一個版本」的內容是否一致
+# ---------------------------------------------------------------------------
+# 掃描本地端「多出來的檔案」時要略過的目錄:套件目錄、快取目錄,以及所有「.」開頭的隱藏目錄
+# (例如更新功能自己存放備份的.update_backups,裡面的檔案不是目前執行中的程式碼)
+VERIFY_SKIP_DIR_NAMES = {"venv", "node_modules", "__pycache__", "app_image"}
+
+
+def git_blob_sha1(data):
+    """計算跟git完全相同的檔案雜湊值(git blob SHA-1):sha1("blob <位元組數>\0" + 內容)。
+    GitHub的Trees API會直接給每個檔案的這個值,所以只要在本地端用同樣的算法算一次,
+    就能判斷內容是否一致,不需要把每個檔案的內容都下載回來比對。"""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def fetch_tag_tree_entries(owner, repo, tag, cfg, timeout=20, github_token=None):
+    """用GitHub的Git Trees API(recursive,只需要1次API呼叫),取得這個版本標籤底下、
+    repo_subfolder裡面符合副檔名條件的所有檔案,以及每個檔案的git blob SHA。
+
+    回傳 (entries, truncated, error)。entries是list of {"path": 去除repo_subfolder前綴的相對路徑,
+    "sha": blob SHA};truncated表示GitHub因為檔案太多把清單截斷了(這個專案的檔案數量遠低於
+    門檻,理論上不會發生,但還是要讓使用者知道結果不完整,不要悄悄漏掉檔案)。
+    """
+    subfolder = cfg["repo_subfolder"].rstrip("/") + "/"
+    eligible_ext = tuple(cfg["eligible_extensions"])
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{urllib.parse.quote(tag, safe='')}?recursive=1"
+    try:
+        resp = requests.get(url, headers=_github_headers(github_token), timeout=timeout)
+    except requests.RequestException as e:
+        return None, False, f"連線失敗: {e}"
+    if resp.status_code == 404:
+        return None, False, (
+            f"GitHub 上找不到版本標籤「{tag}」,沒辦法校驗。"
+            f"請確認目前記錄的版本號,跟 GitHub 上的標籤名稱是否一致"
+        )
+    if resp.status_code != 200:
+        return None, False, _friendly_error_from_response(resp)
+    try:
+        data = resp.json()
+    except Exception:
+        return None, False, "GitHub API回應格式無法解析"
+
+    entries = []
+    for item in data.get("tree", []):
+        if item.get("type") != "blob":
+            continue  # 只要檔案,不要目錄
+        path = item.get("path", "")
+        if not path.startswith(subfolder) or not path.lower().endswith(eligible_ext):
+            continue
+        entries.append({"path": path[len(subfolder):], "sha": item.get("sha", "")})
+    return entries, bool(data.get("truncated")), None
+
+
+def scan_local_eligible_files(cfg):
+    """掃描本地端各個部署目錄(path_map),找出符合副檔名條件的檔案。
+    回傳 {"nanomdm-webui/app.py": "/opt/nanomdm-webui/app.py", ...},key的格式跟
+    GitHub那邊(去除repo_subfolder前綴之後)的相對路徑一致,方便兩邊對照。"""
+    eligible_ext = tuple(cfg["eligible_extensions"])
+    found = {}
+    for repo_prefix, local_root in cfg["path_map"].items():
+        if not os.path.isdir(local_root):
+            continue
+        prefix = repo_prefix.rstrip("/")
+        for dirpath, dirnames, filenames in os.walk(local_root):
+            dirnames[:] = [d for d in dirnames if d not in VERIFY_SKIP_DIR_NAMES and not d.startswith(".")]
+            for filename in filenames:
+                if not filename.lower().endswith(eligible_ext):
+                    continue
+                full_path = os.path.join(dirpath, filename)
+                rel = os.path.relpath(full_path, local_root).replace(os.sep, "/")
+                found[f"{prefix}/{rel}"] = full_path
+    return found
+
+
+def _classify_difference(local_bytes, repo_sha):
+    """本地檔案的雜湊值跟GitHub不同時,進一步判斷是「只有換行符號(CRLF/LF)不同」,
+    還是「內容真的不同」。兩個方向都要試:本地被轉成LF、而GitHub存的是CRLF,
+    或是相反。網頁介面執行.sh之前會自動把CRLF轉成LF,所以.sh檔案很容易出現這種情況。"""
+    as_lf = local_bytes.replace(b"\r\n", b"\n")
+    as_crlf = as_lf.replace(b"\n", b"\r\n")
+    if git_blob_sha1(as_lf) == repo_sha or git_blob_sha1(as_crlf) == repo_sha:
+        return "line_endings_only"
+    return "modified"
+
+
+VERIFY_STATUS_ORDER = {"modified": 0, "line_endings_only": 1, "missing_local": 2, "extra_local": 3, "error": 4}
+
+
+def verify_version_files(owner, repo, tag, cfg, timeout=20, github_token=None):
+    """比對本地端檔案,跟GitHub上「同一個版本標籤」(tag)的內容,列出不一致的地方。
+
+    做法:取得GitHub這個版本每個檔案的git blob SHA(1次API呼叫),在本地端用同樣算法算出雜湊值
+    直接比對,不用下載任何檔案內容。只有「內容不同」的檔案,才需要另外下載內容來顯示逐行差異
+    (見build_verify_diff,使用者展開那個檔案時才會去抓)。
+
+    每個檔案的狀態:
+      modified           內容不同
+      line_endings_only  內容相同,只有換行符號(CRLF/LF)不同
+      missing_local      GitHub上有,本地端找不到
+      extra_local        本地端有,GitHub這個版本上沒有(手動新增、舊版殘留等)
+      error              本地檔案讀不出來
+    內容完全相同的檔案不列入清單,只計入summary的identical。
+    GitHub上有、但沒有對應本地部署位置(不在path_map裡)的檔案不比對,跟更新功能的範圍一致。
+
+    回傳 (result_dict, error)。
+    """
+    entries, truncated, err = fetch_tag_tree_entries(owner, repo, tag, cfg, timeout=timeout, github_token=github_token)
+    if entries is None:
+        return None, err
+
+    summary = {"compared": 0, "identical": 0, "modified": 0, "line_endings_only": 0,
+               "missing_local": 0, "extra_local": 0, "error": 0}
+    files = []
+    repo_paths = set()
+
+    for entry in entries:
+        path = entry["path"]
+        local_path = map_repo_path_to_local(path, cfg)
+        if not local_path:
+            continue
+        repo_paths.add(path)
+        summary["compared"] += 1
+
+        if not os.path.isfile(local_path):
+            files.append({"repo_path": path, "local_path": local_path, "status": "missing_local"})
+            summary["missing_local"] += 1
+            continue
+        try:
+            with open(local_path, "rb") as f:
+                local_bytes = f.read()
+        except OSError as e:
+            files.append({"repo_path": path, "local_path": local_path, "status": "error", "error": str(e)})
+            summary["error"] += 1
+            continue
+
+        if git_blob_sha1(local_bytes) == entry["sha"]:
+            summary["identical"] += 1
+            continue
+        status = _classify_difference(local_bytes, entry["sha"])
+        summary[status] += 1
+        files.append({"repo_path": path, "local_path": local_path, "status": status})
+
+    for rel_path, local_path in scan_local_eligible_files(cfg).items():
+        if rel_path not in repo_paths:
+            files.append({"repo_path": rel_path, "local_path": local_path, "status": "extra_local"})
+            summary["extra_local"] += 1
+
+    files.sort(key=lambda x: (VERIFY_STATUS_ORDER.get(x["status"], 99), x["repo_path"]))
+    return {
+        "tag": tag, "summary": summary, "files": files, "truncated": truncated,
+        "extensions": list(cfg["eligible_extensions"]),
+    }, None
+
+
+VERIFY_DIFF_MAX_LINES = 1500
+
+
+def build_verify_diff(owner, repo, tag, repo_path, cfg, timeout=20, github_token=None):
+    """產生單一檔案「GitHub同版本 vs 本地端」的逐行差異(使用者在校驗結果裡展開那個檔案時才呼叫)。
+    diff的方向:「-」開頭的行只存在GitHub、「+」開頭的行只存在本地端。
+    比對前兩邊都先把CRLF統一成LF,這樣顯示的才會是「真正的內容差異」,不會因為換行符號不同,
+    整份檔案的每一行都被標示成不同。
+
+    repo_path是前端傳來的,不能直接信任:要拒絕「..」、絕對路徑、不在部署目錄(path_map)底下的路徑、
+    副檔名不在比對範圍內的檔案,而且用realpath確認實際位置沒有透過符號連結跑到部署目錄外面。
+    回傳 (result_dict, error),result_dict是 {"patch": 差異文字或None, "note": 說明文字}。
+    """
+    normalized = repo_path.replace("\\", "/")
+    if (not normalized or normalized.startswith("/") or ".." in normalized.split("/")
+            or not normalized.lower().endswith(tuple(cfg["eligible_extensions"]))):
+        return None, "不合法的檔案路徑"
+    local_path = map_repo_path_to_local(normalized, cfg)
+    if not local_path:
+        return None, "這個檔案不在部署目錄範圍內"
+    allowed_root = None
+    for repo_prefix, local_root in cfg["path_map"].items():
+        if normalized.startswith(repo_prefix.rstrip("/") + "/"):
+            allowed_root = os.path.realpath(local_root)
+            break
+    real_local = os.path.realpath(local_path)
+    if allowed_root is None or not (real_local == allowed_root or real_local.startswith(allowed_root + os.sep)):
+        return None, "這個檔案的實際位置不在部署目錄範圍內"
+
+    if not os.path.isfile(local_path):
+        return None, "本地端沒有這個檔案"
+    try:
+        with open(local_path, "rb") as f:
+            local_bytes = f.read()
+    except OSError as e:
+        return None, f"讀取本地檔案失敗: {e}"
+
+    github_bytes, fetch_err = fetch_raw_file_content(
+        owner, repo, tag, cfg["repo_subfolder"].rstrip("/") + "/" + normalized,
+        timeout=timeout, github_token=github_token,
+    )
+    if github_bytes is None:
+        return None, f"無法取得 GitHub {tag} 上的檔案內容: {fetch_err}"
+
+    try:
+        github_text = github_bytes.decode("utf-8")
+        local_text = local_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"patch": None, "note": "這個檔案不是文字檔,無法顯示逐行差異"}, None
+
+    github_text = github_text.replace("\r\n", "\n")
+    local_text = local_text.replace("\r\n", "\n")
+    if github_text == local_text:
+        return {"patch": None, "note": "內容相同,只有換行符號(CRLF/LF)不同"}, None
+
+    diff_lines = list(difflib.unified_diff(
+        github_text.splitlines(keepends=True), local_text.splitlines(keepends=True),
+        fromfile=f"GitHub {tag}", tofile="本地端", n=3,
+    ))
+    note = ""
+    if len(diff_lines) > VERIFY_DIFF_MAX_LINES:
+        diff_lines = diff_lines[:VERIFY_DIFF_MAX_LINES]
+        note = f"差異內容太長,只顯示前 {VERIFY_DIFF_MAX_LINES} 行"
+    return {"patch": "".join(diff_lines), "note": note}, None
 
 
 def list_update_history(backup_dir):

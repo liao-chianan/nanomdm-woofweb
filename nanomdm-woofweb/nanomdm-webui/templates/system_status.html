@@ -9,6 +9,18 @@
   <div id="system-status-container">載入中...</div>
 </div>
 
+<div class="panel" style="border-left:4px solid #dc2626;">
+  <h2 style="color:#991b1b;">重啟所有服務</h2>
+  <p style="color:#6b7280; font-size:13px; margin:6px 0;">
+    依序重新啟動所有 Docker 容器與相關的 systemd 服務。這會短暫中斷所有服務的運作,
+    請確認目前沒有裝置正在進行重要操作(例如批次派送指令)再執行。
+    <strong>提供這個管理介面本身的服務(nanomdm-webui.service)會排在最後重啟</strong>,
+    重啟後這個網頁會斷線,需要等幾秒鐘後重新整理頁面才能繼續使用。
+  </p>
+  <button id="restart-all-btn" class="danger" type="button">重啟所有服務</button>
+  <div id="restart-all-progress" style="margin-top:12px;"></div>
+</div>
+
 <div class="panel">
   <h2>Docker 容器狀態</h2>
   <table class="data-table" id="docker-table">
