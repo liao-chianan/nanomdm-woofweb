@@ -304,6 +304,66 @@ function renderWarnings(warnings, errorMessage) {
 }
 
 // ---------------------------------------------------------------------------
+// enroll-template 專用:「不可移除」選項鎖定
+// 首次透過 DEP/ADE 下載的註冊描述檔必須允許移除,否則裝置無法完成註冊
+// ---------------------------------------------------------------------------
+const ENROLL_TEMPLATE_FILENAME = "enroll-template.mobileconfig";
+const ENROLL_TEMPLATE_REMOVAL_WARNING = "首次下載的描述檔需允許移除,否則無法註冊";
+
+// 從 schema 找出「不可移除」這個頂層欄位(名稱含 removal,例如 PayloadRemovalDisallowed)
+function findRemovalDisallowedField() {
+  return (PROFILE_SCHEMA.top_level_fields || []).find((f) => /removal/i.test(f.name)) || null;
+}
+
+// 在頂層欄位容器中找出對應的 checkbox(相容 name / data-field / data-field-name / id 幾種寫法)
+function findRemovalDisallowedCheckbox(container, field) {
+  if (field) {
+    const n = CSS.escape(field.name);
+    const cb = container.querySelector(
+      `input[type="checkbox"][name="${n}"], input[type="checkbox"][data-field="${n}"], ` +
+      `input[type="checkbox"][data-field-name="${n}"], input[type="checkbox"]#${n}, ` +
+      `input[type="checkbox"][id$="${n}"]`
+    );
+    if (cb) return cb;
+  }
+  // 後備方案:用標籤文字找
+  const label = Array.from(container.querySelectorAll("label")).find((l) => l.textContent.includes("不可移除"));
+  if (!label) return null;
+  return label.querySelector('input[type="checkbox"]')
+    || (label.htmlFor && document.getElementById(label.htmlFor))
+    || (label.closest(".field-row") && label.closest(".field-row").querySelector('input[type="checkbox"]'))
+    || null;
+}
+
+function applyEnrollTemplateRemovalLock(filename) {
+  const container = document.getElementById("top-level-fields-container");
+  container.querySelectorAll(".enroll-removal-warning").forEach((el) => el.remove());
+
+  if (filename !== ENROLL_TEMPLATE_FILENAME) return;
+
+  const cb = findRemovalDisallowedCheckbox(container, findRemovalDisallowedField());
+  if (!cb) {
+    console.warn("[enroll-template] 找不到「不可移除」checkbox,未套用鎖定");
+    return;
+  }
+
+  cb.checked = false;
+  cb.disabled = true;
+  cb.title = ENROLL_TEMPLATE_REMOVAL_WARNING;
+
+  const row = cb.closest(".field-row") || cb.closest("label") || cb.parentElement;
+  row.style.opacity = "0.55";
+  row.style.cursor = "not-allowed";
+  row.title = ENROLL_TEMPLATE_REMOVAL_WARNING;
+
+  const warn = document.createElement("div");
+  warn.className = "enroll-removal-warning";
+  warn.style.cssText = "background:#fdeee0; color:#b45309; padding:8px 12px; border-radius:6px; font-size:13px; margin:-4px 0 12px 0;";
+  warn.textContent = `⚠️ ${ENROLL_TEMPLATE_REMOVAL_WARNING}`;
+  row.insertAdjacentElement("afterend", warn);
+}
+
+// ---------------------------------------------------------------------------
 // 開啟編輯器(新增 / 編輯既有檔案)
 // ---------------------------------------------------------------------------
 function protectedNoticeText(filename) {
@@ -379,6 +439,7 @@ async function openEditProfile(filename) {
   }
 
   renderTopLevelFields(res.data.top_level);
+  applyEnrollTemplateRemovalLock(filename);
   renderPayloadsSection(res.data.payloads);
 }
 

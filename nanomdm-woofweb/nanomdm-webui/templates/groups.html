@@ -92,6 +92,17 @@
   </div>
 </div>
 
+<!-- 刪除群組 Modal:兩種內容。群組還有裝置綁定時顯示「不能刪除」的提示;
+     可以刪除時詢問是否一併刪除群組註冊檔與群組描述檔(內容由groups.js動態產生) -->
+<div class="modal-overlay hidden" id="group-delete-modal">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeModal('group-delete-modal')">✕</span>
+    <h3 id="group-delete-title"></h3>
+    <div id="group-delete-body" style="font-size:13px; color:#374151;"></div>
+    <div class="modal-actions" id="group-delete-actions"></div>
+  </div>
+</div>
+
 <!-- 群組裝置清單 Modal (呈現方式比照「所有裝置與命令」) -->
 <div class="modal-overlay hidden" id="group-devices-modal">
   <div class="modal-box" style="width:1200px;">

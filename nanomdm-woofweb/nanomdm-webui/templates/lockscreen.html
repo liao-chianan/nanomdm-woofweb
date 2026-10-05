@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block content %}
+
+<style>
+  .ls-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .ls-settings { flex: 1 1 420px; min-width: 0; }
+  .ls-preview { flex: 1 1 520px; min-width: 0; }
+  .ls-section-title { font-size: 13px; font-weight: 600; margin: 18px 0 10px; padding-top: 14px; border-top: 1px solid var(--border-color); }
+  .ls-section-title:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+  .ls-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  .ls-hint { color: #9ca3af; font-size: 12px; margin: 4px 0 0; line-height: 1.6; }
+  .ls-chip { display: inline-block; font-family: var(--mono); font-size: 12px; background: #f1f4f9; border: 1px solid var(--border-color); border-radius: 4px; padding: 1px 6px; margin: 2px 4px 2px 0; cursor: pointer; }
+  .ls-chip:hover { border-color: var(--accent); }
+  #ls-lines { width: 100%; min-height: 96px; font-family: inherit; font-size: 13px; line-height: 1.7; box-sizing: border-box; }
+  .ls-color-row { display: flex; align-items: center; gap: 8px; }
+  .ls-color-row input[type="color"] { width: 40px; height: 32px; padding: 0; border: 1px solid var(--border-color); border-radius: 4px; background: none; }
+  .ls-frames { display: flex; gap: 18px; align-items: flex-end; flex-wrap: wrap; margin-top: 10px; }
+  .ls-frame-wrap { text-align: center; font-size: 12px; color: #6b7280; }
+  .ls-frame { border: 10px solid #2b2f36; border-radius: 22px; overflow: hidden; background: #2b2f36; position: relative; }
+  .ls-frame.portrait { width: 240px; aspect-ratio: 3 / 4; }
+  .ls-frame.landscape { width: 320px; aspect-ratio: 4 / 3; }
+  .ls-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ls-frame .ls-clock { position: absolute; left: 0; right: 0; top: 8%; text-align: center; color: rgba(255,255,255,.85); font-size: 28px; font-weight: 300; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,.3); }
+  .ls-frame.loading img { opacity: .4; }
+  .ls-frame.small { width: 150px; }
+  .ls-frame img[src=""], .ls-frame img:not([src]) { visibility: hidden; }
+  .ls-home-icons { position: absolute; inset: 12% 10% auto 10%; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; pointer-events: none; }
+  .ls-home-icons span { aspect-ratio: 1; border-radius: 22%; background: rgba(255,255,255,.55); }
+  .ls-notice { padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 14px; line-height: 1.6; }
+  .ls-notice.warn { background: #fdeee0; color: #b45309; }
+  .ls-notice.error { background: #fdeaea; color: #b42318; }
+  .ls-notice.info { background: #eef3fc; color: #2c4f96; }
+  #ls-push-progress { max-height: 280px; overflow-y: auto; margin-top: 10px; }
+  .ls-toggle-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
+  .ls-toggle-row input { margin-top: 3px; }
+</style>
+
+<div class="panel">
+  <h2>鎖定畫面資訊</h2>
+  <p style="color:#6b7280; font-size:13px; margin:0;">
+    把裝置名稱、群組和學校聯絡資訊做成一張桌布,透過 MDM 設為 iPad 的鎖定畫面,文字會顯示在畫面正中間。
+    桌布會取代 iPad 原本的鎖定畫面背景;只適用於監督模式(透過 ASM 自動註冊)的裝置。
+  </p>
+</div>
+
+<div id="ls-deps-notice" class="ls-notice warn hidden"></div>
+
+<div class="ls-layout">
+
+  <div class="panel ls-settings">
+    <h2>顯示設定</h2>
+
+    <div class="ls-section-title">顯示內容</div>
+    <div class="field-row">
+      <label for="ls-lines">一行一列;欄位之間空兩格以上,太長時會在那裡自動換行</label>
+      <textarea id="ls-lines" spellcheck="false"></textarea>
+      <div style="margin-top:6px;" id="ls-placeholder-chips">
+        {% for key, label in placeholders.items() %}
+        <span class="ls-chip" data-key="{{ key }}" title="插入{{ label }}">{{ '{' ~ key ~ '}' }}</span>
+        {% endfor %}
+      </div>
+      <p class="ls-hint">點欄位代號可以插入到游標位置。某個欄位沒有資料時(例如沒有電話),那一段會整段省略。</p>
+    </div>
+
+    <div class="ls-section-title">
+      組織資訊
+      <button id="ls-asm-fill-btn" class="secondary" type="button" style="float:right; font-size:12px; margin-top:-4px;">從 ASM 帶入</button>
+    </div>
+    <div class="ls-grid-2">
+      <div class="field-row"><label for="ls-org-name">組織名稱 {org_name}</label><input type="text" id="ls-org-name"></div>
+      <div class="field-row"><label for="ls-org-phone">電話 {org_phone}</label><input type="text" id="ls-org-phone"></div>
+    </div>
+    <div class="field-row"><label for="ls-org-address">地址 {org_address}</label><input type="text" id="ls-org-address" style="width:100%; box-sizing:border-box;"></div>
+    <div class="field-row"><label for="ls-org-email">Email {org_email}</label><input type="text" id="ls-org-email" style="width:100%; box-sizing:border-box;"></div>
+    <p class="ls-hint" id="ls-asm-status">資料來源是 Apple School Manager 上登記的組織資訊;帶入後可以再手動修改。</p>
+
+    <div class="ls-section-title">外觀</div>
+    <div class="ls-grid-2">
+      <div class="field-row">
+        <label>背景色</label>
+        <div class="ls-color-row"><input type="color" id="ls-bg-color"><input type="text" id="ls-bg-color-text" style="width:90px;"></div>
+      </div>
+      <div class="field-row">
+        <label>文字顏色</label>
+        <div class="ls-color-row"><input type="color" id="ls-text-color"><input type="text" id="ls-text-color-text" style="width:90px;"></div>
+      </div>
+    </div>
+    <div class="ls-grid-2">
+      <div class="field-row"><label for="ls-title-size">第一行字級(px)</label><input type="number" id="ls-title-size" min="20" max="300"></div>
+      <div class="field-row"><label for="ls-body-size">其他行字級(px)</label><input type="number" id="ls-body-size" min="20" max="300"></div>
+    </div>
+    <div class="field-row ls-toggle-row">
+      <input type="checkbox" id="ls-band"><label for="ls-band" style="margin:0; font-size:13px; color:inherit;">文字後方加上半透明色帶</label>
+    </div>
+    <p class="ls-hint">圖片是 2732×2732 的正方形,字級以這個尺寸為準。文字只排在中間 62% 的寬度內,iPad 直放或橫放都不會被裁到。</p>
+
+    <div class="ls-section-title">推送方式</div>
+    <div class="field-row">
+      <label for="ls-home-mode">主畫面背景</label>
+      <select id="ls-home-mode">
+        <option value="color">純色</option>
+        <option value="image">上傳的圖片</option>
+        <option value="same">跟鎖定畫面同一張</option>
+      </select>
+      <p class="ls-hint">iPadOS 17 以後,只設定鎖定畫面也會連主畫面一起換掉,而且 MDM 無法還原原本的主畫面。所以推送鎖定畫面後,會再另外把主畫面設成這裡指定的背景。</p>
+    </div>
+    <div class="field-row" id="ls-home-color-row">
+      <label>主畫面顏色</label>
+      <div class="ls-color-row"><input type="color" id="ls-home-color"><input type="text" id="ls-home-color-text" style="width:90px;"></div>
+    </div>
+    <div class="field-row hidden" id="ls-home-image-row">
+      <label for="ls-home-file">主畫面圖片(JPG 或 PNG,建議 2732×2732 正方形)</label>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <input type="file" id="ls-home-file" accept="image/jpeg,image/png">
+        <button id="ls-home-upload-btn" class="secondary" type="button" style="font-size:12px;">上傳</button>
+      </div>
+      <p class="ls-hint" id="ls-home-image-status"></p>
+    </div>
+    <div class="field-row ls-toggle-row">
+      <input type="checkbox" id="ls-auto-push">
+      <label for="ls-auto-push" style="margin:0; font-size:13px; color:inherit;">
+        自動推送
+        <span class="ls-hint" style="display:block; margin-top:2px;">裝置完成註冊時,以及在「裝置與命令」、「裝置註冊狀態」(含 CSV 匯入)修改名稱或群組後,自動更新那台裝置的鎖定畫面。</span>
+      </label>
+    </div>
+
+    <details style="margin-top:6px;">
+      <summary style="font-size:12px; color:#6b7280; cursor:pointer;">進階:字型</summary>
+      <div class="field-row" style="margin-top:10px;">
+        <label for="ls-font-path">字型檔路徑(留空 = 自動尋找系統中文字型)</label>
+        <input type="text" id="ls-font-path" placeholder="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" style="width:100%; box-sizing:border-box;">
+      </div>
+      <div class="field-row"><label for="ls-min-size">最小字級(px)</label><input type="number" id="ls-min-size" min="16" max="200"></div>
+      <p class="ls-hint" id="ls-font-info"></p>
+    </details>
+
+    <div id="ls-save-msg" style="margin-top:12px;"></div>
+    <div class="modal-actions" style="justify-content:flex-start;">
+      <button id="ls-save-btn" type="button">儲存設定</button>
+    </div>
+  </div>
+
+  <div class="ls-preview">
+    <div class="panel">
+      <h2>預覽</h2>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <label for="ls-preview-device" style="font-size:13px; color:#6b7280;">預覽裝置:</label>
+        <select id="ls-preview-device" style="flex:1; min-width:220px;"><option value="">(範例:2022-ipad-01 / Teacher)</option></select>
+        <button id="ls-preview-btn" class="secondary" type="button" style="font-size:12px;">更新預覽</button>
+      </div>
+      <div id="ls-preview-error" class="ls-notice error hidden" style="margin-top:10px;"></div>
+      <div class="ls-frames">
+        <div class="ls-frame-wrap">
+          <div class="ls-frame portrait" id="ls-frame-portrait"><div class="ls-clock">09:41</div><img alt="直向預覽"></div>
+          <div style="margin-top:6px;">直向</div>
+        </div>
+        <div class="ls-frame-wrap">
+          <div class="ls-frame landscape" id="ls-frame-landscape"><div class="ls-clock">09:41</div><img alt="橫向預覽"></div>
+          <div style="margin-top:6px;">橫向</div>
+        </div>
+        <div class="ls-frame-wrap">
+          <div class="ls-frame portrait small" id="ls-frame-home"><img alt="主畫面預覽"><div class="ls-home-icons"></div></div>
+          <div style="margin-top:6px;">主畫面</div>
+        </div>
+      </div>
+      <p class="ls-hint">預覽使用畫面上目前的設定(還沒儲存也可以預覽)。時鐘只是示意位置,實際樣式依 iPadOS 版本而定。</p>
+    </div>
+
+    <div class="panel">
+      <h2>推送到裝置</h2>
+      <p style="color:#6b7280; font-size:13px; margin-top:0;">推送使用「已儲存」的設定。只會推送到已完成 MDM 註冊的裝置,裝置離線時會在下次連線時套用。</p>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <select id="ls-push-scope">
+          <option value="all">所有已註冊裝置</option>
+          <option value="group">指定群組</option>
+          <option value="serial">指定裝置</option>
+        </select>
+        <select id="ls-push-group" class="hidden" style="min-width:160px;"></select>
+        <select id="ls-push-device" class="hidden" style="min-width:220px;"></select>
+        <button id="ls-push-btn" type="button">推送鎖定畫面</button>
+      </div>
+      <div id="ls-push-progress"></div>
+    </div>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/lockscreen.js') }}?v={{ static_version }}"></script>
+{% endblock %}

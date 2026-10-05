@@ -33,7 +33,9 @@ DEFAULT_CONFIG = {
         "logo_dir": "/opt/nanomdm-webui/logo",
         "app_image_dir": "/opt/nanomdm-webui/app_image",
         "udid_serial_cache": "/opt/nanomdm-deployment/udid-serial-cache.json",
-        "udid_serial_cache_lock": "/opt/nanomdm-deployment/udid-serial-cache.lock"
+        "udid_serial_cache_lock": "/opt/nanomdm-deployment/udid-serial-cache.lock",
+        "lockscreen_json": "/opt/nanomdm-deployment/lockscreen.json",
+        "lockscreen_home_image": "/opt/nanomdm-deployment/lockscreen-home.jpg"
     },
     "nanodep": {
         "base_url_env_key": "NANODEP_BASE_URL",

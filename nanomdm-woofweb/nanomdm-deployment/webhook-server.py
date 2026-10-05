@@ -4,7 +4,7 @@ NanoMDM Webhook 自動化伺服器
 1. 接收 NanoMDM 的 mdm.Authenticate 事件，解析序號並暫存（UDID -> 序號）
 2. 接收 mdm.TokenUpdate 事件（代表裝置剛完成註冊），從暫存取出序號
 3. 用序號查 devices.csv 取得裝置名稱與群組
-4. 依序送出：改名指令 -> baseline profile -> 群組專屬 App 安裝
+4. 依序送出：改名指令 -> CA信任 -> baseline profile -> 群組描述檔 -> 鎖定畫面資訊 -> 群組專屬 App 安裝
 """
 import http.server
 import json
@@ -37,6 +37,13 @@ VPP_TOKEN_FILE = os.environ.get("VPP_TOKEN_PATH", "/opt/nanomdm-deployment/vpp_t
 # 自動信任——跟直接塞進enroll-template.mobileconfig不同,那個管道還沒建立MDM信任關係,
 # 沒辦法讓憑證自動被列入信任清單。
 SCEP_CA_PATH = os.environ.get("SCEP_CA_PATH", "/opt/nanomdm-deployment/scep-depot/ca.pem")
+# 鎖定畫面資訊:圖片由 webui 的 utils_lockscreen.py 產生(需要 Pillow 與中文字型,這兩個都裝在
+# webui 的 venv/系統裡,webhook 這邊用系統 python3 執行、沒有 Pillow),所以改成呼叫 webui venv
+# 的 python 跑那支程式,拿回 PNG 再自己組 Settings(Wallpaper) 指令,跟其他步驟走同一條 enqueue 管道。
+# 設定檔跟 webui 共用同一份,webui 上沒有開啟「自動推送」時這一步會直接略過。
+LOCKSCREEN_RENDER_PYTHON = os.environ.get("LOCKSCREEN_RENDER_PYTHON", "/opt/nanomdm-webui/venv/bin/python3")
+LOCKSCREEN_RENDER_SCRIPT = os.environ.get("LOCKSCREEN_RENDER_SCRIPT", "/opt/nanomdm-webui/utils_lockscreen.py")
+LOCKSCREEN_SETTINGS = os.environ.get("LOCKSCREEN_SETTINGS", "/opt/nanomdm-deployment/lockscreen.json")
 LOG_PATH = "/opt/nanomdm-deployment/webhook-automation.log"
 # 暫存「UDID -> 序號」對應關係的本機檔案（在 Authenticate 事件時寫入，
 # 在 TokenUpdate 事件時讀取），不需要查詢任何資料庫
@@ -318,6 +325,80 @@ def build_install_profile_plist(profile_content: bytes) -> str:
 </plist>"""
 
 
+def build_wallpaper_plist(image_bytes: bytes, where: int) -> str:
+    cmd_uuid = str(uuid.uuid4()).upper()
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Command</key>
+    <dict>
+        <key>RequestType</key>
+        <string>Settings</string>
+        <key>Settings</key>
+        <array>
+            <dict>
+                <key>Item</key>
+                <string>Wallpaper</string>
+                <key>Image</key>
+                <data>{encoded}</data>
+                <key>Where</key>
+                <integer>{where}</integer>
+            </dict>
+        </array>
+    </dict>
+    <key>CommandUUID</key>
+    <string>{cmd_uuid}</string>
+</dict>
+</plist>"""
+
+
+def build_lockscreen_plists(serial: str) -> list:
+    """產生鎖定畫面資訊的 Settings(Wallpaper) 指令清單,依序 enqueue。
+    iPadOS 17 以後只設定鎖定畫面也會連主畫面一起換掉,所以除了「主畫面與鎖定畫面相同」模式以外,
+    會再補一道 Where=2 的主畫面指令(純色或上傳的圖片)放在後面。
+    未開啟自動推送、或產生失敗時回傳空清單。"""
+    if not os.path.exists(LOCKSCREEN_SETTINGS):
+        log("尚未設定鎖定畫面資訊,略過")
+        return []
+    if not (os.path.exists(LOCKSCREEN_RENDER_PYTHON) and os.path.exists(LOCKSCREEN_RENDER_SCRIPT)):
+        log(f"找不到鎖定畫面產生程式({LOCKSCREEN_RENDER_PYTHON} / {LOCKSCREEN_RENDER_SCRIPT}),略過")
+        return []
+
+    def run(args):
+        return subprocess.run([LOCKSCREEN_RENDER_PYTHON, LOCKSCREEN_RENDER_SCRIPT] + args, capture_output=True, timeout=60)
+
+    try:
+        lock = run(["render", serial, "--require-auto-push", "--settings", LOCKSCREEN_SETTINGS, "--devices-csv", DEVICES_CSV])
+    except Exception as e:
+        log(f"產生鎖定畫面圖片失敗: {e}")
+        return []
+    if lock.returncode == 3:
+        log("鎖定畫面資訊未開啟自動推送,略過")
+        return []
+    if lock.returncode != 0 or not lock.stdout:
+        log(f"產生鎖定畫面圖片失敗(rc={lock.returncode}): {lock.stderr.decode(errors='replace').strip()}")
+        return []
+
+    try:
+        home = run(["home", "--settings", LOCKSCREEN_SETTINGS])
+    except Exception as e:
+        log(f"產生主畫面圖片失敗,只推送鎖定畫面: {e}")
+        return [build_wallpaper_plist(lock.stdout, 1)]
+
+    if home.returncode == 5:
+        log(f"鎖定畫面圖片已產生: {len(lock.stdout)} bytes,主畫面使用同一張(Where=3)")
+        return [build_wallpaper_plist(lock.stdout, 3)]
+    plists = [build_wallpaper_plist(lock.stdout, 1)]
+    if home.returncode == 0 and home.stdout:
+        plists.append(build_wallpaper_plist(home.stdout, 2))
+        log(f"鎖定畫面圖片已產生: {len(lock.stdout)} bytes,主畫面圖片 {len(home.stdout)} bytes")
+    else:
+        log(f"產生主畫面圖片失敗,只推送鎖定畫面(rc={home.returncode}): {home.stderr.decode(errors='replace').strip()}")
+    return plists
+
+
 def assign_vpp_license(serial: str, adam_id: str):
     with open(VPP_TOKEN_FILE, "r") as f:
         stoken = f.read().strip()
@@ -382,6 +463,11 @@ def process_enrollment(udid: str):
         time.sleep(2)
     else:
         log(f"群組 {group} 沒有綁定描述檔,或找不到對應檔案,略過這個步驟")
+
+    # 3.5 鎖定畫面資訊(裝置名稱/群組/學校聯絡資訊桌布,webui 上開啟自動推送才會執行)
+    for wallpaper_plist in build_lockscreen_plists(serial):
+        enqueue_command(udid, wallpaper_plist)
+        time.sleep(2)
 
     # 4. 群組專屬 App：先指派 VPP 授權，再送安裝指令
     apps = load_group_apps(group)

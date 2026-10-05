@@ -87,7 +87,7 @@ log_step "安裝必備套件(這一步可能需要幾分鐘)"
 
 apt update -qq
 apt install -y \
-    build-essential strace git curl wget jq unzip pigz rsync \
+    build-essential strace git curl wget jq unzip pigz rsync fonts-noto-cjk\
     nginx certbot python3-certbot-nginx python3-dev python3-pip python3-venv \
     net-tools dnsutils ca-certificates htop iftop iotop ioping \
     traceroute lsof usbutils pciutils bash-completion gnupg \

@@ -29,6 +29,7 @@ import utils_certs
 import utils_signing
 import utils_auth
 import utils_logging
+import utils_lockscreen
 
 try:
     CFG = load_config()
@@ -2420,6 +2421,10 @@ def api_device_enrollment_status_save():
         result["group_changed"] = True
         log_activity_entry("裝置註冊狀態-變更群組", True, detail=f"舊群組={old_group or '(未分類)'} -> 新群組={group}", serial=serial, device_name=device_name, group=group)
         result["sync_steps"] = apply_group_change_effects(serial, group, enrollment_id)
+
+    # 名稱或群組有變更時,鎖定畫面上的資訊也要跟著更新(只有開啟自動推送時才會推送)
+    if result["name_changed"] or result["group_changed"]:
+        result["lockscreen_push"] = maybe_auto_push_lockscreen(serial, enrollment_id, "裝置註冊狀態")
     return jsonify(result)
 
 
@@ -2539,9 +2544,294 @@ def api_device_enrollment_status_import_apply_stream():
             if group_changed:
                 step_result["group_sync"] = apply_group_change_effects(serial, group, enrollment_id)
 
+            if name_changed or group_changed:
+                step_result["lockscreen_push"] = maybe_auto_push_lockscreen(serial, enrollment_id, "CSV匯入")
+
             yield f"data: {json.dumps(step_result, ensure_ascii=False)}\n\n"
 
         yield f"data: {json.dumps({'done': True, 'total': total}, ensure_ascii=False)}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# 鎖定畫面資訊(把裝置名稱/群組/組織聯絡資訊畫成桌布,透過 MDM Settings 指令設為鎖定畫面)
+# 詳細做法說明請見 utils_lockscreen.py 開頭
+# ---------------------------------------------------------------------------
+def get_lockscreen_settings():
+    return utils_lockscreen.load_settings(CFG["paths"]["lockscreen_json"])
+
+
+def fetch_asm_org_fields():
+    """從 ASM(DEP account detail)取得組織名稱/地址/電話/Email。回傳 (fields, error)"""
+    script = CFG["paths"]["dep_account_detail_script"]
+    rc, out, err = utils.run_dep_account_detail(
+        script, env_file_path=CFG["paths"]["env_file"], extra_env=get_nanodep_script_env()
+    )
+    if rc != 0:
+        return None, (err or out or "無法取得 ASM 帳號資訊").strip()
+    try:
+        raw = json.loads(out)
+    except json.JSONDecodeError:
+        return None, "ASM 回傳內容不是合法 JSON"
+    return {
+        "org_name": raw.get("org_name") or "",
+        "org_address": raw.get("org_address") or "",
+        "org_phone": raw.get("org_phone") or "",
+        "org_email": raw.get("org_email") or "",
+    }, None
+
+
+_HOME_NOT_LOADED = object()
+
+
+def load_lockscreen_home_image(settings):
+    """回傳主畫面圖片 bytes,home_mode=same 時回傳 None;失敗時丟 LockscreenError"""
+    return utils_lockscreen.render_home_image(settings, CFG["paths"]["lockscreen_home_image"])
+
+
+def push_lockscreen_to_device(serial, enrollment_id, device_name=None, group=None, settings=None, home_image=_HOME_NOT_LOADED):
+    """產生這台裝置的鎖定畫面圖片並送出 Settings(Wallpaper) 指令。回傳結果 dict,不丟例外。
+    device_name/group 沒給時從 devices.csv 讀(呼叫端剛存檔完,讀到的就是最新值)。
+
+    iPadOS 17 以後只設定鎖定畫面(Where=1)也會連主畫面一起換掉,所以除了 home_mode=same 以外,
+    鎖定畫面指令之後會再補送一道 Where=2 的主畫面指令(純色或上傳的圖片),把主畫面蓋回來。
+    兩道指令分開送、依序排入佇列,確保主畫面那道一定在後面執行。
+    批次推送時由呼叫端先讀好 home_image 傳進來,不用每台都重讀一次。"""
+    settings = settings or get_lockscreen_settings()
+    if not enrollment_id:
+        return {"ok": False, "skipped": True, "message": "裝置尚未完成 MDM 註冊(沒有 enrollment_id),無法推送"}
+    if device_name is None or group is None:
+        row = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial, {})
+        device_name = row.get("device_name", "") if device_name is None else device_name
+        group = row.get("group", "") if group is None else group
+    try:
+        png = utils_lockscreen.render_png(settings, serial, device_name, group)
+        if home_image is _HOME_NOT_LOADED:
+            home_image = load_lockscreen_home_image(settings)
+    except utils_lockscreen.LockscreenError as e:
+        return {"ok": False, "message": str(e)}
+    except Exception as e:
+        return {"ok": False, "message": f"產生圖片失敗: {e}"}
+
+    base_url, api_user, api_key = get_nanomdm_conn()
+    if not base_url or not api_key:
+        return {"ok": False, "message": ".env 內缺少 NANOMDM 設定"}
+    try:
+        status_code, result = utils.send_mdm_command(
+            base_url, api_user, api_key, enrollment_id, "Settings",
+            utils_lockscreen.build_wallpaper_command_params(png, utils_lockscreen.lock_where(settings)),
+        )
+        if status_code >= 400:
+            return {"ok": False, "status_code": status_code, "result": result, "message": f"鎖定畫面指令送出失敗(HTTP {status_code})"}
+        out = {"ok": True, "status_code": status_code, "result": result, "image_bytes": len(png)}
+        if home_image is not None:
+            home_status, home_result = utils.send_mdm_command(
+                base_url, api_user, api_key, enrollment_id, "Settings",
+                utils_lockscreen.build_wallpaper_command_params(home_image, utils_lockscreen.WHERE_HOME),
+            )
+            out["home_status_code"] = home_status
+            out["home_result"] = home_result
+            if home_status >= 400:
+                out["ok"] = False
+                out["message"] = f"鎖定畫面已送出,但主畫面指令送出失敗(HTTP {home_status}),主畫面可能會跟鎖定畫面同一張圖"
+        return out
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+
+def maybe_auto_push_lockscreen(serial, enrollment_id, source):
+    """名稱或群組變更後呼叫:只有在鎖定畫面設定開啟「自動推送」時才會真的推送。"""
+    settings = get_lockscreen_settings()
+    if not settings.get("auto_push"):
+        return {"ok": False, "skipped": True, "message": "鎖定畫面資訊未開啟自動推送"}
+    result = push_lockscreen_to_device(serial, enrollment_id, settings=settings)
+    if not result.get("skipped"):
+        log_activity_entry(f"鎖定畫面-自動推送({source})", bool(result.get("ok")), detail=result.get("message", ""), serial=serial)
+    return result
+
+
+@app.route("/lockscreen")
+@login_required
+def lockscreen_page():
+    return render_template("lockscreen.html", active="lockscreen", placeholders=utils_lockscreen.PLACEHOLDERS)
+
+
+@app.route("/api/lockscreen/settings")
+@login_required
+def api_lockscreen_settings():
+    settings = get_lockscreen_settings()
+    return jsonify({
+        "ok": True,
+        "settings": settings,
+        "settings_exists": os.path.exists(CFG["paths"]["lockscreen_json"]),
+        "home_image_exists": os.path.isfile(CFG["paths"]["lockscreen_home_image"]),
+        "deps": utils_lockscreen.check_dependencies(settings),
+    })
+
+
+@app.route("/api/lockscreen/settings/save", methods=["POST"])
+@login_required
+def api_lockscreen_settings_save():
+    try:
+        settings = utils_lockscreen.validate_settings(request.json or {})
+        if settings["home_mode"] == "image" and not os.path.isfile(CFG["paths"]["lockscreen_home_image"]):
+            raise utils_lockscreen.LockscreenError("主畫面設定為「上傳的圖片」,請先上傳圖片")
+        utils_lockscreen.save_settings(settings, CFG["paths"]["lockscreen_json"])
+    except utils_lockscreen.LockscreenError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    except Exception as e:
+        log_activity_entry("鎖定畫面-儲存設定", False, detail=str(e))
+        return jsonify({"ok": False, "message": str(e)}), 500
+    log_activity_entry("鎖定畫面-儲存設定", True, detail=f"自動推送={'開' if settings['auto_push'] else '關'}")
+    return jsonify({"ok": True, "settings": settings, "deps": utils_lockscreen.check_dependencies(settings)})
+
+
+@app.route("/api/lockscreen/asm-org")
+@login_required
+def api_lockscreen_asm_org():
+    fields, error = fetch_asm_org_fields()
+    if error:
+        return jsonify({"ok": False, "message": error}), 502
+    return jsonify({"ok": True, "fields": fields})
+
+
+@app.route("/api/lockscreen/home-image")
+@login_required
+def api_lockscreen_home_image():
+    path = CFG["paths"]["lockscreen_home_image"]
+    if not os.path.isfile(path):
+        return jsonify({"ok": False, "message": "尚未上傳主畫面圖片"}), 404
+    resp = send_file(path, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/lockscreen/home-image/upload", methods=["POST"])
+@login_required
+def api_lockscreen_home_image_upload():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "message": "沒有收到檔案"}), 400
+    data = f.read()
+    if len(data) > 20 * 1024 * 1024:
+        return jsonify({"ok": False, "message": "檔案超過 20MB"}), 400
+    try:
+        w, h, size = utils_lockscreen.save_home_upload(data, CFG["paths"]["lockscreen_home_image"])
+    except utils_lockscreen.LockscreenError as e:
+        log_activity_entry("鎖定畫面-上傳主畫面圖片", False, detail=str(e))
+        return jsonify({"ok": False, "message": str(e)}), 400
+    log_activity_entry("鎖定畫面-上傳主畫面圖片", True, detail=f"{f.filename} -> {w}x{h}, {size} bytes")
+    return jsonify({"ok": True, "width": w, "height": h, "bytes": size})
+
+
+@app.route("/api/lockscreen/devices")
+@login_required
+def api_lockscreen_devices():
+    """devices.csv 的所有裝置(預覽用),有完成 MDM 註冊的會帶 enrollment_id(推送用)"""
+    csv_map = utils.read_devices_csv(CFG["paths"]["devices_csv"])
+    serial_to_enrollment = {}
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+    merged, rc, err = utils.query_and_merge_devices(CFG["mysql"], db_password, CFG["paths"]["devices_csv"])
+    if rc == 0:
+        serial_to_enrollment = {r["serial_number"]: r["enrollment_id"] for r in merged}
+    rows = [{
+        "serial_number": sn,
+        "device_name": info.get("device_name", ""),
+        "group": info.get("group", ""),
+        "enrollment_id": serial_to_enrollment.get(sn, ""),
+    } for sn, info in sorted(csv_map.items(), key=lambda kv: (kv[1].get("group", ""), kv[1].get("device_name", ""), kv[0]))]
+    groups = sorted(utils.load_groups(CFG["paths"]["groups_json"]).keys())
+    return jsonify({"ok": True, "rows": rows, "groups": groups, "mdm_query_ok": rc == 0, "mdm_query_error": "" if rc == 0 else err})
+
+
+@app.route("/api/lockscreen/preview", methods=["POST"])
+@login_required
+def api_lockscreen_preview():
+    """用畫面上「尚未儲存」的設定產生預覽圖,讓使用者調整時可以即時看到效果"""
+    data = request.json or {}
+    try:
+        settings = utils_lockscreen.validate_settings(data.get("settings") or {})
+    except utils_lockscreen.LockscreenError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    serial = (data.get("serial_number") or "").strip()
+    row = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial) if serial else None
+    if row:
+        device_name, group = row.get("device_name", ""), row.get("group", "")
+    else:
+        serial, device_name, group = "SAMPLE0001", "2022-ipad-01", "Teacher"
+    try:
+        png = utils_lockscreen.render_png(settings, serial, device_name, group)
+    except utils_lockscreen.LockscreenError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    resp = Response(png, mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/lockscreen/push-stream")
+@login_required
+def api_lockscreen_push_stream():
+    """scope=all(所有已註冊裝置) / group(value=群組名稱) / serial(value=序號),逐台顯示進度"""
+    scope = (request.args.get("scope") or "").strip()
+    value = (request.args.get("value") or "").strip()
+
+    def sse(obj):
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+    def generate():
+        if scope not in ("all", "group", "serial") or (scope != "all" and not value):
+            yield sse({"error": "推送範圍參數錯誤", "done": True})
+            return
+        settings = get_lockscreen_settings()
+        deps = utils_lockscreen.check_dependencies(settings)
+        if not deps.get("ok"):
+            yield sse({"error": deps.get("message") or "缺少必要套件或字型", "done": True})
+            return
+        try:
+            home_image = load_lockscreen_home_image(settings)
+        except utils_lockscreen.LockscreenError as e:
+            yield sse({"error": str(e), "done": True})
+            return
+
+        env = get_env_dict()
+        db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+        merged, rc, err = utils.query_and_merge_devices(CFG["mysql"], db_password, CFG["paths"]["devices_csv"])
+        if rc != 0:
+            yield sse({"error": f"查詢裝置清單失敗: {err}", "done": True})
+            return
+
+        if scope == "group":
+            targets = [d for d in merged if d.get("group") == value]
+            label = f"群組「{value}」"
+        elif scope == "serial":
+            targets = [d for d in merged if d.get("serial_number") == value]
+            label = f"裝置 {value}"
+        else:
+            targets = merged
+            label = "所有已註冊裝置"
+        total = len(targets)
+        if total == 0:
+            yield sse({"error": f"{label}沒有已完成 MDM 註冊的裝置", "done": True})
+            return
+        yield sse({"message": f"{label}共 {total} 台,開始推送...", "done": False})
+
+        success = 0
+        for idx, dev in enumerate(targets, start=1):
+            serial = dev.get("serial_number")
+            result = push_lockscreen_to_device(
+                serial, dev.get("enrollment_id"), dev.get("device_name", ""), dev.get("group", ""),
+                settings=settings, home_image=home_image,
+            )
+            ok = bool(result.get("ok"))
+            success += 1 if ok else 0
+            log_activity_entry("鎖定畫面-推送", ok, detail=result.get("message", ""), serial=serial,
+                               device_name=dev.get("device_name", ""), group=dev.get("group", ""))
+            yield sse({"index": idx, "total": total, "serial_number": serial, "device_name": dev.get("device_name", ""),
+                       "ok": ok, "message": result.get("message", "")})
+
+        yield sse({"done": True, "total": total, "success_count": success, "label": label})
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
@@ -2611,6 +2901,7 @@ def api_devices_save():
     wifi_mac = None
     existing = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial_number, {})
     old_group = existing.get("group", "")
+    old_device_name = existing.get("device_name", "")
     if not existing.get("wifi_mac"):
         found_mac = get_wifi_mac_lookup().get(serial_number)
         if found_mac:
@@ -2628,9 +2919,10 @@ def api_devices_save():
     # 群組真的有變更時,比照[裝置註冊狀態]頁面的做法,同步套用新群組配對的
     # DEP profile重新指派、mobileconfig推送——之前這裡漏掉了這一步,導致從這個頁面
     # (不是[裝置註冊狀態])編輯群組時,DEP profile_uuid不會跟著更新。
-    if group != old_group and group:
-        log_activity_entry("裝置與命令-變更群組", True, detail=f"舊群組={old_group or '(未分類)'} -> 新群組={group}", serial=serial_number, device_name=device_name, group=group)
-        enrollment_id = ""
+    group_changed = group != old_group and bool(group)
+    name_changed = device_name != old_device_name and bool(device_name)
+    enrollment_id = ""
+    if group_changed or name_changed:
         try:
             env = get_env_dict()
             db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
@@ -2639,7 +2931,14 @@ def api_devices_save():
                 enrollment_id = next((r["enrollment_id"] for r in merged if r["serial_number"] == serial_number), "")
         except Exception:
             pass  # 查不到enrollment_id時,apply_group_change_effects()本身能正確處理空字串的情況
+
+    if group_changed:
+        log_activity_entry("裝置與命令-變更群組", True, detail=f"舊群組={old_group or '(未分類)'} -> 新群組={group}", serial=serial_number, device_name=device_name, group=group)
         response["sync_steps"] = apply_group_change_effects(serial_number, group, enrollment_id)
+
+    # 名稱或群組有變更時,鎖定畫面上的資訊也要跟著更新(只有開啟自動推送時才會推送)
+    if group_changed or name_changed:
+        response["lockscreen_push"] = maybe_auto_push_lockscreen(serial_number, enrollment_id, "裝置與命令")
 
     return jsonify(response)
 
@@ -3518,6 +3817,9 @@ def api_groups():
             "app_count": len(info.get("apps", [])),
             "enroll_json": info.get("enroll_json"),
             "mobileconfig": info.get("mobileconfig"),
+            # 系統預設檔案受保護、不能刪除,刪除群組時詢問「要不要一併刪除檔案」要據此提示使用者
+            "enroll_json_protected": info.get("enroll_json") == utils_depprofile.DEFAULT_ENROLL_FILENAME,
+            "mobileconfig_protected": info.get("mobileconfig") in utils_profiles.PROTECTED_FILENAMES,
         })
 
     return jsonify({"ok": True, "rows": rows, "vpp_cache_missing": vpp_cache_missing})
@@ -3683,16 +3985,82 @@ def api_groups_duplicate():
 @app.route("/api/groups/delete", methods=["POST"])
 @login_required
 def api_groups_delete():
+    """刪除群組。
+
+    1. 群組底下還有裝置(devices.csv裡有任何一台裝置指派到這個群組)時不能刪除,回傳409。
+       裝置會留著一個已經不存在的群組名稱,之後自動化流程(派送描述檔、App)就找不到對應設定了,
+       所以要先到[裝置註冊狀態]把這些裝置變更到其他群組。這個檢查在伺服器端做,不能只靠前端擋。
+    2. delete_files=true 時,一併刪除這個群組配對的註冊檔(enroll json)與描述檔(mobileconfig);
+       false(或沒帶)只刪除群組本身,檔案會留著、變成沒有配對任何群組。
+       只有真正的JSON布林值true才算,不能用bool()轉型(字串"false"轉型後會變成True)。
+       檔案刪除失敗或被略過(系統預設的受保護檔案、檔案已經不存在、還有其他群組在使用)
+       不會讓已經完成的群組刪除被復原,結果逐一回報在files欄位裡。
+    """
     data = request.json or {}
     group_name = (data.get("group_name") or "").strip()
+    delete_files = data.get("delete_files") is True
+
     groups = utils.load_groups(CFG["paths"]["groups_json"])
-    if group_name in groups:
-        del groups[group_name]
-        utils.save_groups(CFG["paths"]["groups_json"], groups)
-        log_activity_entry("群組-刪除", True, group=group_name)
-        return jsonify({"ok": True, "message": f"已刪除群組 {group_name}"})
-    log_activity_entry("群組-刪除", False, detail="找不到這個群組", group=group_name)
-    return jsonify({"ok": False, "message": "找不到這個群組"}), 404
+    if group_name not in groups:
+        log_activity_entry("群組-刪除", False, detail="找不到這個群組", group=group_name)
+        return jsonify({"ok": False, "message": "找不到這個群組"}), 404
+
+    devices_csv = utils.read_devices_csv(CFG["paths"]["devices_csv"])
+    bound_count = sum(1 for info in devices_csv.values() if info.get("group") == group_name)
+    if bound_count >= 1:
+        message = (
+            f"群組「{group_name}」還有 {bound_count} 台裝置綁定,不能刪除。"
+            f"請先到 [裝置註冊狀態] 把這些裝置變更到其他群組,才能刪除這個群組"
+        )
+        log_activity_entry("群組-刪除", False, detail=f"還有 {bound_count} 台裝置綁定", group=group_name)
+        return jsonify({"ok": False, "message": message, "device_count": bound_count}), 409
+
+    # 群組一旦刪掉,配對的檔案名稱就查不到了,要先記下來
+    paired = {
+        "enroll_json": groups[group_name].get("enroll_json"),
+        "mobileconfig": groups[group_name].get("mobileconfig"),
+    }
+    del groups[group_name]
+    utils.save_groups(CFG["paths"]["groups_json"], groups)
+
+    file_results = []
+    if delete_files:
+        targets = [
+            ("enroll_json", "群組註冊檔", CFG["paths"]["dep_profiles_dir"], utils_depprofile.delete_dep_profile),
+            ("mobileconfig", "群組描述檔", CFG["paths"]["mobileconfig_dir"], utils_profiles.delete_mobileconfig),
+        ]
+        for field, label, base_dir, deleter in targets:
+            filename = paired[field]
+            if not filename:
+                continue
+            result = {"type": label, "filename": filename, "status": "deleted", "message": ""}
+            # 配對本來就是1:1,一個檔案只會屬於一個群組。但資料如果被手動改過、同一個檔案
+            # 還有別的群組在用,就不能刪(會讓那個群組的配對失效)
+            other_group = utils.find_group_by_paired_file(groups, field, filename)
+            if other_group:
+                result.update(status="skipped", message=f"群組「{other_group}」還在使用這個檔案")
+            else:
+                try:
+                    deleter(base_dir, filename, CFG["paths"]["groups_json"])
+                except FileNotFoundError:
+                    result.update(status="skipped", message="檔案已經不存在")
+                except ValueError as e:     # 系統預設的受保護檔案、檔名不合法
+                    result.update(status="skipped", message=str(e))
+                except Exception as e:
+                    result.update(status="error", message=str(e))
+            file_results.append(result)
+
+    message = f"已刪除群組 {group_name}"
+    deleted = [r for r in file_results if r["status"] == "deleted"]
+    not_deleted = [r for r in file_results if r["status"] != "deleted"]
+    if deleted:
+        message += ",並一併刪除 " + "、".join(f"{r['type']} {r['filename']}" for r in deleted)
+    if not_deleted:
+        message += "。以下檔案沒有刪除: " + ";".join(f"{r['type']} {r['filename']}({r['message']})" for r in not_deleted)
+
+    overall_ok = not any(r["status"] == "error" for r in file_results)
+    log_activity_entry("群組-刪除", overall_ok, detail=message, group=group_name)
+    return jsonify({"ok": True, "message": message, "files": file_results})
 
 
 @app.route("/api/groups/<group_name>/devices")

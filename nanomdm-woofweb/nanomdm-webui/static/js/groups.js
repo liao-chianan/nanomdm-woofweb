@@ -4,6 +4,7 @@ let currentGroupForDevices = null;
 let currentGroupForApps = null;
 let commandTarget = null;          // {type:'device', enrollmentId, label} | {type:'group', groupName, label}
 let groupNamesList = [];
+let groupRowsByName = {};          // loadGroups填入;刪除群組時要用裝置數量、配對的檔案名稱
 
 function buildGroupOptionsHtml(currentGroup) {
   const names = new Set(groupNamesList);
@@ -29,6 +30,7 @@ async function loadGroups() {
   }
 
   document.getElementById("vpp-missing-banner").classList.toggle("hidden", !res.data.vpp_cache_missing);
+  groupRowsByName = Object.fromEntries(res.data.rows.map((r) => [r.group_name, r]));
 
   tbody.innerHTML = "";
   if (res.data.rows.length === 0) {
@@ -142,14 +144,105 @@ async function saveGroupEdit() {
   }
 }
 
-async function deleteGroup(name) {
-  if (!confirm(`確定要刪除群組「${name}」嗎?(不會影響已指派此群組的裝置或 App 資料本身,也不會刪除配對的註冊檔/描述檔案,只會解除配對關係)`)) return;
-  const res = await apiFetchJSON("/api/groups/delete", "POST", { group_name: name });
-  if (res.ok) {
-    loadGroups();
+// ---------------------------------------------------------------------------
+// 刪除群組
+//   1. 群組還有裝置綁定(至少1台)時不能刪除,提示使用者到[裝置註冊狀態]把裝置變更群組
+//   2. 可以刪除時,詢問是否一併刪除這個群組配對的註冊檔與描述檔:
+//      是(一併刪除) / 否(僅刪除群組) / 取消
+// ---------------------------------------------------------------------------
+function makeModalButton(label, cls, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = label;
+  if (cls) btn.className = cls;
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+function openGroupDeleteBlockedModal(name, deviceCount) {
+  document.getElementById("group-delete-title").textContent = `無法刪除群組「${name}」`;
+  document.getElementById("group-delete-body").innerHTML = `
+    <p>這個群組目前還有 <strong>${Number(deviceCount)}</strong> 台裝置綁定,不能刪除。</p>
+    <p>請先到 <strong>[裝置註冊狀態]</strong> 頁面,把這些裝置變更到其他群組,才能夠刪除這個群組。</p>
+  `;
+  const actions = document.getElementById("group-delete-actions");
+  actions.innerHTML = "";
+  actions.appendChild(makeModalButton("關閉", "secondary", () => closeModal("group-delete-modal")));
+  actions.appendChild(makeModalButton("前往 [裝置註冊狀態]", "", () => {
+    window.location.href = apiUrl("/device-enrollment-status");
+  }));
+  openModal("group-delete-modal");
+}
+
+function openGroupDeleteConfirmModal(name) {
+  const row = groupRowsByName[name] || {};
+  const files = [];
+  if (row.enroll_json) files.push({ type: "群組註冊檔", name: row.enroll_json, isProtected: !!row.enroll_json_protected });
+  if (row.mobileconfig) files.push({ type: "群組描述檔", name: row.mobileconfig, isProtected: !!row.mobileconfig_protected });
+  // 系統預設檔案(例如default-enroll.json、baseline.mobileconfig)受保護、不能刪除,
+  // 所以「是否一併刪除」只有在有「可以刪的檔案」時才有意義
+  const deletable = files.filter((f) => !f.isProtected);
+
+  document.getElementById("group-delete-title").textContent = `刪除群組「${name}」`;
+
+  let bodyHtml;
+  if (files.length === 0) {
+    bodyHtml = `<p>確定要刪除群組「<strong>${escapeHtml(name)}</strong>」嗎?這個群組沒有配對任何註冊檔或描述檔。</p>`;
   } else {
-    alert("刪除失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    const listHtml = files.map((f) => `
+      <li>${f.type}: <span style="font-family:var(--mono);">${escapeHtml(f.name)}</span>${
+        f.isProtected ? ` <span style="color:#9ca3af;">(系統預設檔案,不會被刪除)</span>` : ""}</li>
+    `).join("");
+    bodyHtml = `<p>確定要刪除群組「<strong>${escapeHtml(name)}</strong>」嗎?這個群組配對了以下檔案:</p><ul>${listHtml}</ul>`;
+    if (deletable.length > 0) {
+      bodyHtml += `
+        <p><strong>是否要一併刪除這些檔案?</strong></p>
+        <p style="color:#6b7280; font-size:12px;">選「否」只會刪除群組本身,檔案會保留(變成沒有配對任何群組,之後還可以指派給其他群組)。</p>
+      `;
+    }
   }
+  document.getElementById("group-delete-body").innerHTML = bodyHtml;
+
+  const actions = document.getElementById("group-delete-actions");
+  actions.innerHTML = "";
+  if (deletable.length > 0) {
+    actions.appendChild(makeModalButton("是(一併刪除)", "danger", () => submitGroupDelete(name, true)));
+    actions.appendChild(makeModalButton("否(僅刪除群組)", "", () => submitGroupDelete(name, false)));
+    actions.appendChild(makeModalButton("取消", "secondary", () => closeModal("group-delete-modal")));
+  } else {
+    // 沒有可以刪的檔案,問「要不要一併刪除」沒有意義,只需要確認要不要刪除群組
+    actions.appendChild(makeModalButton("確定刪除", "danger", () => submitGroupDelete(name, false)));
+    actions.appendChild(makeModalButton("取消", "secondary", () => closeModal("group-delete-modal")));
+  }
+  openModal("group-delete-modal");
+}
+
+async function submitGroupDelete(name, deleteFiles) {
+  closeModal("group-delete-modal");
+  const res = await apiFetchJSON("/api/groups/delete", "POST", { group_name: name, delete_files: deleteFiles });
+  if (res.ok) {
+    // 群組已經刪除成功。如果有檔案沒刪成功(受保護、還有別的群組在用、發生錯誤),要讓使用者知道原因
+    const notDeleted = ((res.data && res.data.files) || []).filter((f) => f.status !== "deleted");
+    if (notDeleted.length > 0) alert(res.data.message);
+    loadGroups();
+    return;
+  }
+  // 畫面上的裝置數量可能是舊的(別處剛把裝置指派進來),以伺服器檢查的結果為準
+  if (res.status === 409 && res.data && res.data.device_count) {
+    openGroupDeleteBlockedModal(name, res.data.device_count);
+    loadGroups();
+    return;
+  }
+  alert("刪除失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+}
+
+function deleteGroup(name) {
+  const row = groupRowsByName[name] || {};
+  if ((row.device_count || 0) >= 1) {
+    openGroupDeleteBlockedModal(name, row.device_count);
+    return;
+  }
+  openGroupDeleteConfirmModal(name);
 }
 
 // ---------------------------------------------------------------------------
