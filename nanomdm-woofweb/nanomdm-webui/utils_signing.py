@@ -60,11 +60,21 @@ def generate_profile_signing_cert(scep_ca_cert_path, scep_ca_key_path, out_cert_
         if rc2 != 0:
             return False, f"產生憑證簽署請求(CSR)失敗: {err2}"
 
+        # 明確加上憑證的用途宣告(Key Usage/Basic Constraints)。這是實際發生過的問題:
+        # 完全沒有任何X.509擴充欄位的憑證,openssl命令列驗證不會有意見,但iOS對「用來簽署
+        # 描述檔的憑證」驗證比較嚴格,缺少明確的用途宣告時可能直接判定整份描述檔無效,
+        # 即使簽章本身完全正確也一樣。
+        ext_path = os.path.join(tmpdir, "signing_ext.cnf")
+        with open(ext_path, "w") as f:
+            f.write("keyUsage=critical,digitalSignature\n")
+            f.write("basicConstraints=critical,CA:FALSE\n")
+
         x509_args = [
             "openssl", "x509", "-req", "-in", csr_path,
             "-CA", scep_ca_cert_path, "-CAkey", scep_ca_key_path,
             "-CAcreateserial", "-CAserial", srl_path,
             "-out", cert_path, "-days", str(days), "-sha256",
+            "-extfile", ext_path,
         ]
         run_env = None
         if ca_key_password:
@@ -127,7 +137,7 @@ def sign_plist_bytes(plist_bytes, signing_cert_path, signing_key_path, ca_cert_p
             return None, f"寫入暫存檔案失敗: {e}"
 
         args = [
-            "openssl", "smime", "-sign",
+            "openssl", "smime", "-sign", "-binary",
             "-signer", signing_cert_path,
             "-inkey", signing_key_path,
         ]
@@ -177,7 +187,7 @@ def extract_plist_from_signed_bytes(signed_bytes, timeout=15):
             return None, f"寫入暫存檔案失敗: {e}"
 
         args = [
-            "openssl", "smime", "-verify", "-noverify",
+            "openssl", "smime", "-verify", "-noverify", "-binary",
             "-inform", "der", "-in", in_path, "-out", out_path,
         ]
         rc, out, err = utils.run_cmd(args, timeout=timeout)
