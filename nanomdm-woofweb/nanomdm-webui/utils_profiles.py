@@ -205,7 +205,6 @@ def list_mobileconfig_files(dir_path, groups_path=None):
             "size": os.path.getsize(full_path),
             "mtime": os.path.getmtime(full_path),
             "display_name": "",
-            "payload_types": [],
             "parse_error": None,
             "is_protected": is_protected,
             "is_signed": False,
@@ -223,7 +222,6 @@ def list_mobileconfig_files(dir_path, groups_path=None):
             info["is_signed"] = utils_signing.is_signed_mobileconfig_bytes(raw_bytes)
             parsed = utils_signing.parse_mobileconfig_bytes(raw_bytes)
             info["display_name"] = parsed.get("PayloadDisplayName", "")
-            info["payload_types"] = [p.get("PayloadType", "?") for p in parsed.get("PayloadContent", [])]
         except Exception as e:
             info["parse_error"] = str(e)
         results.append(info)

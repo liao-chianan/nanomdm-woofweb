@@ -59,7 +59,6 @@ async function loadProfilesList() {
     div.innerHTML = `
       <div style="font-family:var(--mono); font-size:13px; font-weight:600;">${escapeHtml(f.filename)} ${errBadge}${protectedBadge}${signedBadge}</div>
       <div style="font-size:12px; color:#6b7280; margin:3px 0;">${escapeHtml(f.display_name || "(無顯示名稱)")} · 配對群組: ${escapeHtml(f.assigned_group_label)}</div>
-      <div style="font-size:11px; color:#9ca3af;">${f.payload_types.map(escapeHtml).join(", ") || "(無 payload)"}</div>
       <div style="font-size:11px; color:#9ca3af;">${formatBytes(f.size)} · ${formatMtime(f.mtime)}</div>
       <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
         <button class="secondary" data-action="edit-profile" data-filename="${escapeHtml(f.filename)}" type="button" style="font-size:12px;">編輯</button>
