@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-mobileconfig 描述檔管理:
+mobileconfig描述檔管理:
 - PAYLOAD_SCHEMA 定義每種 payload 支援哪些欄位(單一事實來源,前端表單依此動態產生)
 - 用 plistlib 組建/解析,保證輸出一定是合法的 plist XML
 - 針對已知的常見錯誤(例如 PayloadRemovalDisallowed 搭配 MDM payload)給出警告

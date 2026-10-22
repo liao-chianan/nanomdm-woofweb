@@ -172,26 +172,41 @@ function renderInstanceBlock(schema, key, instanceId, fields) {
   return div;
 }
 
-function renderPayloadsSection(payloadsData) {
+// 只有 enroll-template(裝置實際拿去完成 MDM 註冊的那份)才需要 MDM 與 SCEP。
+// 其他描述檔都是在裝置註冊完成後透過 MDM 通道推送,這時裝置已經有 MDM 連線與身分憑證:
+//   - 再帶一份 MDM payload,裝置會拒絕安裝,整份描述檔(連同 Wi-Fi、限制等)都不會生效
+//   - 再帶一份 SCEP payload,只會多要一張用不到的憑證
+// 所以:編輯 enroll-template 時這兩項固定勾選、不能取消;編輯其他描述檔時這兩項完全不顯示
+// (collectFormData 會把沒顯示的項目視為未勾選,舊檔案如果帶有這兩項,存檔後就會被移除)。
+const ENROLL_ONLY_PAYLOAD_KEYS = ["mdm", "scep"];
+
+function renderPayloadsSection(payloadsData, filename) {
   const container = document.getElementById("payloads-container");
   container.innerHTML = "";
+  const isEnrollTemplate = filename === ENROLL_TEMPLATE_FILENAME;
 
   Object.keys(PROFILE_SCHEMA.payload_schema).forEach((key) => {
     const schema = PROFILE_SCHEMA.payload_schema[key];
     const isSingular = schema.singular !== false;
     const existing = (payloadsData && payloadsData[key]) || (isSingular ? { enabled: false, fields: {} } : { enabled: false, instances: [] });
+    const enrollOnly = ENROLL_ONLY_PAYLOAD_KEYS.includes(key);
+    if (enrollOnly && !isEnrollTemplate) return;
+    const locked = enrollOnly && isEnrollTemplate;
+    if (locked) existing.enabled = true;
 
     const wrapper = document.createElement("div");
     wrapper.style.cssText = "border:1px solid var(--border-color); border-radius:6px; padding:12px 14px; margin-bottom:12px;";
 
     if (isSingular) {
       const fieldsId = `payload-fields-${key}`;
-      const payloadHelp = schema.help
-        ? `<p style="color:#6b7280; font-size:12px; margin:6px 0 0 26px; line-height:1.5;">${escapeHtml(schema.help)}</p>`
-        : "";
+      const payloadHelp = locked
+        ? `<p style="color:#6b7280; font-size:12px; margin:6px 0 0 26px; line-height:1.5;">註冊描述檔必須包含這個項目,固定勾選、無法取消。</p>`
+        : schema.help
+          ? `<p style="color:#6b7280; font-size:12px; margin:6px 0 0 26px; line-height:1.5;">${escapeHtml(schema.help)}</p>`
+          : "";
       wrapper.innerHTML = `
-        <label style="display:flex; align-items:center; gap:8px; font-weight:600; cursor:pointer;">
-          <input type="checkbox" class="payload-toggle" data-payload-key="${key}" ${existing.enabled ? "checked" : ""}>
+        <label style="display:flex; align-items:center; gap:8px; font-weight:600; ${locked ? "cursor:not-allowed; opacity:.6;" : "cursor:pointer;"}" ${locked ? 'title="註冊描述檔必須包含這個項目"' : ""}>
+          <input type="checkbox" class="payload-toggle" data-payload-key="${key}" ${existing.enabled ? "checked" : ""} ${locked ? "disabled" : ""}>
           ${escapeHtml(schema.label)}
         </label>
         ${payloadHelp}
@@ -268,6 +283,12 @@ function collectFormData() {
     const schema = PROFILE_SCHEMA.payload_schema[key];
     const isSingular = schema.singular !== false;
     const toggle = payloadsContainer.querySelector(`.payload-toggle[data-payload-key="${key}"]`);
+
+    // 沒有顯示在畫面上的項目(例如一般描述檔的 MDM/SCEP)視為未勾選
+    if (!toggle) {
+      payloads[key] = isSingular ? { enabled: false, fields: {} } : { enabled: false, instances: [] };
+      return;
+    }
 
     if (isSingular) {
       const fieldsDiv = payloadsContainer.querySelector(`.payload-fields[data-payload-key="${key}"]`);
@@ -439,13 +460,14 @@ async function openEditProfile(filename) {
 
   renderTopLevelFields(res.data.top_level);
   applyEnrollTemplateRemovalLock(filename);
-  renderPayloadsSection(res.data.payloads);
+  renderPayloadsSection(res.data.payloads, filename);
 }
 
 async function validateProfile() {
   const formData = collectFormData();
   const res = await apiFetchJSON("/api/profiles/validate", "POST", {
     ...formData, unmanaged_payloads: currentUnmanagedPayloads,
+    filename: currentFilename || document.getElementById("profile-filename").value.trim(),
   });
   if (res.ok && res.data.valid) {
     renderWarnings(res.data.warnings, null);

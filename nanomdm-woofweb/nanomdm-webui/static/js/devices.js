@@ -162,9 +162,12 @@ function renderRow(row) {
     <td style="font-size:12px;">${escapeHtml(row.last_seen_at || "")}</td>
     <td style="font-family: var(--mono); font-size:10px; word-break:break-all;">${escapeHtml(row.enrollment_id)}</td>
     <td>
-      <button class="secondary send-command-btn" type="button">命令</button>
-      <button class="secondary history-btn" type="button" style="margin-top:4px;">紀錄</button>
-      <button class="secondary sync-one-btn" type="button" style="margin-top:4px;" data-serial="${escapeHtml(row.serial_number)}" data-eid="${escapeHtml(row.enrollment_id)}">同步</button>
+      <div class="row-actions">
+        <button class="secondary row-action-btn send-command-btn" type="button">命令</button>
+        <button class="secondary row-action-btn app-manager-btn" type="button">APP</button>
+        <button class="secondary row-action-btn history-btn" type="button">紀錄</button>
+        <button class="secondary row-action-btn sync-one-btn" type="button" data-serial="${escapeHtml(row.serial_number)}" data-eid="${escapeHtml(row.enrollment_id)}">同步</button>
+      </div>
     </td>
   `;
   return tr;
@@ -593,8 +596,8 @@ function formatDownloadSize(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-function renderLiveInfoSection(deviceInfoData, osUpdatesData, enrollmentId, installedAppsData) {
-  if ((!deviceInfoData || !deviceInfoData.found) && (!osUpdatesData || !osUpdatesData.found) && (!installedAppsData || !installedAppsData.found)) {
+function renderLiveInfoSection(deviceInfoData, osUpdatesData, enrollmentId) {
+  if ((!deviceInfoData || !deviceInfoData.found) && (!osUpdatesData || !osUpdatesData.found)) {
     return `
       <p style="color:#9ca3af; font-size:13px;">
         目前沒有任何裝置回報過的即時資訊(電量、系統版本、可更新版本等)。按下方「重新查詢」送出 MDM 查詢,
@@ -633,46 +636,12 @@ function renderLiveInfoSection(deviceInfoData, osUpdatesData, enrollmentId, inst
   const updatedAtParts = [];
   if (deviceInfoData && deviceInfoData.found) updatedAtParts.push(`裝置資訊: ${deviceInfoData.result_updated_at}`);
   if (osUpdatesData && osUpdatesData.found) updatedAtParts.push(`可更新版本: ${osUpdatesData.result_updated_at}`);
-  if (installedAppsData && installedAppsData.found) updatedAtParts.push(`已安裝App: ${installedAppsData.result_updated_at}`);
-
-  // 已安裝App版本比對結果:HasUpdateAvailable是裝置自己判斷的結果(比對目前安裝版本
-  // 跟App Store上的最新版本),不是我們自己額外做比對,可靠度較高
-  let installedAppsHtml = "";
-  if (installedAppsData && installedAppsData.found && Array.isArray(installedAppsData.data) && installedAppsData.data.length > 0) {
-    const appRows = installedAppsData.data
-      .map((app) => {
-        const hasUpdate = app.HasUpdateAvailable === true;
-        const statusBadge = hasUpdate
-          ? `<span class="badge warn">有更新可用</span>`
-          : `<span class="badge ok">已是最新版本</span>`;
-        return `<tr>
-          <td>${escapeHtml(app.Name || "")}</td>
-          <td style="font-family: var(--mono); font-size:11px;">${escapeHtml(app.Identifier || "")}</td>
-          <td>${escapeHtml(app.ShortVersion || app.Version || "")}</td>
-          <td>${statusBadge}</td>
-        </tr>`;
-      })
-      .join("");
-    installedAppsHtml = `
-      <h4 style="margin:14px 0 6px;">已安裝 App 版本比對</h4>
-      <table class="kv-table">
-        <thead><tr><th>App 名稱</th><th>Bundle ID</th><th>已安裝版本</th><th>更新狀態</th></tr></thead>
-        <tbody>${appRows}</tbody>
-      </table>
-    `;
-  } else if (installedAppsData && installedAppsData.found) {
-    installedAppsHtml = `
-      <h4 style="margin:14px 0 6px;">已安裝 App 版本比對</h4>
-      <p style="color:#9ca3af; font-size:13px;">查無受管理的 App 資料(這台裝置目前可能沒有透過群組指派任何 App)。</p>
-    `;
-  }
 
   return `
     <table class="kv-table">${rowsHtml}</table>
     <p style="color:#9ca3af; font-size:12px; margin-top:8px;">
       資料更新時間: ${escapeHtml(updatedAtParts.join(" ・ ") || "-")}(來自裝置最近一次回報的結果,不是即時抓取)
     </p>
-    ${installedAppsHtml}
   `;
 }
 
@@ -710,11 +679,422 @@ async function requeryLiveInfo(enrollmentId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 裝置詳細資訊:已綁定 VPP 授權的 App(向 Apple 即時查詢,圖示由 /api/app-icon/<adamId> 提供)
+// ---------------------------------------------------------------------------
+function deviceAppIconHtml(row) {
+  let path = "";
+  if (row.adam_id) path = "/api/app-icon/" + encodeURIComponent(row.adam_id);
+  else if (row.bundle_id) path = "/api/app-icon-by-bundle/" + encodeURIComponent(row.bundle_id);
+  if (!path) return `<span class="app-icon app-icon-placeholder"></span>`;
+  return `<img class="app-icon" src="${escapeHtml(apiUrl(path))}" alt="" loading="lazy">`;
+}
+
+const DEVICE_APP_NOTE_STYLE = {
+  group: "color:#1c7c3f;",
+  single: "color:#b45309;",
+  notInstalled: "color:#6b7280;",
+  self: "color:#2c4f96;",
+  builtin: "color:#9ca3af;",
+  latest: "color:#1c7c3f;",
+  outdated: "color:#b42318;",
+};
+
+function deviceAppNotes(r) {
+  const notes = [];
+  if (r.source === "group") {
+    notes.push(["群組綁定", "group"]);
+    if (r.installed === false) notes.push(["尚未安裝", "notInstalled"]);
+  } else if (r.source === "single") {
+    if (r.installed === false) {
+      notes.push(["非群組綁定", "single"]);
+      notes.push(["尚未安裝", "notInstalled"]);
+    } else {
+      notes.push(["單獨派送", "single"]);
+    }
+  } else if (r.source === "self") {
+    notes.push(["自行安裝", "self"]);
+  } else if (r.source === "builtin") {
+    notes.push(["內建APP", "builtin"]);
+  }
+  if (r.update === "latest") notes.push(["最新", "latest"]);
+  if (r.update === "outdated") notes.push(["待更新", "outdated"]);
+  return notes.map(([text, key]) => `<span style="font-weight:400; margin-left:4px; ${DEVICE_APP_NOTE_STYLE[key]}">(${text})</span>`).join("");
+}
+
+let deviceAppsState = null; // { serial, enrollmentId, data }
+
+// App 清單排序:已安裝的 App 在前、尚未安裝的在後;同一區內英文(含數字開頭)依字母順序在前,中文依筆畫順序在後。
+// 筆畫排序用瀏覽器內建的 ICU 定序(zh-Hant 的 stroke 定序),不需要另外的筆畫資料表。
+const APP_NAME_COLLATOR = new Intl.Collator("zh-Hant-TW-u-co-stroke", { sensitivity: "base", numeric: true });
+
+function appSortName(r) {
+  return (r.name || r.bundle_id || "").trim();
+}
+
+function compareAppNames(a, b) {
+  // installed 為 true 才算已安裝;false(未安裝)與 null(還沒有已安裝清單可判斷)都排在後面
+  const ia = a.installed === true ? 0 : 1;
+  const ib = b.installed === true ? 0 : 1;
+  if (ia !== ib) return ia - ib;
+  const na = appSortName(a);
+  const nb = appSortName(b);
+  const ga = /^[A-Za-z0-9]/.test(na) ? 0 : 1;
+  const gb = /^[A-Za-z0-9]/.test(nb) ? 0 : 1;
+  if (ga !== gb) return ga - gb;
+  return APP_NAME_COLLATOR.compare(na, nb) || (a.bundle_id || "").localeCompare(b.bundle_id || "");
+}
+
+function renderDeviceApps() {
+  const container = document.getElementById("details-vpp-container");
+  if (!container || !deviceAppsState) return;
+  const d = deviceAppsState.data;
+  const hideBuiltin = document.getElementById("details-hide-builtin").checked;
+  const all = (d.rows || []).slice().sort(compareAppNames);
+  const rows = hideBuiltin ? all.filter((r) => r.source !== "builtin") : all;
+
+  const notes = [];
+  if (d.vpp_error) notes.push(`<span style="color:#d64545;">${escapeHtml(d.vpp_error)}(以下只列出裝置回報的已安裝 App)</span>`);
+  if (!deviceAppsState.enrollmentId) {
+    notes.push("這台裝置還沒有完成 MDM 註冊,無法取得已安裝的 App。");
+  } else if (!d.installed_known || d.installed_managed_only) {
+    notes.push("目前還沒有包含所有已安裝 App 的回報資料,請按下方「裝置即時資訊」的「重新查詢」,等裝置回報後再打開這個視窗。");
+  }
+  const notesHtml = notes.map((n) => `<p style="color:#9ca3af; font-size:12px; margin:4px 0 0;">${n}</p>`).join("");
+
+  if (rows.length === 0) {
+    container.innerHTML = `<p style="color:#9ca3af; font-size:13px;">${all.length ? "目前只有內建 APP(已隱藏)。" : "這台裝置目前沒有任何 App 授權或已安裝的 App。"}</p>${notesHtml}`;
+    return;
+  }
+
+  const items = rows.map((r) => {
+    const meta = [r.bundle_id || "-", r.adam_id ? `Adam ID ${r.adam_id}` : "", r.version ? `v${r.version}` : ""].filter(Boolean).join(" · ");
+    return `
+    <div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border-color);">
+      ${deviceAppIconHtml(r)}
+      <div style="min-width:0; flex:1;">
+        <div style="font-size:13px; font-weight:600;">${escapeHtml(r.name || r.bundle_id || "(未知 App)")}${deviceAppNotes(r)}</div>
+        <div style="font-family:var(--mono); font-size:11px; color:#9ca3af; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(meta)}</div>
+      </div>
+    </div>`;
+  }).join("");
+
+  const count = (src) => all.filter((r) => r.source === src).length;
+  const summary = `群組綁定 ${count("group")} 個、其他 VPP 授權 ${count("single")} 個、自行安裝 ${count("self")} 個、內建 APP ${count("builtin")} 個`;
+  const updated = d.installed_updated_at ? `已安裝清單更新時間:${escapeHtml(String(d.installed_updated_at))}。` : "";
+  container.innerHTML = `
+    <div>${items}</div>
+    <p style="color:#9ca3af; font-size:12px; margin-top:8px;">${summary}。VPP 授權是即時向 Apple 查詢;安裝狀態與(最新)(待更新)來自裝置最近一次回報。${updated}</p>
+    ${notesHtml}
+  `;
+  container.querySelectorAll("img.app-icon").forEach((img) => {
+    img.addEventListener("error", () => {
+      const ph = document.createElement("span");
+      ph.className = "app-icon app-icon-placeholder";
+      img.replaceWith(ph);
+    }, { once: true });
+  });
+}
+
+function syncRevokeButton() {
+  const btn = document.getElementById("details-revoke-unused-btn");
+  const hint = document.getElementById("details-revoke-hint");
+  if (!btn || !deviceAppsState) return;
+  const n = deviceAppsState.data.revocable_count || 0;
+  btn.disabled = n === 0;
+  btn.textContent = n ? `撤銷未使用授權(${n})` : "撤銷未使用授權";
+  hint.textContent = n ? "撤銷非群組綁定、而且尚未安裝的 App 授權" : (deviceAppsState.data.installed_known ? "沒有需要撤銷的授權" : "需要裝置回報已安裝清單後才能判斷");
+}
+
+async function loadDeviceVppAssignments(serial, enrollmentId) {
+  const container = document.getElementById("details-vpp-container");
+  const q = enrollmentId ? `?enrollment_id=${encodeURIComponent(enrollmentId)}` : "";
+  const res = await apiFetch(`/api/devices/vpp-assignments/${encodeURIComponent(serial)}${q}`);
+  if (!container.isConnected) return; // 視窗已經關掉或換成別台裝置
+  if (!res.ok || !res.data.ok) {
+    container.innerHTML = `<p style="color:#d64545; font-size:13px;">取得失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    return;
+  }
+  deviceAppsState = { serial, enrollmentId, data: res.data };
+  renderDeviceApps();
+  syncRevokeButton();
+}
+
+async function revokeUnusedLicenses() {
+  if (!deviceAppsState) return;
+  const { serial, enrollmentId, data } = deviceAppsState;
+  const targets = (data.rows || []).filter((r) => r.source === "single" && r.installed === false);
+  const names = targets.map((r) => `・${r.name || r.adam_id}`).join("\n");
+  if (!confirm(`要撤銷這台裝置以下 ${targets.length} 個 App 的授權嗎?\n\n${names}\n\n這些 App 不是目前群組綁定的,而且裝置上沒有安裝。撤銷後授權會釋放回學校的 VPP 帳號。`)) return;
+
+  const btn = document.getElementById("details-revoke-unused-btn");
+  const box = document.getElementById("details-revoke-result");
+  btn.disabled = true;
+  btn.textContent = "撤銷中...";
+  const res = await apiFetchJSON("/api/devices/vpp-revoke-unused", "POST", { serial_number: serial, enrollment_id: enrollmentId });
+  if (!box.isConnected) return;
+  if (!res.ok || !res.data.ok) {
+    box.innerHTML = `<p style="color:#d64545; font-size:13px;">撤銷失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    syncRevokeButton();
+    return;
+  }
+  const results = res.data.results || [];
+  box.innerHTML = results.length
+    ? results.map((r) => `<div style="font-size:12px; margin-top:4px; ${r.ok ? "color:#1c7c3f;" : "color:#b42318;"}">${r.ok ? "✅" : "❌"} ${escapeHtml(r.name)}${r.ok ? " 已撤銷" : ":" + escapeHtml(r.message)}</div>`).join("")
+    : `<p style="color:#9ca3af; font-size:12px;">${escapeHtml(res.data.message || "沒有需要撤銷的授權")}</p>`;
+  document.getElementById("details-vpp-container").innerHTML = "重新載入中...";
+  await loadDeviceVppAssignments(serial, enrollmentId);
+}
+
+// ---------------------------------------------------------------------------
+// APP 管理(每列的「APP」按鈕):勾選安裝 / 取消勾選移除並撤銷授權
+// ---------------------------------------------------------------------------
+let appManagerState = null; // { serial, enrollmentId, deviceName, data }
+
+function appManagerRowHtml(r, withCheckbox) {
+  const meta = [r.bundle_id || "-", r.adam_id ? `Adam ID ${r.adam_id}` : "", r.version ? `v${r.version}` : "",
+    withCheckbox && !r.licensed ? `剩餘授權 ${r.available}` : ""].filter(Boolean).join(" · ");
+  let notes = "";
+  if (withCheckbox) {
+    const parts = [];
+    if (r.installed && r.licensed) parts.push([r.in_group ? "群組綁定" : "單獨派送", r.in_group ? "group" : "single"]);
+    else if (r.installed && !r.licensed) parts.push(["自行安裝", "self"]);
+    else if (r.licensed) {
+      parts.push([r.in_group ? "群組綁定" : "非群組綁定", r.in_group ? "group" : "single"]);
+      parts.push(["尚未安裝", "notInstalled"]);
+    } else if (r.in_group) parts.push(["群組綁定", "group"]);
+    if (r.update === "latest") parts.push(["最新", "latest"]);
+    if (r.update === "outdated") parts.push(["待更新", "outdated"]);
+    notes = parts.map(([t, k]) => `<span style="font-weight:400; margin-left:4px; ${DEVICE_APP_NOTE_STYLE[k]}">(${t})</span>`).join("");
+  } else {
+    notes = `<span style="font-weight:400; margin-left:4px; ${DEVICE_APP_NOTE_STYLE.self}">(自行安裝)</span>`;
+    if (r.update === "latest") notes += `<span style="font-weight:400; margin-left:4px; ${DEVICE_APP_NOTE_STYLE.latest}">(最新)</span>`;
+    if (r.update === "outdated") notes += `<span style="font-weight:400; margin-left:4px; ${DEVICE_APP_NOTE_STYLE.outdated}">(待更新)</span>`;
+  }
+  // 沒有授權、也沒有剩餘授權可以指派的 App 無法安裝
+  const noLicenseLeft = withCheckbox && !r.checked && !r.licensed && r.available <= 0;
+  const cb = withCheckbox
+    ? `<input type="checkbox" class="app-manager-cb" data-adam-id="${escapeHtml(r.adam_id)}" ${r.checked ? "checked" : ""} ${noLicenseLeft ? 'disabled title="學校 VPP 帳號已經沒有剩餘授權"' : ""} style="flex-shrink:0;">`
+    : "";
+  return `
+    <label style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border-color); ${withCheckbox ? (noLicenseLeft ? "opacity:.55;" : "cursor:pointer;") : ""}">
+      ${cb}
+      ${deviceAppIconHtml(r)}
+      <div style="min-width:0; flex:1;">
+        <div style="font-size:13px; font-weight:600;">${escapeHtml(r.name || r.bundle_id || "(未知 App)")}${notes}</div>
+        <div style="font-family:var(--mono); font-size:11px; color:#9ca3af; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(meta)}</div>
+      </div>
+    </label>`;
+}
+
+function attachIconFallback(container) {
+  container.querySelectorAll("img.app-icon").forEach((img) => {
+    img.addEventListener("error", () => {
+      const ph = document.createElement("span");
+      ph.className = "app-icon app-icon-placeholder";
+      img.replaceWith(ph);
+    }, { once: true });
+  });
+}
+
+function getAppManagerChanges() {
+  if (!appManagerState) return { install: [], remove: [] };
+  const byId = Object.fromEntries(appManagerState.data.catalog.map((r) => [r.adam_id, r]));
+  const install = [];
+  const remove = [];
+  document.querySelectorAll("#app-manager-catalog .app-manager-cb").forEach((cb) => {
+    const r = byId[cb.dataset.adamId];
+    if (!r) return;
+    if (cb.checked && !r.checked) install.push(r);
+    if (!cb.checked && r.checked) remove.push(r);
+  });
+  return { install, remove };
+}
+
+function syncAppManagerChanges() {
+  const { install, remove } = getAppManagerChanges();
+  const n = install.length + remove.length;
+  document.getElementById("app-manager-save-btn").disabled = n === 0;
+  document.getElementById("app-manager-change-count").textContent = n ? `待儲存:安裝 ${install.length} 個、移除 ${remove.length} 個` : "";
+}
+
+async function openAppManager(serial, enrollmentId) {
+  const row = allDeviceRows.find((d) => d.serial_number === serial) || {};
+  document.getElementById("app-manager-title").textContent = `APP 管理 - ${row.device_name || serial}`;
+  document.getElementById("app-manager-notice").innerHTML = "";
+  document.getElementById("app-manager-result").innerHTML = "";
+  document.getElementById("app-manager-catalog").innerHTML = "載入中...";
+  document.getElementById("app-manager-self").innerHTML = "載入中...";
+  document.getElementById("app-manager-change-count").textContent = "";
+  document.getElementById("app-manager-save-btn").disabled = true;
+  appManagerState = null;
+  openModal("app-manager-modal");
+  await loadAppManager(serial, enrollmentId, row.device_name || "");
+}
+
+async function loadAppManager(serial, enrollmentId, deviceName) {
+  const q = enrollmentId ? `?enrollment_id=${encodeURIComponent(enrollmentId)}` : "";
+  const res = await apiFetch(`/api/devices/app-manager/${encodeURIComponent(serial)}${q}`);
+  const catalogBox = document.getElementById("app-manager-catalog");
+  const selfBox = document.getElementById("app-manager-self");
+  const notice = document.getElementById("app-manager-notice");
+  if (!res.ok || !res.data.ok) {
+    catalogBox.innerHTML = `<p style="color:#d64545; font-size:13px;">取得失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    selfBox.innerHTML = "";
+    return;
+  }
+  const d = res.data;
+  appManagerState = { serial, enrollmentId, deviceName, data: d };
+
+  const notes = [];
+  if (!enrollmentId) notes.push(["error", "這台裝置還沒有完成 MDM 註冊,無法安裝或移除 App。"]);
+  if (d.vpp_error) notes.push(["error", `${d.vpp_error}。無法確認授權狀態,請先排除問題再變更。`]);
+  if (d.vpp_cache_missing) notes.push(["warn", "還沒有 ASM 軟體資訊資料,請先到「ASM 軟體資訊」頁同步一次。"]);
+  if (enrollmentId && !d.installed_known) {
+    notes.push(["warn", "還沒有這台裝置的完整已安裝清單,目前的勾選狀態是依「有沒有授權」判斷,可能不準確。請先按清單上的「同步」,等裝置回報後再開啟。"]);
+  }
+  notice.innerHTML = notes.map(([type, text]) =>
+    `<div style="padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:6px; ${type === "error" ? "background:#fdeaea; color:#b42318;" : "background:#fdeee0; color:#b45309;"}">${escapeHtml(text)}</div>`
+  ).join("");
+
+  const locked = !enrollmentId || !!d.vpp_error;
+  d.catalog.sort(compareAppNames);
+  d.self_installed.sort(compareAppNames);
+  catalogBox.innerHTML = d.catalog.length
+    ? d.catalog.map((r) => appManagerRowHtml(r, true)).join("")
+    : `<p style="color:#9ca3af; font-size:13px;">學校的 VPP 帳號目前沒有任何 App。</p>`;
+  if (locked) catalogBox.querySelectorAll(".app-manager-cb").forEach((cb) => { cb.disabled = true; });
+  selfBox.innerHTML = d.self_installed.length
+    ? d.self_installed.map((r) => appManagerRowHtml(r, false)).join("")
+    : `<p style="color:#9ca3af; font-size:13px;">${d.installed_known ? "沒有使用者自行安裝的 App。" : "還沒有已安裝清單,無法列出。"}</p>`;
+  attachIconFallback(catalogBox);
+  attachIconFallback(selfBox);
+  syncAppManagerChanges();
+}
+
+// 重新查詢:送出 InstalledApplicationList,等裝置回報新的已安裝清單後重新載入視窗。
+// 輪詢的是只查資料庫的 latest-info(不會每次都打 Apple 的 VPP API),拿到新結果才重新載入整個清單。
+const APP_MANAGER_REQUERY_TIMEOUT_MS = 60000;
+const APP_MANAGER_REQUERY_INTERVAL_MS = 3000;
+
+async function requeryAppManager() {
+  if (!appManagerState) return;
+  const { serial, enrollmentId, deviceName } = appManagerState;
+  const box = document.getElementById("app-manager-result");
+  if (!enrollmentId) {
+    box.innerHTML = `<p style="color:#d64545; font-size:13px;">這台裝置還沒有完成 MDM 註冊,無法查詢。</p>`;
+    return;
+  }
+  const { install, remove } = getAppManagerChanges();
+  if ((install.length || remove.length) && !confirm("目前有尚未儲存的勾選變更,重新查詢後會清除。要繼續嗎?")) return;
+
+  const btn = document.getElementById("app-manager-requery-btn");
+  const saveBtn = document.getElementById("app-manager-save-btn");
+  btn.disabled = true;
+  saveBtn.disabled = true;
+  btn.textContent = "查詢中...";
+  const status = (text, color) => { box.innerHTML = `<p style="font-size:12px; color:${color || "#6b7280"};">${escapeHtml(text)}</p>`; };
+
+  const latestUrl = `/api/devices/latest-info/${encodeURIComponent(enrollmentId)}?type=InstalledApplicationList`;
+  const before = await apiFetch(latestUrl);
+  const beforeAt = before.ok && before.data && before.data.found ? before.data.result_updated_at : null;
+
+  const sendRes = await apiFetchJSON("/api/devices/command", "POST", {
+    enrollment_id: enrollmentId, request_type: "InstalledApplicationList", params: {},
+  });
+  if (!sendRes.ok) {
+    status(`送出查詢失敗: ${(sendRes.data && sendRes.data.message) || "未知錯誤"}`, "#d64545");
+    btn.disabled = false;
+    btn.textContent = "重新查詢";
+    syncAppManagerChanges();
+    return;
+  }
+
+  const started = Date.now();
+  let updated = false;
+  while (Date.now() - started < APP_MANAGER_REQUERY_TIMEOUT_MS) {
+    status(`已送出查詢,等待裝置回報...(${Math.round((Date.now() - started) / 1000)} 秒)`);
+    await new Promise((r) => setTimeout(r, APP_MANAGER_REQUERY_INTERVAL_MS));
+    if (!document.getElementById("app-manager-modal") || document.getElementById("app-manager-modal").classList.contains("hidden")) break;
+    if (!appManagerState || appManagerState.serial !== serial) break; // 視窗已經換成別台裝置
+    const now = await apiFetch(latestUrl);
+    const nowAt = now.ok && now.data && now.data.found ? now.data.result_updated_at : null;
+    if (nowAt && nowAt !== beforeAt) { updated = true; break; }
+  }
+
+  btn.disabled = false;
+  btn.textContent = "重新查詢";
+  if (!appManagerState || appManagerState.serial !== serial) return;
+  if (updated) {
+    await loadAppManager(serial, enrollmentId, deviceName);
+    status("已更新為裝置最新回報的 App 狀態。", "#1c7c3f");
+  } else {
+    syncAppManagerChanges();
+    status("裝置在 60 秒內沒有回報(可能離線或休眠中)。查詢指令已排入佇列,裝置連線後會自動回報,稍後再開啟這個視窗即可看到最新狀態。", "#b45309");
+  }
+}
+
+async function saveAppManager() {
+  if (!appManagerState) return;
+  const { install, remove } = getAppManagerChanges();
+  if (!install.length && !remove.length) return;
+
+  const label = (r) => `・${r.name || r.adam_id}${r.in_group ? "(群組綁定)" : ""}`;
+  let msg = `即將對「${appManagerState.deviceName || appManagerState.serial}」進行以下變更:\n`;
+  if (install.length) msg += `\n安裝(指派授權並安裝)${install.length} 個:\n${install.map(label).join("\n")}\n`;
+  if (remove.length) msg += `\n移除(從裝置移除並撤銷授權)${remove.length} 個:\n${remove.map(label).join("\n")}\n`;
+  if (remove.some((r) => r.in_group)) msg += `\n注意:群組綁定的 App 被移除後,之後重新註冊或變更群組時會再自動安裝回來。\n`;
+  msg += `\n確定要執行嗎?`;
+  if (!confirm(msg)) return;
+
+  const btn = document.getElementById("app-manager-save-btn");
+  const box = document.getElementById("app-manager-result");
+  btn.disabled = true;
+  btn.textContent = "處理中...";
+  box.innerHTML = "";
+  const res = await apiFetchJSON("/api/devices/app-manager/apply", "POST", {
+    serial_number: appManagerState.serial,
+    enrollment_id: appManagerState.enrollmentId,
+    install: install.map((r) => r.adam_id),
+    remove: remove.map((r) => r.adam_id),
+  });
+  btn.textContent = "儲存";
+  if (!res.ok || !res.data.ok) {
+    box.innerHTML = `<p style="color:#d64545; font-size:13px;">執行失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    syncAppManagerChanges();
+    return;
+  }
+  const actionLabel = { install: "安裝", remove: "移除" };
+  const results = res.data.results || [];
+  box.innerHTML = results.map((r) =>
+    `<div style="font-size:12px; margin-top:4px; ${r.ok ? "color:#1c7c3f;" : "color:#b42318;"}">${r.ok ? "✅" : "❌"} ${actionLabel[r.action]} ${escapeHtml(r.name)}${r.ok ? " 已送出" : ":" + escapeHtml(r.message)}</div>`
+  ).join("") + `<p style="color:#9ca3af; font-size:12px; margin-top:6px;">指令已送出,裝置連線後才會實際安裝或移除;完成後重新開啟這個視窗,狀態才會更新。</p>`;
+
+  // 已成功送出的項目,把基準狀態更新成新的勾選狀態,避免再按一次儲存重複送出
+  const okIds = new Set(results.filter((r) => r.ok).map((r) => `${r.action}:${r.adam_id}`));
+  appManagerState.data.catalog.forEach((r) => {
+    if (okIds.has(`install:${r.adam_id}`)) { r.checked = true; r.licensed = true; }
+    if (okIds.has(`remove:${r.adam_id}`)) { r.checked = false; r.licensed = false; }
+  });
+  syncAppManagerChanges();
+}
+
 async function openDeviceDetails(serial, enrollmentId) {
   document.getElementById("details-modal-title").textContent = `裝置詳細資訊 - ${serial}`;
   document.getElementById("details-modal-body").innerHTML = `
     <h3 style="margin-top:0;">ASM / DEP 靜態資訊</h3>
     <div id="details-static-container">載入中...</div>
+
+    <h3 style="margin-top:20px; border-top:1px solid var(--border-color); padding-top:14px;">App 清單</h3>
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:8px;">
+      <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+        <input type="checkbox" id="details-hide-builtin" checked> 隱藏內建 APP
+      </label>
+      <button id="details-revoke-unused-btn" class="danger" type="button" style="font-size:12px;" disabled>撤銷未使用授權</button>
+      <span id="details-revoke-hint" style="font-size:12px; color:#9ca3af;"></span>
+    </div>
+    <div id="details-vpp-container">載入中...</div>
+    <div id="details-revoke-result"></div>
 
     <h3 style="margin-top:20px; border-top:1px solid var(--border-color); padding-top:14px;">
       裝置即時資訊
@@ -736,12 +1116,15 @@ async function openDeviceDetails(serial, enrollmentId) {
 
   document.getElementById("offboard-device-btn").addEventListener("click", () => startDeviceOffboard(serial, enrollmentId));
   document.getElementById("details-requery-btn").addEventListener("click", () => requeryLiveInfo(enrollmentId));
+  deviceAppsState = null;
+  document.getElementById("details-hide-builtin").addEventListener("change", renderDeviceApps);
+  document.getElementById("details-revoke-unused-btn").addEventListener("click", revokeUnusedLicenses);
+  loadDeviceVppAssignments(serial, enrollmentId); // 不等待,跟下面的查詢同時進行
 
-  const [staticRes, liveRes, osUpdatesRes, installedAppsRes] = await Promise.all([
+  const [staticRes, liveRes, osUpdatesRes] = await Promise.all([
     apiFetch(`/api/devices/details/${encodeURIComponent(serial)}`),
     enrollmentId ? apiFetch(`/api/devices/latest-info/${encodeURIComponent(enrollmentId)}?type=DeviceInformation`) : Promise.resolve({ ok: true, data: { found: false } }),
     enrollmentId ? apiFetch(`/api/devices/latest-info/${encodeURIComponent(enrollmentId)}?type=AvailableOSUpdates`) : Promise.resolve({ ok: true, data: { found: false } }),
-    enrollmentId ? apiFetch(`/api/devices/latest-info/${encodeURIComponent(enrollmentId)}?type=InstalledApplicationList`) : Promise.resolve({ ok: true, data: { found: false } }),
   ]);
 
   const staticContainer = document.getElementById("details-static-container");
@@ -769,7 +1152,6 @@ async function openDeviceDetails(serial, enrollmentId) {
       liveRes.ok ? liveRes.data : null,
       osUpdatesRes.ok ? osUpdatesRes.data : null,
       enrollmentId,
-      installedAppsRes.ok ? installedAppsRes.data : null,
     );
   }
 }
@@ -945,6 +1327,11 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("refresh-devices-btn").addEventListener("click", loadDevices);
   document.getElementById("sync-status-btn").addEventListener("click", syncDevicesStatus);
   document.getElementById("command-send-btn").addEventListener("click", sendCommand);
+  document.getElementById("app-manager-save-btn").addEventListener("click", saveAppManager);
+  document.getElementById("app-manager-requery-btn").addEventListener("click", requeryAppManager);
+  document.getElementById("app-manager-catalog").addEventListener("change", (e) => {
+    if (e.target.classList.contains("app-manager-cb")) syncAppManagerChanges();
+  });
   document.getElementById("devices-filter-group").addEventListener("change", applyDevicesFilters);
   document.getElementById("devices-filter-search").addEventListener("input", applyDevicesFilters);
   document.getElementById("devices-filter-os-status").addEventListener("change", applyDevicesFilters);
@@ -980,6 +1367,8 @@ document.addEventListener("DOMContentLoaded", () => {
       openDeviceDetails(tr.dataset.serial, tr.dataset.enrollmentId);
     } else if (e.target.classList.contains("send-command-btn")) {
       openCommandModal(tr.dataset.enrollmentId, tr.dataset.serial);
+    } else if (e.target.classList.contains("app-manager-btn")) {
+      openAppManager(tr.dataset.serial, tr.dataset.enrollmentId);
     } else if (e.target.classList.contains("history-btn")) {
       openCommandHistory(tr.dataset.enrollmentId, tr.dataset.serial);
     } else if (e.target.classList.contains("os-action-btn")) {

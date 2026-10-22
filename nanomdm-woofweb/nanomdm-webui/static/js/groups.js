@@ -850,81 +850,204 @@ async function sendCommand() {
 }
 
 // ---------------------------------------------------------------------------
-// 群組軟體清單
+// 群組 APP 管理:勾選 = 群組綁定的 App,儲存後批次對群組裡每一台 iPad 安裝/移除並撤銷授權
 // ---------------------------------------------------------------------------
+let groupAppsState = null; // { group, data }
+let groupAppsRunning = false;
+
+const GROUP_APP_NAME_COLLATOR = new Intl.Collator("zh-Hant-TW-u-co-stroke", { sensitivity: "base", numeric: true });
+
+// 排序:群組綁定(已勾選)的 App 置頂,接著是尚未綁定的;同一區內英文依字母、中文依筆畫。
+// 依「目前儲存的綁定狀態」排序,使用者勾選/取消勾選時清單不會跟著跳動,儲存後重新載入才會重排。
+function compareGroupApps(a, b) {
+  const ia = a.bound ? 0 : 1;
+  const ib = b.bound ? 0 : 1;
+  if (ia !== ib) return ia - ib;
+  const na = (a.name || a.bundle_id || "").trim();
+  const nb = (b.name || b.bundle_id || "").trim();
+  const ga = /^[A-Za-z0-9]/.test(na) ? 0 : 1;
+  const gb = /^[A-Za-z0-9]/.test(nb) ? 0 : 1;
+  if (ga !== gb) return ga - gb;
+  return GROUP_APP_NAME_COLLATOR.compare(na, nb);
+}
+
+function groupAppIconHtml(adamId) {
+  if (!adamId) return `<span class="app-icon app-icon-placeholder"></span>`;
+  return `<img class="app-icon" src="${escapeHtml(apiUrl("/api/app-icon/" + encodeURIComponent(adamId)))}" alt="" loading="lazy">`;
+}
+
+function groupAppRowHtml(r, deviceCount, reportedCount) {
+  const notes = [];
+  if (r.bound) notes.push(["群組綁定", "color:#1c7c3f;"]);
+  if (reportedCount > 0) {
+    notes.push([`已安裝 ${r.installed_count}/${reportedCount} 台`, r.installed_count ? "color:#2c4f96;" : "color:#9ca3af;"]);
+    if (r.installed_count) {
+      notes.push(r.outdated_count ? [`待更新 ${r.outdated_count} 台`, "color:#b42318;"] : ["最新", "color:#1c7c3f;"]);
+    }
+  }
+  const noteHtml = notes.map(([t, st]) => `<span style="font-weight:400; margin-left:4px; ${st}">(${t})</span>`).join("");
+  const meta = [r.bundle_id || "-", `Adam ID ${r.adam_id}`, `剩餘授權 ${r.available}/${r.total}`].join(" · ");
+  return `
+    <label style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border-color); cursor:pointer;">
+      <input type="checkbox" class="group-app-cb" data-adam-id="${escapeHtml(r.adam_id)}" ${r.bound ? "checked" : ""} style="flex-shrink:0;">
+      ${groupAppIconHtml(r.adam_id)}
+      <div style="min-width:0; flex:1;">
+        <div style="font-size:13px; font-weight:600;">${escapeHtml(r.name || r.bundle_id || r.adam_id)}${noteHtml}</div>
+        <div style="font-family:var(--mono); font-size:11px; color:#9ca3af; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(meta)}</div>
+      </div>
+    </label>`;
+}
+
+function getGroupAppChanges() {
+  if (!groupAppsState) return { install: [], remove: [] };
+  const byId = Object.fromEntries(groupAppsState.data.catalog.map((r) => [r.adam_id, r]));
+  const install = [];
+  const remove = [];
+  document.querySelectorAll("#group-apps-list .group-app-cb").forEach((cb) => {
+    const r = byId[cb.dataset.adamId];
+    if (!r) return;
+    if (cb.checked && !r.bound) install.push(r);
+    if (!cb.checked && r.bound) remove.push(r);
+  });
+  return { install, remove };
+}
+
+function syncGroupAppChanges() {
+  const { install, remove } = getGroupAppChanges();
+  const n = install.length + remove.length;
+  document.getElementById("group-apps-save-btn").disabled = n === 0 || groupAppsRunning;
+  document.getElementById("group-apps-change-count").textContent = n ? `待儲存:安裝 ${install.length} 個、移除 ${remove.length} 個` : "";
+}
+
 async function openGroupAppsModal(groupName) {
+  if (groupAppsRunning) { openModal("group-apps-modal"); return; }
   currentGroupForApps = groupName;
+  groupAppsState = null;
   document.getElementById("group-apps-modal-title").textContent = groupName;
-  const tbody = document.getElementById("group-apps-tbody");
-  tbody.innerHTML = `<tr><td colspan="6">載入中...</td></tr>`;
+  document.getElementById("group-apps-notice").innerHTML = "";
+  document.getElementById("group-apps-progress").innerHTML = "";
+  document.getElementById("group-apps-list").innerHTML = "載入中...";
+  document.getElementById("group-apps-change-count").textContent = "";
+  document.getElementById("group-apps-save-btn").disabled = true;
   openModal("group-apps-modal");
   await refreshGroupApps();
 }
 
+function closeGroupAppsModal() {
+  if (groupAppsRunning && !confirm("批次處理還在進行中,關閉視窗不會中斷處理,但看不到後續進度。要關閉嗎?")) return;
+  closeModal("group-apps-modal");
+}
+
 async function refreshGroupApps() {
-  const tbody = document.getElementById("group-apps-tbody");
-  const addSelect = document.getElementById("group-apps-add-select");
-  const res = await apiFetch(`/api/groups/${encodeURIComponent(currentGroupForApps)}/apps`);
-  if (!res.ok) {
-    tbody.innerHTML = `<tr><td colspan="6" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+  const list = document.getElementById("group-apps-list");
+  const notice = document.getElementById("group-apps-notice");
+  const res = await apiFetch(`/api/groups/${encodeURIComponent(currentGroupForApps)}/app-manager`);
+  if (!res.ok || !res.data.ok) {
+    list.innerHTML = `<p style="color:#d64545; font-size:13px;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
     return;
   }
+  const d = res.data;
+  d.catalog.sort(compareGroupApps);
+  groupAppsState = { group: currentGroupForApps, data: d };
 
-  tbody.innerHTML = "";
-  if (res.data.assigned_apps.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6">這個群組目前沒有綁定任何 App</td></tr>`;
-  } else {
-    res.data.assigned_apps.forEach((app) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td style="font-family: var(--mono);">${escapeHtml(app["Adam ID"])}</td>
-        <td style="font-family: var(--mono);">${escapeHtml(app["Bundle ID"])}</td>
-        <td>${escapeHtml(app["軟體名稱"])}</td>
-        <td>${escapeHtml(String(app["總數量"]))}</td>
-        <td>${escapeHtml(String(app["剩餘量"]))}</td>
-        <td><button class="danger" data-adam-id="${escapeHtml(app["Adam ID"])}" data-action="remove-app" type="button">移除</button></td>
-      `;
-      tbody.appendChild(tr);
-    });
+  const notes = [];
+  if (d.vpp_cache_missing) notes.push(["warn", "還沒有 ASM 軟體資訊資料,請先到「ASM 軟體資訊」頁同步一次。"]);
+  if (d.device_error) notes.push(["error", `查詢群組裝置失敗: ${d.device_error}`]);
+  else if (d.device_count === 0) notes.push(["info", "這個群組目前沒有已註冊的裝置。儲存只會更新群組綁定,之後新註冊的 iPad 會自動安裝。"]);
+  else if (d.reported_count < d.device_count) {
+    notes.push(["info", `群組共 ${d.device_count} 台已註冊的 iPad,其中 ${d.reported_count} 台回報過已安裝清單,「已安裝 N 台」只統計這 ${d.reported_count} 台。`]);
   }
+  const styleOf = { error: "background:#fdeaea; color:#b42318;", warn: "background:#fdeee0; color:#b45309;", info: "background:#eef3fc; color:#2c4f96;" };
+  notice.innerHTML = notes.map(([t, text]) => `<div style="padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:6px; ${styleOf[t]}">${escapeHtml(text)}</div>`).join("");
 
-  addSelect.innerHTML = "";
-  if (res.data.available_to_add.length === 0) {
-    const opt = document.createElement("option");
-    opt.textContent = "(沒有其他可加入的 App)";
-    opt.disabled = true;
-    addSelect.appendChild(opt);
-  } else {
-    res.data.available_to_add.forEach((app) => {
-      const opt = document.createElement("option");
-      opt.value = app["Adam ID"];
-      opt.textContent = `${app["軟體名稱"]} (${app["Bundle ID"]})`;
-      addSelect.appendChild(opt);
-    });
-  }
+  list.innerHTML = d.catalog.length
+    ? d.catalog.map((r) => groupAppRowHtml(r, d.device_count, d.reported_count)).join("")
+    : `<p style="color:#9ca3af; font-size:13px;">學校的 VPP 帳號目前沒有任何 App。</p>`;
+  list.querySelectorAll("img.app-icon").forEach((img) => {
+    img.addEventListener("error", () => {
+      const ph = document.createElement("span");
+      ph.className = "app-icon app-icon-placeholder";
+      img.replaceWith(ph);
+    }, { once: true });
+  });
+  syncGroupAppChanges();
 }
 
-async function addAppToGroup() {
-  const select = document.getElementById("group-apps-add-select");
-  const adamId = select.value;
-  if (!adamId) return;
-  const res = await apiFetchJSON(`/api/groups/${encodeURIComponent(currentGroupForApps)}/apps/add`, "POST", { adam_id: adamId });
-  if (res.ok) {
-    await refreshGroupApps();
-    loadGroups();
-  } else {
-    alert("加入失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+function saveGroupApps() {
+  if (!groupAppsState || groupAppsRunning) return;
+  const { install, remove } = getGroupAppChanges();
+  if (!install.length && !remove.length) return;
+  const d = groupAppsState.data;
+  const deviceCount = d.device_count;
+
+  let msg = `群組「${groupAppsState.group}」即將進行以下變更:\n`;
+  if (install.length) {
+    msg += `\n安裝(指派授權並安裝)${install.length} 個:\n`;
+    msg += install.map((r) => {
+      const short = deviceCount > r.available ? `  ⚠️ 剩餘授權只有 ${r.available} 個,可能不夠 ${deviceCount} 台使用` : "";
+      return `・${r.name || r.adam_id}${short}`;
+    }).join("\n") + "\n";
   }
+  if (remove.length) msg += `\n移除(從裝置移除並撤銷授權)${remove.length} 個:\n${remove.map((r) => `・${r.name || r.adam_id}`).join("\n")}\n`;
+  msg += deviceCount
+    ? `\n即將變動的裝置:群組裡已註冊的 iPad 共 ${deviceCount} 台。\n`
+    : `\n群組裡目前沒有已註冊的 iPad,這次只會更新群組綁定。\n`;
+  msg += `\n確定要執行嗎?`;
+  if (!confirm(msg)) return;
+  runGroupAppsApply(install.map((r) => r.adam_id), remove.map((r) => r.adam_id));
 }
 
-async function removeAppFromGroup(adamId) {
-  const res = await apiFetchJSON(`/api/groups/${encodeURIComponent(currentGroupForApps)}/apps/remove`, "POST", { adam_id: adamId });
-  if (res.ok) {
-    await refreshGroupApps();
-    loadGroups();
-  } else {
-    alert("移除失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-  }
+function runGroupAppsApply(installIds, removeIds) {
+  const box = document.getElementById("group-apps-progress");
+  const saveBtn = document.getElementById("group-apps-save-btn");
+  const group = groupAppsState.group;
+  groupAppsRunning = true;
+  saveBtn.disabled = true;
+  saveBtn.textContent = "處理中...";
+  document.querySelectorAll("#group-apps-list .group-app-cb").forEach((cb) => { cb.disabled = true; });
+  box.innerHTML = "";
+
+  const add = (html, style) => {
+    const div = document.createElement("div");
+    div.style.cssText = style;
+    div.innerHTML = html;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+  };
+  const finish = async () => {
+    groupAppsRunning = false;
+    saveBtn.textContent = "儲存";
+    loadGroups(); // 更新群組一覽上的綁定軟體數量
+    if (currentGroupForApps === group && !document.getElementById("group-apps-modal").classList.contains("hidden")) {
+      await refreshGroupApps();
+    }
+  };
+
+  const q = new URLSearchParams({ install: installIds.join(","), remove: removeIds.join(",") });
+  const es = new EventSource(apiUrl(`/api/groups/${encodeURIComponent(group)}/app-manager/apply-stream?${q.toString()}`));
+  es.onmessage = (event) => {
+    let u;
+    try { u = JSON.parse(event.data); } catch (e) { return; }
+    if (u.error) {
+      add(`❌ ${escapeHtml(u.error)}`, "background:#fdeaea; color:#b42318; padding:8px 12px; border-radius:6px; font-size:12px; margin-top:6px;");
+    } else if (u.done) {
+      const text = u.message || `完成:${u.success_count}/${u.total} 台已送出指令。裝置連線後才會實際安裝或移除,完成後重新開啟視窗,已安裝數量才會更新。`;
+      add(`${u.total && u.success_count < u.total ? "⚠️" : "✅"} ${escapeHtml(text)}`,
+        `padding:8px 12px; border-radius:6px; font-size:12px; margin-top:6px; ${u.total && u.success_count < u.total ? "background:#fdeee0; color:#b45309;" : "background:#e3f6e9; color:#1c7c3f;"}`);
+    } else if (u.message && !u.serial_number) {
+      add(escapeHtml(u.message), "color:#6b7280; font-size:12px; margin-top:6px;");
+    } else {
+      const extra = (u.failures || []).concat(u.warnings || []).map((t) => `<div style="color:${(u.failures || []).includes(t) ? "#b42318" : "#b45309"}; margin-left:14px;">${escapeHtml(t)}</div>`).join("");
+      add(`[${u.index}/${u.total}] ${escapeHtml(u.device_name || "(未命名)")} ${escapeHtml(u.serial_number)}:${u.ok ? "✅ 已送出" : "❌ 部分失敗"}${extra}`,
+        "border:1px solid var(--border-color); border-radius:6px; padding:6px 10px; font-size:12px; margin-top:4px;");
+    }
+    if (u.done || u.error) { es.close(); finish(); }
+  };
+  es.onerror = () => {
+    es.close();
+    add("❌ 與伺服器的連線中斷,請到「系統紀錄」查看實際處理結果。", "background:#fdeaea; color:#b42318; padding:8px 12px; border-radius:6px; font-size:12px; margin-top:6px;");
+    finish();
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -937,7 +1060,10 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("group-edit-save-btn").addEventListener("click", saveGroupEdit);
   document.getElementById("group-duplicate-confirm-btn").addEventListener("click", confirmDuplicateGroup);
   document.getElementById("command-send-btn").addEventListener("click", sendCommand);
-  document.getElementById("group-apps-add-btn").addEventListener("click", addAppToGroup);
+  document.getElementById("group-apps-save-btn").addEventListener("click", saveGroupApps);
+  document.getElementById("group-apps-list").addEventListener("change", (e) => {
+    if (e.target.classList.contains("group-app-cb")) syncGroupAppChanges();
+  });
 
   document.getElementById("groups-tbody").addEventListener("click", (e) => {
     const el = e.target.closest("[data-action]");
@@ -968,9 +1094,4 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  document.getElementById("group-apps-tbody").addEventListener("click", (e) => {
-    const btn = e.target.closest('[data-action="remove-app"]');
-    if (!btn) return;
-    removeAppFromGroup(btn.dataset.adamId);
-  });
 });

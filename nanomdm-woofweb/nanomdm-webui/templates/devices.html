@@ -113,6 +113,32 @@
   </div>
 </div>
 
+<!-- APP 管理 Modal -->
+<div class="modal-overlay hidden" id="app-manager-modal">
+  <div class="modal-box" style="width:640px; max-width:calc(100vw - 32px);">
+    <span class="modal-close" onclick="closeModal('app-manager-modal')">✕</span>
+    <h3 id="app-manager-title">APP 管理</h3>
+    <div id="app-manager-notice"></div>
+
+    <h4 style="margin:12px 0 4px;">學校的 App
+      <span id="app-manager-change-count" style="font-weight:400; font-size:12px; color:#b45309; margin-left:6px;"></span>
+    </h4>
+    <p style="color:#9ca3af; font-size:12px; margin:0 0 6px;">勾選 = 透過 MDM 安裝;取消勾選 = 從裝置移除並撤銷授權。</p>
+    <div id="app-manager-catalog" style="max-height:340px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px; padding:0 10px;">載入中...</div>
+
+    <h4 style="margin:16px 0 4px;">使用者自行安裝的 App</h4>
+    <p style="color:#9ca3af; font-size:12px; margin:0 0 6px;">使用者用自己的 Apple ID 下載,僅供參考,MDM 無法安裝或移除。</p>
+    <div id="app-manager-self" style="max-height:180px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px; padding:0 10px;">載入中...</div>
+
+    <div id="app-manager-result" style="margin-top:10px;"></div>
+    <div class="modal-actions">
+      <button id="app-manager-requery-btn" class="secondary" type="button" style="margin-right:auto;">重新查詢</button>
+      <button class="secondary" type="button" onclick="closeModal('app-manager-modal')">取消</button>
+      <button id="app-manager-save-btn" type="button" disabled>儲存</button>
+    </div>
+  </div>
+</div>
+
 <!-- 批次更新進度 Modal -->
 <div class="modal-overlay hidden" id="devices-batch-progress-modal">
   <div class="modal-box" style="width:500px;">

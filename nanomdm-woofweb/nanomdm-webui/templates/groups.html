@@ -149,32 +149,19 @@
 
 <!-- 群組軟體清單 Modal -->
 <div class="modal-overlay hidden" id="group-apps-modal">
-  <div class="modal-box" style="width:720px;">
-    <span class="modal-close" onclick="closeModal('group-apps-modal')">✕</span>
-    <h3>群組軟體清單 - <span id="group-apps-modal-title"></span></h3>
-
-    <table class="data-table" id="group-apps-table">
-      <thead>
-        <tr>
-          <th>Adam ID</th>
-          <th>Bundle ID</th>
-          <th>軟體名稱</th>
-          <th>總數量</th>
-          <th>剩餘量</th>
-          <th>移除</th>
-        </tr>
-      </thead>
-      <tbody id="group-apps-tbody">
-        <tr><td colspan="6">載入中...</td></tr>
-      </tbody>
-    </table>
-
-    <div style="margin-top:16px; border-top:1px solid var(--border-color); padding-top:14px;">
-      <div class="field-row">
-        <label>加入 App(僅列出 vpp_license.csv 快取中尚未加入這個群組的軟體)</label>
-        <select id="group-apps-add-select" style="width:100%;"></select>
-      </div>
-      <button id="group-apps-add-btn" type="button">加入</button>
+  <div class="modal-box" style="width:640px; max-width:calc(100vw - 32px);">
+    <span class="modal-close" onclick="closeGroupAppsModal()">✕</span>
+    <h3>群組 APP 管理 - <span id="group-apps-modal-title"></span></h3>
+    <div id="group-apps-notice"></div>
+    <p style="color:#9ca3af; font-size:12px; margin:0 0 6px;">
+      勾選 = 這個群組綁定的 App。儲存後,群組裡每一台已註冊的 iPad 會自動安裝新勾選的 App、移除並撤銷取消勾選的 App;之後新註冊到這個群組的 iPad 也會自動安裝。
+      <span id="group-apps-change-count" style="color:#b45309; margin-left:4px;"></span>
+    </p>
+    <div id="group-apps-list" style="max-height:420px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px; padding:0 10px;">載入中...</div>
+    <div id="group-apps-progress" style="margin-top:10px; max-height:220px; overflow-y:auto;"></div>
+    <div class="modal-actions">
+      <button id="group-apps-cancel-btn" class="secondary" type="button" onclick="closeGroupAppsModal()">取消</button>
+      <button id="group-apps-save-btn" type="button" disabled>儲存</button>
     </div>
   </div>
 </div>

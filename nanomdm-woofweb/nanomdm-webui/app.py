@@ -2960,6 +2960,452 @@ def api_device_details(serial_number):
         return jsonify({"ok": False, "message": "回傳內容不是合法 JSON", "raw": out}), 500
 
 
+def fetch_vpp_assignments_by_serial(serial_number, timeout=20):
+    """向 Apple Apps and Books 查詢「授權目前指派給這個序號」的 App(adamId 清單)。
+    用 v2 的 Get Assignments API(GET /mdm/v2/assignments?serialNumber=...,sToken 放在 Bearer),
+    結果會分頁,依 totalPages 逐頁讀完。回傳 [{"adam_id", "pricing_param"}, ...],失敗時丟例外。"""
+    with open(CFG["cert_status"]["vpp_token_path"], "r") as f:
+        stoken = f.read().strip()
+    headers = {"Authorization": f"Bearer {stoken}"}
+    assignments, page_index = [], 0
+    while True:
+        resp = requests.get(
+            "https://vpp.itunes.apple.com/mdm/v2/assignments",
+            headers=headers,
+            params={"serialNumber": serial_number, "pageIndex": page_index},
+            timeout=timeout,
+        )
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError(f"Apple 回傳內容不是 JSON(HTTP {resp.status_code})")
+        if resp.status_code >= 400 or data.get("errorNumber"):
+            raise RuntimeError(data.get("errorMessage") or f"HTTP {resp.status_code}")
+        for a in data.get("assignments") or []:
+            if a.get("serialNumber") and a.get("serialNumber") != serial_number:
+                continue
+            assignments.append({"adam_id": str(a.get("adamId", "")), "pricing_param": a.get("pricingParam", "")})
+        total_pages = int(data.get("totalPages") or 1)
+        page_index += 1
+        if page_index >= total_pages or page_index > 50:
+            break
+    # 同一個 App 可能同時有 STDQ/PLUS 兩種授權,清單只列一次
+    seen, unique = set(), []
+    for a in assignments:
+        if a["adam_id"] and a["adam_id"] not in seen:
+            seen.add(a["adam_id"])
+            unique.append(a)
+    return unique
+
+
+def _run_nanomdm_sql(sql, timeout=20):
+    """在 nanomdm 資料庫執行一段 SQL,回傳 (rc, out, err)。用法跟 utils 裡的查詢函式相同(docker exec mysql)。"""
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+    mysql_cfg = CFG["mysql"]
+    args = [
+        "docker", "exec", mysql_cfg["docker_container"], "mysql",
+        f"-u{mysql_cfg['db_user']}", f"-p{db_password}",
+        "-N", "-B", "--raw", mysql_cfg["db_name"], "-e", sql,
+    ]
+    return utils.run_cmd(args, timeout=timeout)
+
+
+def get_latest_installed_apps(enrollment_id):
+    """找出這台裝置最近一次「有回應內容」的 InstalledApplicationList 結果。回傳 (apps, updated_at, managed_only);
+    沒有資料時 apps 為 None。managed_only=True 代表那次查詢只回報受管理 App(舊版查詢),
+    這種結果裡不會有使用者自行安裝的 App。
+
+    這裡直接用 request_type 篩選,不能用 query_command_history(只取最近 30 筆指令再過濾):
+    背景排程每 10 分鐘會對每台裝置送 3~4 道查詢指令,大約一個半小時後,手動查詢的那筆
+    InstalledApplicationList 就被擠出最近 30 筆,畫面上會變成「沒有已安裝清單」,自行安裝的 App 也跟著消失。"""
+    safe_id = (enrollment_id or "").replace("'", "''")
+    sql = (
+        "SELECT JSON_OBJECT("
+        "'result_b64', TO_BASE64(COALESCE(result, '')), "
+        "'command_b64', TO_BASE64(COALESCE(command, '')), "
+        "'result_updated_at', DATE_FORMAT(CONVERT_TZ(result_updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
+        ") FROM view_queue "
+        f"WHERE id = '{safe_id}' AND request_type = 'InstalledApplicationList' AND result IS NOT NULL "
+        "ORDER BY created_at DESC LIMIT 3;"
+    )
+    rc, out, _ = _run_nanomdm_sql(sql)
+    if rc != 0:
+        return None, None, False
+    for line in out.strip().splitlines():  # 由新到舊;回應是錯誤(沒有清單)的就看下一筆
+        try:
+            row = json.loads(line)
+            # TO_BASE64 每 76 個字元會插入換行,JSON 字串裡變成 \n,解碼前要先拿掉
+            result = base64.b64decode((row.get("result_b64") or "").replace("\n", "")).decode("utf-8", errors="replace")
+            command = base64.b64decode((row.get("command_b64") or "").replace("\n", "")).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        parsed = utils.parse_plist_text(result)
+        apps = parsed.get("InstalledApplicationList") if parsed else None
+        if apps is None:
+            continue
+        cmd = utils.parse_plist_text(command) or {}
+        managed_only = bool((cmd.get("Command") or {}).get("ManagedAppsOnly", False))
+        return apps, row.get("result_updated_at"), managed_only
+    return None, None, False
+
+
+def get_installed_apps_last_sent():
+    """每台裝置最近一次送出 InstalledApplicationList 的時間(不論有沒有回應)。
+    回傳 {enrollment_id: datetime(台灣時間)},查詢失敗時回傳 None。"""
+    sql = (
+        "SELECT q.id, DATE_FORMAT(CONVERT_TZ(MAX(q.created_at), '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') "
+        "FROM enrollment_queue q JOIN commands c ON q.command_uuid = c.command_uuid "
+        "WHERE c.request_type = 'InstalledApplicationList' GROUP BY q.id;"
+    )
+    rc, out, _ = _run_nanomdm_sql(sql)
+    if rc != 0:
+        return None
+    result = {}
+    for line in out.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        try:
+            result[parts[0]] = datetime.datetime.strptime(parts[1], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    return result
+
+
+VPP_UNKNOWN_LABEL = "未知"
+
+
+def is_unknown_vpp_app(info):
+    """已經從 App Store 下架的 App:check_vpp_license.sh 查不到資料,名稱/Bundle ID 會填「未知」
+    (跟「ASM 軟體資訊」頁的「隱藏未知 App」判斷方式相同)。ASM 軟體資訊快取裡完全沒有這個 adamId
+    (名稱和 Bundle ID 都是空的)也一樣視為未知。這類 App 無法安裝、也沒辦法對應到裝置上的 App,
+    裝置相關的 App 清單一律不顯示。"""
+    name = (info or {}).get("軟體名稱", "").strip()
+    bundle_id = (info or {}).get("Bundle ID", "").strip()
+    if name == VPP_UNKNOWN_LABEL or bundle_id == VPP_UNKNOWN_LABEL:
+        return True
+    return not name and not bundle_id
+
+
+def is_builtin_app(bundle_id):
+    """iPadOS 內建 App(Safari、天氣等)。Apple 自己上架到 App Store、學校也可能用 VPP 派送的
+    App(例如 Pages、Keynote)Bundle ID 也是 com.apple. 開頭,所以呼叫端要先排除有 VPP 授權的,
+    剩下的 com.apple.* 才當成內建 App。"""
+    return (bundle_id or "").startswith("com.apple.")
+
+
+def build_device_app_rows(serial_number, enrollment_id):
+    """合併 VPP 授權與裝置回報的已安裝 App,每一列的 source:
+      group     = VPP 授權,屬於目前群組綁定的 App
+      single    = VPP 授權,不是目前群組綁定的 App(手動單獨派送,或換群組前留下的授權)
+      self      = 已安裝,沒有學校 VPP 授權 → 使用者用自己的 Apple ID 下載
+      builtin   = 已安裝,沒有學校 VPP 授權,Bundle ID 是 com.apple.* → iPadOS 內建 App
+    installed: True/False = 有/沒有在已安裝清單裡,None = 還沒有已安裝清單可以比對
+    update: "latest" / "outdated" / ""(不知道,或沒有安裝)"""
+    vpp_error = ""
+    try:
+        assignments = fetch_vpp_assignments_by_serial(serial_number)
+    except FileNotFoundError:
+        assignments, vpp_error = [], "找不到 VPP Content Token,請先到「憑證管理」上傳"
+    except Exception as e:
+        assignments, vpp_error = [], f"查詢 VPP 授權失敗: {e}"
+
+    vpp_rows, _ = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+    by_adam = {r.get("Adam ID", ""): r for r in vpp_rows}
+    group = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial_number, {}).get("group", "")
+    group_apps = set()
+    if group:
+        groups = utils.load_groups(CFG["paths"]["groups_json"])
+        group_apps = {str(x) for x in ((groups.get(group, {}) or {}).get("apps", []) or [])}
+
+    installed, installed_at, managed_only = (None, None, False)
+    if enrollment_id:
+        try:
+            installed, installed_at, managed_only = get_latest_installed_apps(enrollment_id)
+        except Exception:
+            installed = None
+    installed_by_bundle = {a.get("Identifier"): a for a in (installed or []) if a.get("Identifier")}
+
+    def update_state(app):
+        if not app or "HasUpdateAvailable" not in app:
+            return ""
+        return "outdated" if app.get("HasUpdateAvailable") is True else "latest"
+
+    rows, assigned_bundles = [], set()
+    for a in assignments:
+        info = by_adam.get(a["adam_id"], {})
+        if is_unknown_vpp_app(info):
+            continue
+        bundle_id = info.get("Bundle ID", "")
+        if bundle_id:
+            assigned_bundles.add(bundle_id)
+        app = installed_by_bundle.get(bundle_id) if bundle_id else None
+        rows.append({
+            "source": "group" if a["adam_id"] in group_apps else "single",
+            "adam_id": a["adam_id"],
+            "name": info.get("軟體名稱", "") or (app or {}).get("Name", ""),
+            "bundle_id": bundle_id,
+            "version": (app or {}).get("ShortVersion") or (app or {}).get("Version") or "",
+            "installed": (bundle_id in installed_by_bundle) if (installed is not None and bundle_id) else None,
+            "update": update_state(app),
+        })
+
+    for bundle_id, app in installed_by_bundle.items():
+        if bundle_id in assigned_bundles:
+            continue
+        rows.append({
+            "source": "builtin" if is_builtin_app(bundle_id) else "self",
+            "adam_id": "",
+            "name": app.get("Name", ""),
+            "bundle_id": bundle_id,
+            "version": app.get("ShortVersion") or app.get("Version") or "",
+            "installed": True,
+            "update": update_state(app),
+        })
+
+    order = {"group": 0, "single": 1, "self": 2, "builtin": 3}
+    rows.sort(key=lambda r: (order[r["source"]], (r["name"] or "~").lower(), r["bundle_id"]))
+    return {
+        "group": group, "rows": rows, "vpp_error": vpp_error,
+        "installed_known": installed is not None, "installed_managed_only": managed_only,
+        "installed_updated_at": installed_at,
+    }
+
+
+def revocable_rows(info):
+    """可以撤銷的授權:不是目前群組綁定、而且確定沒有安裝在裝置上的 VPP 授權。
+    必須有「完整的」已安裝清單(不是舊版只含受管理 App 的回報)才判斷,不確定時一律不列入。"""
+    if not info["installed_known"]:
+        return []
+    return [r for r in info["rows"] if r["source"] == "single" and r["installed"] is False and r["adam_id"]]
+
+
+@app.route("/api/devices/vpp-assignments/<serial_number>")
+@login_required
+def api_device_vpp_assignments(serial_number):
+    """裝置詳細資訊視窗的 App 清單(VPP 授權 + 已安裝 App)"""
+    serial_number = (serial_number or "").strip()
+    enrollment_id = (request.args.get("enrollment_id") or "").strip()
+    info = build_device_app_rows(serial_number, enrollment_id)
+    info["revocable_count"] = len(revocable_rows(info))
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/api/devices/vpp-revoke-unused", methods=["POST"])
+@login_required
+def api_device_vpp_revoke_unused():
+    """撤銷這台裝置「非群組綁定、而且沒有安裝」的 VPP 授權,釋放授權額度。
+    要撤銷哪些由後端重新查詢後判斷,不採用前端傳來的清單,避免畫面資料過期時誤撤銷。"""
+    data = request.json or {}
+    serial_number = (data.get("serial_number") or "").strip()
+    enrollment_id = (data.get("enrollment_id") or "").strip()
+    if not serial_number:
+        return jsonify({"ok": False, "message": "缺少裝置序號"}), 400
+    if not enrollment_id:
+        return jsonify({"ok": False, "message": "裝置尚未完成 MDM 註冊,無法確認哪些 App 沒有安裝,不執行撤銷"}), 400
+
+    info = build_device_app_rows(serial_number, enrollment_id)
+    if info["vpp_error"]:
+        return jsonify({"ok": False, "message": info["vpp_error"]}), 502
+    targets = revocable_rows(info)
+    if not targets:
+        return jsonify({"ok": True, "results": [], "message": "沒有需要撤銷的授權"})
+
+    device_row = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial_number, {})
+    results = []
+    for r in targets:
+        label = r["name"] or r["adam_id"]
+        try:
+            resp = utils.revoke_vpp_license(CFG["cert_status"]["vpp_token_path"], serial_number, r["adam_id"])
+            ok = resp.get("status") in (0, "0", None)
+            msg = "" if ok else str(resp)
+        except Exception as e:
+            ok, msg = False, str(e)
+        log_activity_entry("裝置詳細資訊-撤銷未使用授權", ok, detail=f"{label}(adamId={r['adam_id']}){'' if ok else ': ' + msg}",
+                           serial=serial_number, device_name=device_row.get("device_name", ""), group=device_row.get("group", ""))
+        results.append({"adam_id": r["adam_id"], "name": label, "ok": ok, "message": msg})
+    return jsonify({"ok": True, "results": results})
+
+
+# ---------------------------------------------------------------------------
+# 裝置 App 管理(裝置與命令頁每列的「APP」按鈕)
+# ---------------------------------------------------------------------------
+def build_device_app_manager_data(serial_number, enrollment_id):
+    """上方:本台 MDM(學校 VPP 帳號)所有的 App,標示這台裝置的狀態;
+    下方:使用者用自己的 Apple ID 下載的 App(不在學校 VPP 清單裡、也不是內建 App),僅供參考。
+
+    checked(預設勾選)= 已經透過 MDM 安裝 = 有學校的 VPP 授權,而且裝置回報的已安裝清單裡有這個 App。
+    還沒有完整的已安裝清單時,退而以「有沒有授權」判斷,並在 installed_known 標示出來。"""
+    vpp_error = ""
+    try:
+        assignments = fetch_vpp_assignments_by_serial(serial_number)
+    except FileNotFoundError:
+        assignments, vpp_error = [], "找不到 VPP Content Token,請先到「憑證管理」上傳"
+    except Exception as e:
+        assignments, vpp_error = [], f"查詢 VPP 授權失敗: {e}"
+    licensed = {a["adam_id"] for a in assignments}
+
+    vpp_rows, vpp_mtime = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+    group = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial_number, {}).get("group", "")
+    group_apps = set()
+    if group:
+        groups = utils.load_groups(CFG["paths"]["groups_json"])
+        group_apps = {str(x) for x in ((groups.get(group, {}) or {}).get("apps", []) or [])}
+
+    installed, installed_at, managed_only = (None, None, False)
+    if enrollment_id:
+        try:
+            installed, installed_at, managed_only = get_latest_installed_apps(enrollment_id)
+        except Exception:
+            installed = None
+    installed_known = installed is not None and not managed_only
+    installed_by_bundle = {a.get("Identifier"): a for a in (installed or []) if a.get("Identifier")}
+
+    def update_state(app):
+        if not app or "HasUpdateAvailable" not in app:
+            return ""
+        return "outdated" if app.get("HasUpdateAvailable") is True else "latest"
+
+    catalog, catalog_bundles = [], set()
+    for r in vpp_rows:
+        adam_id = (r.get("Adam ID") or "").strip()
+        if not adam_id or is_unknown_vpp_app(r):
+            continue
+        bundle_id = (r.get("Bundle ID") or "").strip()
+        if bundle_id:
+            catalog_bundles.add(bundle_id)
+        app = installed_by_bundle.get(bundle_id) if bundle_id else None
+        is_installed = (app is not None) if (installed is not None and bundle_id) else None
+        has_license = adam_id in licensed
+        if installed_known:
+            checked = bool(has_license and is_installed)
+        else:
+            checked = has_license
+        try:
+            available = int(r.get("剩餘量") or 0)
+        except ValueError:
+            available = 0
+        catalog.append({
+            "adam_id": adam_id,
+            "bundle_id": bundle_id,
+            "name": r.get("軟體名稱", "") or (app or {}).get("Name", ""),
+            "version": (app or {}).get("ShortVersion") or (app or {}).get("Version") or "",
+            "licensed": has_license,
+            "installed": is_installed,
+            "in_group": adam_id in group_apps,
+            "update": update_state(app),
+            "available": available,
+            "checked": checked,
+        })
+    catalog.sort(key=lambda x: (not x["checked"], not x["in_group"], (x["name"] or "~").lower()))
+
+    self_installed = []
+    for bundle_id, app in installed_by_bundle.items():
+        if bundle_id in catalog_bundles or is_builtin_app(bundle_id):
+            continue
+        self_installed.append({
+            "adam_id": "",
+            "bundle_id": bundle_id,
+            "name": app.get("Name", ""),
+            "version": app.get("ShortVersion") or app.get("Version") or "",
+            "update": update_state(app),
+        })
+    self_installed.sort(key=lambda x: ((x["name"] or "~").lower(), x["bundle_id"]))
+
+    return {
+        "group": group, "catalog": catalog, "self_installed": self_installed,
+        "vpp_error": vpp_error, "vpp_cache_missing": vpp_mtime is None,
+        "installed_known": installed_known, "installed_updated_at": installed_at,
+    }
+
+
+@app.route("/api/devices/app-manager/<serial_number>")
+@login_required
+def api_device_app_manager(serial_number):
+    serial_number = (serial_number or "").strip()
+    enrollment_id = (request.args.get("enrollment_id") or "").strip()
+    return jsonify({"ok": True, **build_device_app_manager_data(serial_number, enrollment_id)})
+
+
+@app.route("/api/devices/app-manager/apply", methods=["POST"])
+@login_required
+def api_device_app_manager_apply():
+    """依勾選差異安裝/移除 App:
+      安裝 = 指派 VPP 授權 → 送出 InstallApplication(受管理 App)
+      移除 = 送出 RemoveApplication(用 Bundle ID)→ 撤銷 VPP 授權,釋放授權額度
+    adamId 一律以 ASM 軟體資訊快取比對,不在學校 VPP 清單裡的不處理。"""
+    data = request.json or {}
+    serial_number = (data.get("serial_number") or "").strip()
+    enrollment_id = (data.get("enrollment_id") or "").strip()
+    install_ids = [str(x) for x in (data.get("install") or [])]
+    remove_ids = [str(x) for x in (data.get("remove") or [])]
+    if not serial_number or not enrollment_id:
+        return jsonify({"ok": False, "message": "缺少裝置序號,或裝置尚未完成 MDM 註冊"}), 400
+    if not install_ids and not remove_ids:
+        return jsonify({"ok": False, "message": "沒有需要變更的 App"}), 400
+
+    base_url, api_user, api_key = get_nanomdm_conn()
+    if not base_url or not api_key:
+        return jsonify({"ok": False, "message": ".env 內缺少 NANOMDM_BASE_URL 或 NANOMDM_API_KEY"}), 500
+
+    vpp_rows, _ = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+    by_adam = {(r.get("Adam ID") or "").strip(): r for r in vpp_rows}
+    device_row = utils.read_devices_csv(CFG["paths"]["devices_csv"]).get(serial_number, {})
+    log_kw = dict(serial=serial_number, device_name=device_row.get("device_name", ""), group=device_row.get("group", ""))
+    token_path = CFG["cert_status"]["vpp_token_path"]
+    results = []
+
+    for adam_id in install_ids:
+        info = by_adam.get(adam_id)
+        name = (info or {}).get("軟體名稱") or adam_id
+        if not info:
+            results.append({"action": "install", "adam_id": adam_id, "name": name, "ok": False, "message": "不在 ASM 軟體資訊清單裡"})
+            continue
+        try:
+            vpp = utils.assign_vpp_license(token_path, serial_number, adam_id)
+            if vpp.get("status") not in (0, "0", None):
+                raise RuntimeError(f"VPP 授權指派失敗: {vpp.get('errorMessage') or vpp}")
+            _, params = build_mdm_command_params("InstallApplication", {"iTunesStoreID": adam_id})
+            status_code, result = utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "InstallApplication", params)
+            ok = status_code < 400
+            msg = "" if ok else f"送出安裝指令失敗: {result}"
+        except Exception as e:
+            ok, msg = False, str(e)
+        log_activity_entry("APP管理-安裝", ok, detail=f"{name}(adamId={adam_id}){'' if ok else ': ' + msg}", **log_kw)
+        results.append({"action": "install", "adam_id": adam_id, "name": name, "ok": ok, "message": msg})
+
+    for adam_id in remove_ids:
+        info = by_adam.get(adam_id)
+        name = (info or {}).get("軟體名稱") or adam_id
+        bundle_id = ((info or {}).get("Bundle ID") or "").strip()
+        if not info or not bundle_id:
+            results.append({"action": "remove", "adam_id": adam_id, "name": name, "ok": False, "message": "ASM 軟體資訊裡查不到這個 App 的 Bundle ID"})
+            continue
+        try:
+            _, params = build_mdm_command_params("RemoveApplication", {"Identifier": bundle_id})
+            status_code, result = utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "RemoveApplication", params)
+            if status_code >= 400:
+                raise RuntimeError(f"送出移除指令失敗: {result}")
+            vpp = utils.revoke_vpp_license(token_path, serial_number, adam_id)
+            if vpp.get("status") not in (0, "0", None):
+                ok, msg = False, f"已送出移除指令,但撤銷授權失敗: {vpp.get('errorMessage') or vpp}"
+            else:
+                ok, msg = True, ""
+        except Exception as e:
+            ok, msg = False, str(e)
+        log_activity_entry("APP管理-移除並撤銷授權", ok, detail=f"{name}(adamId={adam_id}){'' if ok else ': ' + msg}", **log_kw)
+        results.append({"action": "remove", "adam_id": adam_id, "name": name, "ok": ok, "message": msg})
+
+    # 安裝/移除完成後,裝置要回報新的已安裝清單,畫面才會反映;順便送一次查詢
+    try:
+        _, apps_params = build_mdm_command_params("InstalledApplicationList", {})
+        utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "InstalledApplicationList", apps_params)
+    except Exception:
+        pass
+    return jsonify({"ok": True, "results": results})
+
+
 def build_mdm_command_params(request_type, params):
     """把前端傳來的 params 轉換成實際要送給 nanomdm 的 (request_type_actual, plist_params)。
     參數有誤時丟出 ValueError,由呼叫端轉成 400 錯誤回應。"""
@@ -3000,11 +3446,11 @@ def build_mdm_command_params(request_type, params):
         return "ManagedApplicationList", {"Identifiers": identifiers}
 
     if request_type == "InstalledApplicationList":
-        # ManagedAppsOnly設True,聚焦在透過VPP/群組綁定安裝的受管理App,
-        # 不含裝置使用者自己安裝的個人App或系統內建App,避免比對結果被大量不相關的
-        # App淹沒。回應內容裡的HasUpdateAvailable是裝置自己判斷的結果(比對目前安裝
-        # 版本跟App Store上的最新版本),不是我們自己額外做比對,可靠度較高。
-        return "InstalledApplicationList", {"ManagedAppsOnly": True}
+        # ManagedAppsOnly設False:連使用者用自己的Apple ID下載的App也一起回報,
+        # 裝置詳細資訊的「已安裝的 App」才能標出哪些是自行安裝的(VPP授權清單本身看不到這類App)。
+        # 回應內容裡的HasUpdateAvailable是裝置自己判斷的結果(比對目前安裝版本跟App Store上的
+        # 最新版本),不是我們自己額外做比對,可靠度較高。
+        return "InstalledApplicationList", {"ManagedAppsOnly": False}
 
     if request_type == "DeviceLock":
         plist_params = {}
@@ -3381,6 +3827,7 @@ def api_profiles_validate():
     unmanaged_payloads = data.get("unmanaged_payloads") or []
     try:
         plist_bytes, warnings = utils_profiles.build_mobileconfig(top_level, payloads, unmanaged_payloads)
+        warnings = utils_profiles.enroll_only_payload_warnings((data.get("filename") or "").strip(), payloads) + warnings
         # 確認能被正確解析回來
         import plistlib as _plistlib
         _plistlib.loads(plist_bytes)
@@ -4115,73 +4562,238 @@ def api_group_devices(group_name):
     })
 
 
-@app.route("/api/groups/<group_name>/apps")
+def get_latest_installed_apps_bulk(enrollment_ids):
+    """一次查出多台裝置各自最近一次「有回應內容」的 InstalledApplicationList。
+    回傳 {enrollment_id: [已安裝 App, ...]};沒有回報過、或最近一次回應是錯誤的裝置不會出現在結果裡。
+    逐台呼叫 get_latest_installed_apps() 每台都要 docker exec 一次,群組裝置一多會很慢,所以合併成一次查詢。"""
+    ids = [e for e in (enrollment_ids or []) if e]
+    if not ids:
+        return {}
+    id_list = ",".join("'" + e.replace("'", "''") + "'" for e in ids)
+    sql = (
+        "SELECT JSON_OBJECT('id', q.id, 'result_b64', TO_BASE64(r.result)) "
+        "FROM enrollment_queue q "
+        "JOIN commands c ON c.command_uuid = q.command_uuid "
+        "JOIN command_results r ON r.command_uuid = q.command_uuid AND r.id = q.id "
+        f"WHERE c.request_type = 'InstalledApplicationList' AND q.id IN ({id_list}) AND r.result IS NOT NULL "
+        "AND q.created_at = ("
+        "  SELECT MAX(q2.created_at) FROM enrollment_queue q2 "
+        "  JOIN commands c2 ON c2.command_uuid = q2.command_uuid "
+        "  JOIN command_results r2 ON r2.command_uuid = q2.command_uuid AND r2.id = q2.id "
+        "  WHERE q2.id = q.id AND c2.request_type = 'InstalledApplicationList' AND r2.result IS NOT NULL"
+        ");"
+    )
+    rc, out, _ = _run_nanomdm_sql(sql, timeout=60)
+    if rc != 0:
+        return {}
+    result = {}
+    for line in out.strip().splitlines():
+        try:
+            row = json.loads(line)
+            if row.get("id") in result:
+                continue
+            text = base64.b64decode((row.get("result_b64") or "").replace("\n", "")).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        parsed = utils.parse_plist_text(text)
+        apps = parsed.get("InstalledApplicationList") if parsed else None
+        if apps is not None:
+            result[row["id"]] = apps
+    return result
+
+
+def get_group_enrolled_devices(group_name):
+    """群組裡已經完成 MDM 註冊的裝置(有 enrollment_id)。回傳 (devices, error)"""
+    env = get_env_dict()
+    db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+    merged, rc, err = utils.query_and_merge_devices(CFG["mysql"], db_password, CFG["paths"]["devices_csv"])
+    if rc != 0:
+        return [], err
+    return [d for d in merged if d.get("group") == group_name and d.get("enrollment_id")], None
+
+
+@app.route("/api/groups/<group_name>/app-manager")
 @login_required
-def api_group_apps(group_name):
+def api_group_app_manager(group_name):
+    """群組 APP 管理視窗:學校 VPP 帳號所有的 App,勾選 = 這個群組綁定的 App,
+    並統計群組裡已註冊的裝置有幾台已經安裝(依各裝置最近一次回報的已安裝清單)。"""
     groups = utils.load_groups(CFG["paths"]["groups_json"])
     group_info = groups.get(group_name)
     if group_info is None:
         return jsonify({"ok": False, "message": "找不到這個群組"}), 404
+    bound = {str(x) for x in (group_info.get("apps") or [])}
+
+    devices, dev_err = get_group_enrolled_devices(group_name)
+    installed_by_device = get_latest_installed_apps_bulk([d["enrollment_id"] for d in devices])
+    install_count = {}
+    outdated_count = {}
+    for apps in installed_by_device.values():
+        for a in apps:
+            bid = a.get("Identifier")
+            if not bid:
+                continue
+            install_count[bid] = install_count.get(bid, 0) + 1
+            if a.get("HasUpdateAvailable") is True:
+                outdated_count[bid] = outdated_count.get(bid, 0) + 1
 
     vpp_rows, vpp_mtime = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
-    vpp_by_adam = {r["Adam ID"]: r for r in vpp_rows}
-
-    assigned_adam_ids = group_info.get("apps", [])
-    assigned_apps = []
-    for adam_id in assigned_adam_ids:
-        info = vpp_by_adam.get(adam_id)
-        if info:
-            assigned_apps.append(info)
-        else:
-            assigned_apps.append({
-                "Adam ID": adam_id, "Bundle ID": "(不在快取中)",
-                "軟體名稱": "(找不到資料,可能已從 VPP 移除)", "總數量": "-", "剩餘量": "-",
-            })
-
-    available_to_add = [r for r in vpp_rows if r["Adam ID"] not in assigned_adam_ids]
+    catalog = []
+    for r in vpp_rows:
+        adam_id = (r.get("Adam ID") or "").strip()
+        if not adam_id or is_unknown_vpp_app(r):
+            continue
+        bundle_id = (r.get("Bundle ID") or "").strip()
+        try:
+            available = int(r.get("剩餘量") or 0)
+        except ValueError:
+            available = 0
+        try:
+            total = int(r.get("總數量") or 0)
+        except ValueError:
+            total = 0
+        catalog.append({
+            "adam_id": adam_id,
+            "bundle_id": bundle_id,
+            "name": r.get("軟體名稱", ""),
+            "bound": adam_id in bound,
+            "installed_count": install_count.get(bundle_id, 0) if bundle_id else 0,
+            "outdated_count": outdated_count.get(bundle_id, 0) if bundle_id else 0,
+            "available": available,
+            "total": total,
+        })
 
     return jsonify({
         "ok": True,
-        "assigned_apps": assigned_apps,
-        "available_to_add": available_to_add,
+        "group": group_name,
+        "catalog": catalog,
+        "device_count": len(devices),
+        "reported_count": len(installed_by_device),
+        "device_error": dev_err or "",
         "vpp_cache_missing": vpp_mtime is None,
     })
 
 
-@app.route("/api/groups/<group_name>/apps/add", methods=["POST"])
+@app.route("/api/groups/<group_name>/app-manager/apply-stream")
 @login_required
-def api_group_apps_add(group_name):
-    data = request.json or {}
-    adam_id = (data.get("adam_id") or "").strip()
-    if not adam_id:
-        return jsonify({"ok": False, "message": "缺少 adam_id"}), 400
+def api_group_app_manager_apply_stream(group_name):
+    """套用群組 APP 管理的勾選變更,逐台顯示進度:
+      1. 更新 groups.json 的群組綁定(之後新註冊的裝置也會自動安裝)
+      2. 群組裡每一台已註冊的裝置:
+         新勾選的 App → 指派 VPP 授權 → InstallApplication
+         取消勾選的 App → RemoveApplication → 撤銷 VPP 授權
+      3. 每台處理完送一次已安裝清單查詢,讓畫面之後能反映新狀態"""
+    install_ids = [x for x in (request.args.get("install") or "").split(",") if x.strip()]
+    remove_ids = [x for x in (request.args.get("remove") or "").split(",") if x.strip()]
 
-    groups = utils.load_groups(CFG["paths"]["groups_json"])
-    if group_name not in groups:
-        return jsonify({"ok": False, "message": "找不到這個群組"}), 404
+    def sse(obj):
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
-    apps = groups[group_name].setdefault("apps", [])
-    if adam_id not in apps:
-        apps.append(adam_id)
+    def generate():
+        if not install_ids and not remove_ids:
+            yield sse({"error": "沒有需要變更的 App", "done": True})
+            return
+        if any(not x.isdigit() for x in install_ids + remove_ids):
+            yield sse({"error": "App 參數格式錯誤", "done": True})
+            return
+
+        groups = utils.load_groups(CFG["paths"]["groups_json"])
+        if group_name not in groups:
+            yield sse({"error": "找不到這個群組", "done": True})
+            return
+
+        vpp_rows, _ = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+        by_adam = {(r.get("Adam ID") or "").strip(): r for r in vpp_rows}
+        for x in install_ids + remove_ids:
+            if x not in by_adam:
+                yield sse({"error": f"adamId {x} 不在 ASM 軟體資訊清單裡", "done": True})
+                return
+        name_of = lambda x: by_adam[x].get("軟體名稱") or x
+
+        # 1. 群組綁定
+        apps = groups[group_name].setdefault("apps", [])
+        for x in install_ids:
+            if x not in apps:
+                apps.append(x)
+        groups[group_name]["apps"] = [x for x in apps if str(x) not in set(remove_ids)]
         utils.save_groups(CFG["paths"]["groups_json"], groups)
-    return jsonify({"ok": True, "message": f"已加入 {adam_id}"})
+        log_activity_entry(
+            "群組APP管理-變更綁定", True,
+            detail=f"群組={group_name}, 加入={','.join(name_of(x) for x in install_ids) or '-'}, 移除={','.join(name_of(x) for x in remove_ids) or '-'}",
+        )
+        yield sse({"message": "已更新群組綁定的 App。", "done": False})
 
+        # 2. 逐台處理
+        devices, dev_err = get_group_enrolled_devices(group_name)
+        if dev_err:
+            yield sse({"error": f"群組綁定已更新,但查詢裝置清單失敗,沒有對裝置執行安裝/移除: {dev_err}", "done": True})
+            return
+        total = len(devices)
+        if total == 0:
+            yield sse({"done": True, "total": 0, "success_count": 0, "message": "群組裡目前沒有已註冊的裝置,之後新註冊的裝置會自動安裝綁定的 App。"})
+            return
 
-@app.route("/api/groups/<group_name>/apps/remove", methods=["POST"])
-@login_required
-def api_group_apps_remove(group_name):
-    data = request.json or {}
-    adam_id = (data.get("adam_id") or "").strip()
+        base_url, api_user, api_key = get_nanomdm_conn()
+        if not base_url or not api_key:
+            yield sse({"error": "群組綁定已更新,但 .env 內缺少 NANOMDM 設定,沒有對裝置執行安裝/移除", "done": True})
+            return
+        token_path = CFG["cert_status"]["vpp_token_path"]
+        _, apps_params = build_mdm_command_params("InstalledApplicationList", {})
+        yield sse({"message": f"開始處理群組裡 {total} 台已註冊的裝置...", "done": False})
 
-    groups = utils.load_groups(CFG["paths"]["groups_json"])
-    if group_name not in groups:
-        return jsonify({"ok": False, "message": "找不到這個群組"}), 404
+        success = 0
+        for idx, dev in enumerate(devices, start=1):
+            serial, eid = dev["serial_number"], dev["enrollment_id"]
+            failures, warnings = [], []
+            for x in install_ids:
+                try:
+                    vpp = utils.assign_vpp_license(token_path, serial, x)
+                    if vpp.get("status") not in (0, "0", None):
+                        raise RuntimeError(f"授權指派失敗({vpp.get('errorMessage') or vpp})")
+                    _, params = build_mdm_command_params("InstallApplication", {"iTunesStoreID": x})
+                    code, result = utils.send_mdm_command(base_url, api_user, api_key, eid, "InstallApplication", params)
+                    if code >= 400:
+                        raise RuntimeError(f"安裝指令送出失敗({result})")
+                except Exception as e:
+                    failures.append(f"安裝 {name_of(x)}: {e}")
+            for x in remove_ids:
+                bundle_id = (by_adam[x].get("Bundle ID") or "").strip()
+                try:
+                    if not bundle_id or bundle_id == VPP_UNKNOWN_LABEL:
+                        raise RuntimeError("查不到 Bundle ID")
+                    _, params = build_mdm_command_params("RemoveApplication", {"Identifier": bundle_id})
+                    code, result = utils.send_mdm_command(base_url, api_user, api_key, eid, "RemoveApplication", params)
+                    if code >= 400:
+                        raise RuntimeError(f"移除指令送出失敗({result})")
+                except Exception as e:
+                    failures.append(f"移除 {name_of(x)}: {e}")
+                    continue
+                # 這台裝置原本可能就沒有這個授權(例如從沒安裝過),撤銷失敗只當成提醒,不算失敗
+                try:
+                    vpp = utils.revoke_vpp_license(token_path, serial, x)
+                    if vpp.get("status") not in (0, "0", None):
+                        warnings.append(f"{name_of(x)} 撤銷授權沒有成功({vpp.get('errorMessage') or vpp},可能原本就沒有授權)")
+                except Exception as e:
+                    warnings.append(f"{name_of(x)} 撤銷授權沒有成功({e})")
+            try:
+                utils.send_mdm_command(base_url, api_user, api_key, eid, "InstalledApplicationList", apps_params)
+            except Exception:
+                pass
 
-    apps = groups[group_name].setdefault("apps", [])
-    if adam_id in apps:
-        apps.remove(adam_id)
-        utils.save_groups(CFG["paths"]["groups_json"], groups)
-    return jsonify({"ok": True, "message": f"已移除 {adam_id}"})
+            ok = not failures
+            success += 1 if ok else 0
+            log_activity_entry(
+                "群組APP管理-套用到裝置", ok,
+                detail="; ".join(failures + warnings) or f"安裝 {len(install_ids)} 個、移除 {len(remove_ids)} 個",
+                serial=serial, device_name=dev.get("device_name", ""), group=group_name,
+            )
+            yield sse({
+                "index": idx, "total": total, "serial_number": serial, "device_name": dev.get("device_name", ""),
+                "ok": ok, "failures": failures, "warnings": warnings,
+            })
+
+        yield sse({"done": True, "total": total, "success_count": success})
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
 @app.route("/api/groups/<group_name>/command", methods=["POST"])
@@ -4532,6 +5144,48 @@ def api_app_icon(adam_id):
     return send_file(path)
 
 
+_BUNDLE_ADAM_CACHE = {}  # bundle_id -> (adam_id 或 None, 查詢時間)
+_BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9.\-_]{1,200}$")
+
+
+def resolve_adam_id_by_bundle(bundle_id, country="tw", timeout=10):
+    """用 iTunes Lookup 從 Bundle ID 查出 adamId 與圖示網址(自行安裝的 App 沒有 adamId 可用)。
+    結果放在記憶體快取:查到的保留 7 天,查不到的 6 小時內不重查。回傳 (adam_id, artwork_url)。"""
+    now = time.time()
+    cached = _BUNDLE_ADAM_CACHE.get(bundle_id)
+    if cached and now - cached[2] < (7 * 86400 if cached[0] else 6 * 3600):
+        return cached[0], cached[1]
+    adam_id, artwork = None, None
+    try:
+        resp = requests.get("https://itunes.apple.com/lookup",
+                            params={"bundleId": bundle_id, "country": country}, timeout=timeout)
+        results = (resp.json() or {}).get("results") or []
+        if results:
+            adam_id = str(results[0].get("trackId") or "") or None
+            artwork = results[0].get("artworkUrl100") or results[0].get("artworkUrl512") or results[0].get("artworkUrl60")
+    except Exception:
+        pass
+    _BUNDLE_ADAM_CACHE[bundle_id] = (adam_id, artwork, now)
+    return adam_id, artwork
+
+
+@app.route("/api/app-icon-by-bundle/<bundle_id>")
+@login_required
+def api_app_icon_by_bundle(bundle_id):
+    """自行安裝的 App 只有 Bundle ID,先查出 adamId,再沿用 app_image 目錄的圖示快取"""
+    if not _BUNDLE_ID_RE.match(bundle_id or ""):
+        return "", 404
+    adam_id, artwork = resolve_adam_id_by_bundle(bundle_id)
+    if not adam_id or not utils.is_valid_adam_id(adam_id):
+        return "", 404
+    path = utils.get_app_icon(adam_id, CFG["paths"]["app_image_dir"], artwork_url=None)
+    if not path and artwork:
+        path = utils.get_app_icon(adam_id, CFG["paths"]["app_image_dir"], artwork_url=artwork)
+    if not path:
+        return "", 404
+    return send_file(path)
+
+
 @app.route("/api/asm/toggle-auto-update", methods=["POST"])
 @login_required
 def api_asm_toggle_auto_update():
@@ -4652,6 +5306,8 @@ def sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5
             utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceInformation", di_params)
             utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "AvailableOSUpdates", aou_params)
             utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "OSUpdateStatus", {})
+            _, apps_params = build_mdm_command_params("InstalledApplicationList", {})
+            utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "InstalledApplicationList", apps_params)
             # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,邏輯跟整批排程一致
             if old_row.get("lost_mode_enabled") == "true":
                 utils.send_mdm_command(base_url, api_user, api_key, enrollment_id, "DeviceLocation", {})
@@ -4732,6 +5388,12 @@ def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=Fa
     if base_url and api_key:
         _, di_params = build_mdm_command_params("DeviceInformation", {})
         _, aou_params = build_mdm_command_params("AvailableOSUpdates", {})
+        _, apps_params = build_mdm_command_params("InstalledApplicationList", {})
+        # 已安裝 App 清單(含自行安裝、內建 App)回應內容比其他查詢大很多,不跟著每一輪排程送,
+        # 每台裝置最多每 installed_apps_interval_minutes 分鐘送一次(預設 6 小時)。
+        # 按「立即同步裝置狀態」(強制模式)時不受這個間隔限制。
+        apps_interval_minutes = CFG["devices_status_cache"].get("installed_apps_interval_minutes", 360)
+        apps_last_sent = {} if force else (get_installed_apps_last_sent() or {})
 
         if force:
             # 強制模式:完全跳過pending查詢,對所有裝置一律送出,不受門檻限制
@@ -4776,6 +5438,9 @@ def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=Fa
                     utils.send_mdm_command(base_url, api_user, api_key, eid, "AvailableOSUpdates", aou_params)
                 if _should_send_query(eid, "OSUpdateStatus"):
                     utils.send_mdm_command(base_url, api_user, api_key, eid, "OSUpdateStatus", {})
+                last_apps = apps_last_sent.get(eid)
+                if force or not last_apps or (datetime.datetime.now() - last_apps).total_seconds() / 60 >= apps_interval_minutes:
+                    utils.send_mdm_command(base_url, api_user, api_key, eid, "InstalledApplicationList", apps_params)
                 # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,
                 # 沒開遺失模式的裝置送DeviceLocation一定會失敗,不用浪費請求
                 old_row = existing_cache_before.get(d["serial_number"], {})

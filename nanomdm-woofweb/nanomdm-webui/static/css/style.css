@@ -379,3 +379,35 @@ th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--accent); }
 .bundle-link { color: var(--accent); text-decoration: none; }
 .bundle-link:hover { text-decoration: underline; }
+
+/* ---- 裝置與命令:每列右側「命令/APP/紀錄/同步」小按鈕 ----
+   約為一般按鈕的一半大小(一般按鈕是 13px 字、7px 14px 內距)。
+   滑鼠移上去時整顆填滿主色、字變白,讓使用者清楚知道目前指到哪一個按鈕。 */
+/* 2 欄排列:命令、APP 一列,紀錄、同步下一列 */
+.row-actions {
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  gap: 2px;
+}
+button.row-action-btn {
+  font-size: 11px;
+  padding: 1px 4px;
+  line-height: 1.25;
+  border-radius: 4px;
+  min-width: 32px;
+  transition: background-color .12s, color .12s, box-shadow .12s;
+}
+button.row-action-btn:hover:not(:disabled) {
+  filter: none;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(59, 111, 214, .25);
+}
+button.row-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+button.row-action-btn:disabled {
+  cursor: not-allowed;
+  opacity: .6;
+}
