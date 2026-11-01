@@ -125,18 +125,18 @@ rm -rf "$TMP_EXTRACT"
 mkdir -p "$TMP_EXTRACT"
 unzip -q "$TMP_ZIP" -d "$TMP_EXTRACT" || die "解壓縮失敗,檔案可能損毀"
 
-[ -d "$TMP_EXTRACT/nanomdm-webui" ] || die "解壓縮後找不到 nanomdm-webui 目錄,壓縮檔內容結構可能跟預期不符"
-[ -d "$TMP_EXTRACT/nanomdm-deployment" ] || die "解壓縮後找不到 nanomdm-deployment 目錄,壓縮檔內容結構可能跟預期不符"
+# 自動找出實際的根目錄(相容zip外面多包一層資料夾的情況)
+  SRC_ROOT=$(dirname "$(find "$TMP_EXTRACT" -maxdepth 3 -type d -name nanomdm-webui | head -n1)")
+  [ -n "$SRC_ROOT" ] && [ -d "$SRC_ROOT/nanomdm-webui" ] || die "解壓縮後找不到 nanomdm-webui 目錄,壓縮檔內容結構可能跟預期不符"
+  [ -d "$SRC_ROOT/nanomdm-deployment" ] || die "解壓縮後找不到 nanomdm-deployment 目錄,壓縮檔內容結構可能跟預期不符"
 
-# 用rsync而不是單純cp -r,這樣如果之後重複執行這支腳本(例如中途失敗要重跑),
-# 已經存在的檔案會被正確覆蓋更新,而不是保留舊版本或報錯
-if command -v rsync > /dev/null 2>&1; then
-    rsync -a "$TMP_EXTRACT/nanomdm-webui/" /opt/nanomdm-webui/
-    rsync -a "$TMP_EXTRACT/nanomdm-deployment/" /opt/nanomdm-deployment/
-else
-    cp -rf "$TMP_EXTRACT/nanomdm-webui/." /opt/nanomdm-webui/
-    cp -rf "$TMP_EXTRACT/nanomdm-deployment/." /opt/nanomdm-deployment/
-fi
+  if command -v rsync > /dev/null 2>&1; then
+      rsync -a "$SRC_ROOT/nanomdm-webui/" /opt/nanomdm-webui/
+      rsync -a "$SRC_ROOT/nanomdm-deployment/" /opt/nanomdm-deployment/
+  else
+      cp -rf "$SRC_ROOT/nanomdm-webui/." /opt/nanomdm-webui/
+      cp -rf "$SRC_ROOT/nanomdm-deployment/." /opt/nanomdm-deployment/
+  fi
 
 rm -rf "$TMP_ZIP" "$TMP_EXTRACT"
 
