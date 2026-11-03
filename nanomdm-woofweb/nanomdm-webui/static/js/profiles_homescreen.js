@@ -4,6 +4,7 @@
 const HS_DEFAULT_DOCK = ["com.apple.mobilesafari", "com.apple.camera", "com.apple.mobileslideshow", "com.apple.mobilenotes"];
 const HS_PAGE_LIMIT = 30;         // iPad 實測一頁最多 30 個(6 欄 x 5 列),畫面也照這個格數畫
 const HS_DOCK_LIMIT = 13;
+const HS_UNKNOWN_BUNDLE_ID = "未知"; // 已下架 App 在 ASM 軟體資訊裡的 Bundle ID,舊版存下來的排列可能有
 const HS_REORDER_DWELL_MS = 180;  // 在圖示邊緣停留多久才換位置
 const HS_PAGE_TURN_DWELL_MS = 450; // 拖曳時在螢幕左右邊緣停留多久才翻頁
 const HS_PAGE_TURN_EDGE_PX = 34;
@@ -30,7 +31,7 @@ function hsNewFolderId() {
 function hsBuildCatalog(candidates, blocked, webclips) {
   const catalog = {};
   (candidates.group_apps || []).forEach((a) => {
-    catalog[hsAppKey(a.bundle_id)] = { type: "app", name: a.label, bundleId: a.bundle_id, adamId: a.adam_id };
+    catalog[hsAppKey(a.bundle_id)] = { type: "app", name: a.label, fullName: a.full_name, bundleId: a.bundle_id, adamId: a.adam_id };
   });
   (webclips || []).forEach((w) => {
     catalog[hsWebKey(w.url)] = { type: "webclip", name: w.label || w.url, url: w.url };
@@ -69,9 +70,9 @@ function hsStateFromLayout(layout, catalog, blocked) {
       placed.add(key);
       return key;
     }
-    if (blocked.has(item.BundleID)) { removed.push(item.BundleID); return null; }
+    if (blocked.has(item.BundleID) || item.BundleID === HS_UNKNOWN_BUNDLE_ID) { removed.push(item.BundleID); return null; }
     const key = hsAppKey(item.BundleID);
-    if (!catalog[key]) catalog[key] = { type: "app", name: item.BundleID, bundleId: item.BundleID };
+    if (!catalog[key]) catalog[key] = { type: "app", name: item.BundleID.split(".").pop(), bundleId: item.BundleID };
     placed.add(key);
     return key;
   };
@@ -169,7 +170,7 @@ function hsTileHtml(key) {
     </div>`;
   }
   const entry = hsCatalog[key];
-  return `<div class="hs-tile" data-key="${escapeHtml(key)}" title="${escapeHtml(`${entry.name}\n${entry.bundleId || entry.url}`)}">
+  return `<div class="hs-tile" data-key="${escapeHtml(key)}" title="${escapeHtml(`${entry.fullName || entry.name}\n${entry.bundleId || entry.url}`)}">
     ${hsIconHtml(key)}
     <div class="hs-label">${escapeHtml(entry.name)}</div>
   </div>`;
@@ -434,8 +435,8 @@ async function openHomeScreenEditor() {
   } else {
     notices.push(["warn", "這份描述檔還沒有配對群組,所以只會列出原生 App 與網頁捷徑。"]);
   }
-  if ((res.data.missing_adam_ids || []).length > 0) {
-    notices.push(["warn", `群組綁定的 App 有 ${res.data.missing_adam_ids.length} 個在 ASM 軟體資訊裡查不到(adamId: ${res.data.missing_adam_ids.join(", ")}),請先同步一次。`]);
+  if (res.data.unknown_count > 0) {
+    notices.push(["info", `另有 ${res.data.unknown_count} 個群組綁定的 App 是未知 App(已從 App Store 下架或尚未同步),不會列出。`]);
   }
   if ((layout.Dock || []).length > 0 || (layout.Pages || []).length > 0) {
     const restored = hsStateFromLayout(layout, hsCatalog, blocked);

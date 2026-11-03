@@ -1117,6 +1117,23 @@ def write_vpp_cache_csv(path, rows):
     os.replace(tmp_path, path)
 
 
+def read_json_cache(path):
+    """讀取本地端 JSON 快取,檔案不存在或損毀時回傳空 dict"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_json_cache(path, data):
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp_path, path)
+
+
 def read_vpp_cache_csv(path):
     """回傳 (rows, mtime),檔案不存在時回傳 ([], None)"""
     if not os.path.exists(path):

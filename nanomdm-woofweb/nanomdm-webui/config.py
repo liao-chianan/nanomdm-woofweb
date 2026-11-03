@@ -28,6 +28,8 @@ DEFAULT_CONFIG = {
         "dep_device_details_script": "/opt/nanomdm-deployment/nanodep-release/tools/dep-device-details.sh",
         "check_vpp_license_script": "/opt/nanomdm-deployment/check_vpp_license.sh",
         "vpp_cache_csv": "/opt/nanomdm-deployment/vpp_license.csv",
+        "app_display_names_json": "/opt/nanomdm-deployment/app_display_names.json",
+        "installed_apps_cache_json": "/opt/nanomdm-deployment/installed_apps_cache.json",
         "mobileconfig_dir": "/opt/nanomdm-deployment/mobileconfig",
         "dep_profiles_dir": "/opt/nanomdm-deployment/dep-profiles",
         "logo_dir": "/opt/nanomdm-webui/logo",

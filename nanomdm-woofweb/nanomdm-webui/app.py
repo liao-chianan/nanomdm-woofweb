@@ -3050,6 +3050,20 @@ def get_latest_installed_apps(enrollment_id):
     return None, None, False
 
 
+def get_installed_apps_last_result():
+    """每台裝置最近一次回應 InstalledApplicationList 的時間,只查時間不讀內容,所以很快。
+    回傳 {enrollment_id: 時間字串},查詢失敗時回傳 None。"""
+    sql = (
+        "SELECT r.id, DATE_FORMAT(MAX(r.updated_at), '%Y-%m-%d %H:%i:%s') FROM command_results r "
+        "JOIN commands c ON c.command_uuid = r.command_uuid "
+        "WHERE c.request_type = 'InstalledApplicationList' AND r.result IS NOT NULL GROUP BY r.id;"
+    )
+    rc, out, _ = _run_nanomdm_sql(sql)
+    if rc != 0:
+        return None
+    return dict(line.split("\t", 1) for line in out.strip().splitlines() if "\t" in line)
+
+
 def get_installed_apps_last_sent():
     """每台裝置最近一次送出 InstalledApplicationList 的時間(不論有沒有回應)。
     回傳 {enrollment_id: datetime(台灣時間)},查詢失敗時回傳 None。"""
@@ -3774,18 +3788,26 @@ def api_profiles_get(filename):
 @login_required
 def api_profiles_homescreen_candidates():
     """主畫面排列視窗的候選清單:原生 App,以及這份描述檔配對群組綁定的 App。
-    隱藏清單與網頁捷徑以編輯中的表單內容為準(可能還沒存檔),由前端處理。"""
+    隱藏清單與網頁捷徑以編輯中的表單內容為準(可能還沒存檔),由前端處理。
+    App 名稱優先用裝置回報過的名稱(ASM 軟體資訊同步時更新),沒有回報過才從 App Store 名稱縮短。"""
     filename = (request.args.get("filename") or "").strip()
-    group_name, group_apps, missing = None, [], []
+    group_name, group_apps, unknown_count = None, [], 0
     if filename:
         try:
             utils_profiles.validate_filename(filename)
         except ValueError as e:
             return jsonify({"ok": False, "message": str(e)}), 400
         vpp_rows, _ = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
-        group_name, group_apps, missing = utils_profiles.get_home_screen_group_apps(CFG["paths"]["groups_json"], vpp_rows, filename)
+        group_name, group_apps, unknown_count = utils_profiles.get_home_screen_group_apps(
+            CFG["paths"]["groups_json"], vpp_rows, filename, is_unknown_vpp_app,
+        )
+    if group_apps:
+        device_names = utils.read_json_cache(CFG["paths"]["app_display_names_json"])
+        for a in group_apps:
+            a["full_name"] = a["label"]
+            a["label"] = device_names.get(a["bundle_id"]) or utils_profiles.short_app_name(a["label"])
     return jsonify({
-        "ok": True, "group_name": group_name, "group_apps": group_apps, "missing_adam_ids": missing,
+        "ok": True, "group_name": group_name, "group_apps": group_apps, "unknown_count": unknown_count,
         "native_apps": utils_profiles.get_native_home_screen_apps(),
     })
 
@@ -4622,6 +4644,66 @@ def get_latest_installed_apps_bulk(enrollment_ids):
     return result
 
 
+_installed_apps_cache_lock = threading.Lock()
+INSTALLED_APPS_BATCH_SIZE = 10  # 讀取清單內容每台要 1 秒多,分批查才不會超過單次 SQL 的逾時
+
+
+def refresh_installed_apps_cache():
+    """更新所有裝置已安裝清單的本地端快取(只留 Bundle ID、名稱、是否待更新),由「裝置與命令」的同步週期呼叫。
+    只有回應時間變了的裝置才重新讀取內容;某一批讀取失敗時,那些裝置保留舊資料,下一輪再試。"""
+    if not _installed_apps_cache_lock.acquire(blocking=False):
+        return  # 上一輪還在跑,不用重複執行
+    try:
+        env = get_env_dict()
+        db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+        merged, rc, err = utils.query_and_merge_devices(CFG["mysql"], db_password, CFG["paths"]["devices_csv"])
+        if rc != 0:
+            raise RuntimeError(err or "查詢裝置清單失敗")
+        last_result = get_installed_apps_last_result()
+        if last_result is None:
+            raise RuntimeError("查詢已安裝清單回應時間失敗")
+
+        path = CFG["paths"]["installed_apps_cache_json"]
+        old = utils.read_json_cache(path).get("devices") or {}
+        devices = {}
+        for d in merged:
+            eid = d.get("enrollment_id")
+            if eid:
+                prev = old.get(eid) or {}
+                devices[eid] = {"serial": d.get("serial_number"), "apps": prev.get("apps"), "result_at": prev.get("result_at")}
+
+        stale = [eid for eid in devices if last_result.get(eid) and last_result[eid] != devices[eid]["result_at"]]
+        for i in range(0, len(stale), INSTALLED_APPS_BATCH_SIZE):
+            for eid, apps in get_latest_installed_apps_bulk(stale[i:i + INSTALLED_APPS_BATCH_SIZE]).items():
+                devices[eid]["apps"] = [
+                    {"Identifier": a.get("Identifier"), "Name": a.get("Name"), "HasUpdateAvailable": a.get("HasUpdateAvailable") is True}
+                    for a in apps if a.get("Identifier")
+                ]
+                devices[eid]["result_at"] = last_result[eid]
+
+        utils.write_json_cache(path, {
+            "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "devices": devices,
+        })
+    finally:
+        _installed_apps_cache_lock.release()
+    _refresh_app_display_names_safely()
+
+
+def get_group_installed_status(group_name):
+    """群組 APP 清冊用:讀本地端快取,不查資料庫。回傳 (device_count, installed_by_device, error, updated_at)。
+    群組以 devices.csv 目前的內容為準,裝置換群組馬上生效。還沒有快取(例如第一輪同步還沒跑完)才即時查詢。"""
+    cache = utils.read_json_cache(CFG["paths"]["installed_apps_cache_json"])
+    if not cache.get("devices"):
+        devices, err = get_group_enrolled_devices(group_name)
+        return len(devices), get_latest_installed_apps_bulk([d["enrollment_id"] for d in devices]), err, None
+    groups_by_serial = utils.read_devices_csv(CFG["paths"]["devices_csv"])
+    members = {eid: d for eid, d in cache["devices"].items()
+               if groups_by_serial.get(d.get("serial"), {}).get("group") == group_name}
+    installed = {eid: d["apps"] for eid, d in members.items() if d.get("apps") is not None}
+    return len(members), installed, "", cache.get("updated_at")
+
+
 def get_group_enrolled_devices(group_name):
     """群組裡已經完成 MDM 註冊的裝置(有 enrollment_id)。回傳 (devices, error)"""
     env = get_env_dict()
@@ -4643,8 +4725,7 @@ def api_group_app_manager(group_name):
         return jsonify({"ok": False, "message": "找不到這個群組"}), 404
     bound = {str(x) for x in (group_info.get("apps") or [])}
 
-    devices, dev_err = get_group_enrolled_devices(group_name)
-    installed_by_device = get_latest_installed_apps_bulk([d["enrollment_id"] for d in devices])
+    device_count, installed_by_device, dev_err, status_updated_at = get_group_installed_status(group_name)
     install_count = {}
     outdated_count = {}
     for apps in installed_by_device.values():
@@ -4686,8 +4767,9 @@ def api_group_app_manager(group_name):
         "ok": True,
         "group": group_name,
         "catalog": catalog,
-        "device_count": len(devices),
+        "device_count": device_count,
         "reported_count": len(installed_by_device),
+        "status_updated_at": status_updated_at,
         "device_error": dev_err or "",
         "vpp_cache_missing": vpp_mtime is None,
     })
@@ -5076,6 +5158,32 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
         time.sleep(0.3)  # 避免短時間內大量呼叫iTunes Lookup API觸發速率限制
 
 
+def refresh_app_display_names():
+    """更新「Bundle ID -> 主畫面顯示名稱」快取,資料來自所有裝置的已安裝清單快取(不查資料庫)。
+    這個名稱就是 App 的 CFBundleDisplayName,App Store 的查詢 API 沒有提供,只有裝置裝過才知道。
+    跟舊資料合併而不是覆蓋,App 之後從裝置移除、或裝置這次查不到時,名稱還會留著。回傳快取裡的總筆數。"""
+    reported = {}
+    for d in (utils.read_json_cache(CFG["paths"]["installed_apps_cache_json"]).get("devices") or {}).values():
+        for a in d.get("apps") or []:
+            if (a.get("Name") or "").strip():
+                reported[a["Identifier"]] = a["Name"].strip()
+    path = CFG["paths"]["app_display_names_json"]
+    with _vpp_cache_lock:
+        names = utils.read_json_cache(path)
+        names.update(reported)
+        utils.write_json_cache(path, names)
+    return len(names)
+
+
+def _refresh_app_display_names_safely():
+    """同步 ASM 軟體資訊時順便更新;這一步失敗不影響軟體資訊本身的同步結果"""
+    try:
+        return refresh_app_display_names()
+    except Exception as e:
+        print(f"[App顯示名稱] 更新失敗(不影響 ASM 軟體資訊同步): {e}")
+        return None
+
+
 def refresh_vpp_cache_once():
     """實際執行 check_vpp_license.sh 並把結果寫入快取 CSV,回傳 (ok, message, row_count)。
     除了VPP授權數量之外,額外查詢iTunes Lookup API取得每個App目前的版本號跟版本發布日期。
@@ -5096,6 +5204,7 @@ def refresh_vpp_cache_once():
 
     with _vpp_cache_lock:
         utils.write_vpp_cache_csv(cache_path, rows)
+    _refresh_app_display_names_safely()
     return True, None, len(rows)
 
 
@@ -5277,6 +5386,8 @@ def api_asm_stream():
                 with _vpp_cache_lock:
                     utils.write_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"], rows)
                 mtime = os.path.getmtime(CFG["paths"]["vpp_cache_csv"])
+                yield f"data: {json.dumps({'line': '正在更新 App 主畫面顯示名稱...'})}\n\n"
+                _refresh_app_display_names_safely()
                 log_activity_entry("ASM軟體資訊-手動同步", True, detail=f"共 {len(rows)} 筆")
                 yield f"data: {json.dumps({'done': True, 'cached': True, 'count': len(rows), 'last_sync': _format_last_sync(mtime)})}\n\n"
             else:
@@ -5507,6 +5618,13 @@ def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=Fa
         pass  # IP位址是額外附加資訊,解析失敗不該讓整個狀態快取更新失敗
 
     utils.write_devices_status_cache(CFG["devices_status_cache"]["csv_path"], rows)
+
+    try:
+        step_started = datetime.datetime.now()
+        refresh_installed_apps_cache()
+        print(f"[裝置狀態排程]   更新已安裝清單快取完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
+    except Exception as e:
+        print(f"[裝置狀態排程]   更新已安裝清單快取失敗(不影響裝置狀態): {e}")
 
     yield {"final": True, "ok": True, "msg": None, "count": len(rows)}
 

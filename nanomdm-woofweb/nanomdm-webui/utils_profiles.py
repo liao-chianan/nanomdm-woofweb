@@ -228,24 +228,37 @@ def get_native_home_screen_apps():
     return apps
 
 
-def get_home_screen_group_apps(groups_path, vpp_rows, filename):
+_APP_NAME_SEPARATORS = re.compile(r"\s+[-–—|｜]\s*|-(?=[^\x00-\x7F])|[:：,,、(（|｜]|\s+(?:by|with|for)\s+", re.IGNORECASE)
+_APP_NAME_TRAILING_CJK = re.compile(r"^([\x00-\x7F]+\s+[\x00-\x7F]+?)\s+[^\x00-\x7F].*$")  # 英文至少兩個字才拿掉後面的中文,「Google 日曆」要保留
+
+
+def short_app_name(name):
+    """把 App Store 上的完整名稱縮短成適合放在圖示下方的名稱。Apple 的查詢 API 沒有提供縮寫欄位,
+    所以裝置還沒有回報過這個 App 的名稱時,才用這個規則:拿掉宣傳文字(例如「Gmail - Google 推出的電子郵件服務」
+    變成「Gmail」、「IPEVO Whiteboard 白板軟體」變成「IPEVO Whiteboard」)。"""
+    full = (name or "").strip()
+    short = _APP_NAME_SEPARATORS.split(full, maxsplit=1)[0].strip() or full
+    match = _APP_NAME_TRAILING_CJK.match(short)
+    return match.group(1).strip() if match else short
+
+
+def get_home_screen_group_apps(groups_path, vpp_rows, filename, is_unknown_app):
     """找出這份描述檔配對的群組,以及群組綁定的 App(用 VPP 清單對應 Bundle ID 與名稱)。
-    回傳 (group_name, apps, missing_adam_ids);VPP 清單查不到的 adamId 列在 missing_adam_ids,
-    沒有 Bundle ID 就沒辦法放進排列裡,要讓使用者知道。"""
+    已經從 App Store 下架的未知 App(is_unknown_app 判斷)裝不起來,也沒有 Bundle ID 可以排列,直接略過。
+    回傳 (group_name, apps, unknown_count)。"""
     groups = utils.load_groups(groups_path)
     group_name = utils.find_group_by_paired_file(groups, "mobileconfig", filename)
     if not group_name:
-        return None, [], []
+        return None, [], 0
     by_adam = {(r.get("Adam ID") or "").strip(): r for r in vpp_rows}
-    apps, missing = [], []
+    apps, unknown_count = [], 0
     for adam_id in groups[group_name].get("apps") or []:
         row = by_adam.get(str(adam_id))
-        bundle_id = (row or {}).get("Bundle ID", "").strip()
-        if not bundle_id:
-            missing.append(str(adam_id))
+        if is_unknown_app(row):
+            unknown_count += 1
             continue
-        apps.append({"bundle_id": bundle_id, "label": row.get("軟體名稱") or bundle_id, "adam_id": str(adam_id)})
-    return group_name, apps, missing
+        apps.append({"bundle_id": row["Bundle ID"].strip(), "label": row.get("軟體名稱") or row["Bundle ID"], "adam_id": str(adam_id)})
+    return group_name, apps, unknown_count
 
 TOP_LEVEL_FIELDS = [
     {"name": "PayloadDisplayName", "label": "描述檔顯示名稱", "type": "text", "default": ""},

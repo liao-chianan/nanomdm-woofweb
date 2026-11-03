@@ -957,6 +957,9 @@ async function refreshGroupApps() {
   else if (d.reported_count < d.device_count) {
     notes.push(["info", `群組共 ${d.device_count} 台已註冊的 iPad,其中 ${d.reported_count} 台回報過已安裝清單,「已安裝 N 台」只統計這 ${d.reported_count} 台。`]);
   }
+  if (d.status_updated_at) {
+    notes.push(["info", `已安裝與待更新狀態是 ${d.status_updated_at} 的資料,會隨「裝置與命令」的同步週期更新;裝置回報已安裝清單的頻率預設是每 6 小時。`]);
+  }
   const styleOf = { error: "background:#fdeaea; color:#b42318;", warn: "background:#fdeee0; color:#b45309;", info: "background:#eef3fc; color:#2c4f96;" };
   notice.innerHTML = notes.map(([t, text]) => `<div style="padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:6px; ${styleOf[t]}">${escapeHtml(text)}</div>`).join("");
 
