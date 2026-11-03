@@ -952,7 +952,7 @@ async function refreshGroupApps() {
 
   const notes = [];
   if (d.vpp_cache_missing) notes.push(["warn", "還沒有 ASM 軟體資訊資料,請先到「ASM 軟體資訊」頁同步一次。"]);
-  if (d.device_error) notes.push(["error", `查詢群組裝置失敗: ${d.device_error}`]);
+  if (d.device_count === null) notes.push(["info", "裝置已安裝狀態的本地端資料還沒建立,這裡暫時不顯示已安裝與待更新數字,等「裝置與命令」下一輪同步完成就會有。App 綁定與授權資訊不受影響。"]);
   else if (d.device_count === 0) notes.push(["info", "這個群組目前沒有已註冊的裝置。儲存只會更新群組綁定,之後新註冊的 iPad 會自動安裝。"]);
   else if (d.reported_count < d.device_count) {
     notes.push(["info", `群組共 ${d.device_count} 台已註冊的 iPad,其中 ${d.reported_count} 台回報過已安裝清單,「已安裝 N 台」只統計這 ${d.reported_count} 台。`]);
@@ -992,9 +992,13 @@ function saveGroupApps() {
     }).join("\n") + "\n";
   }
   if (remove.length) msg += `\n移除(從裝置移除並撤銷授權)${remove.length} 個:\n${remove.map((r) => `・${r.name || r.adam_id}`).join("\n")}\n`;
-  msg += deviceCount
-    ? `\n即將變動的裝置:群組裡已註冊的 iPad 共 ${deviceCount} 台。\n`
-    : `\n群組裡目前沒有已註冊的 iPad,這次只會更新群組綁定。\n`;
+  if (deviceCount === null) {
+    msg += `\n裝置狀態的本地端資料還沒建立,這裡無法顯示裝置數量,也無法檢查授權是否足夠;群組裡已註冊的 iPad 都會套用這次變更。\n`;
+  } else {
+    msg += deviceCount
+      ? `\n即將變動的裝置:群組裡已註冊的 iPad 共 ${deviceCount} 台。\n`
+      : `\n群組裡目前沒有已註冊的 iPad,這次只會更新群組綁定。\n`;
+  }
   msg += `\n確定要執行嗎?`;
   if (!confirm(msg)) return;
   runGroupAppsApply(install.map((r) => r.adam_id), remove.map((r) => r.adam_id));

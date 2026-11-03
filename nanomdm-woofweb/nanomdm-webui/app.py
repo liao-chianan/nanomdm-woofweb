@@ -4691,17 +4691,18 @@ def refresh_installed_apps_cache():
 
 
 def get_group_installed_status(group_name):
-    """群組 APP 清冊用:讀本地端快取,不查資料庫。回傳 (device_count, installed_by_device, error, updated_at)。
-    群組以 devices.csv 目前的內容為準,裝置換群組馬上生效。還沒有快取(例如第一輪同步還沒跑完)才即時查詢。"""
+    """群組 APP 清冊用:只讀本地端快取,一律不查資料庫,展開頁面以速度為主。
+    回傳 (device_count, installed_by_device, updated_at);還沒有快取(例如第一輪同步還沒跑完)時
+    device_count 是 None,代表還不知道裝置狀態,不是群組沒有裝置。
+    群組以 devices.csv 目前的內容為準,裝置換群組馬上生效。"""
     cache = utils.read_json_cache(CFG["paths"]["installed_apps_cache_json"])
-    if not cache.get("devices"):
-        devices, err = get_group_enrolled_devices(group_name)
-        return len(devices), get_latest_installed_apps_bulk([d["enrollment_id"] for d in devices]), err, None
+    if "devices" not in cache:
+        return None, {}, None
     groups_by_serial = utils.read_devices_csv(CFG["paths"]["devices_csv"])
     members = {eid: d for eid, d in cache["devices"].items()
                if groups_by_serial.get(d.get("serial"), {}).get("group") == group_name}
     installed = {eid: d["apps"] for eid, d in members.items() if d.get("apps") is not None}
-    return len(members), installed, "", cache.get("updated_at")
+    return len(members), installed, cache.get("updated_at")
 
 
 def get_group_enrolled_devices(group_name):
@@ -4725,7 +4726,7 @@ def api_group_app_manager(group_name):
         return jsonify({"ok": False, "message": "找不到這個群組"}), 404
     bound = {str(x) for x in (group_info.get("apps") or [])}
 
-    device_count, installed_by_device, dev_err, status_updated_at = get_group_installed_status(group_name)
+    device_count, installed_by_device, status_updated_at = get_group_installed_status(group_name)
     install_count = {}
     outdated_count = {}
     for apps in installed_by_device.values():
@@ -4770,7 +4771,6 @@ def api_group_app_manager(group_name):
         "device_count": device_count,
         "reported_count": len(installed_by_device),
         "status_updated_at": status_updated_at,
-        "device_error": dev_err or "",
         "vpp_cache_missing": vpp_mtime is None,
     })
 
