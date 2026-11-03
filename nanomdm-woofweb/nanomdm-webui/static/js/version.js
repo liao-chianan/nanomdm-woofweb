@@ -144,6 +144,27 @@ const VERIFY_STATUS_LABEL = {
   error: "⚠️ 無法讀取",
 };
 
+const VERIFY_FRESHNESS_LABEL = {
+  local_newer: { text: "🛠️ 開發中", color: "#1d4ed8" },
+  github_newer: { text: "⬇️ 待更新", color: "#b45309" },
+  unknown: { text: "❔ 無法判斷新舊", color: "#6b7280" },
+};
+
+function verifyFreshnessBadge(f) {
+  const label = VERIFY_FRESHNESS_LABEL[f.freshness];
+  return label ? `<span style="min-width:100px; color:${label.color};">${label.text}</span>` : "";
+}
+
+function verifyFreshnessNote(f, tag) {
+  if (f.freshness === "local_newer") {
+    return `本地端比 GitHub ${tag} 新(本地修改時間 ${f.local_time}・GitHub 最後 commit ${f.github_time}),應該是開發中的檔案。`;
+  }
+  if (f.freshness === "github_newer") {
+    return `GitHub ${tag} 比本地端新(GitHub 最後 commit ${f.github_time}・本地修改時間 ${f.local_time}),應該是待更新的檔案。`;
+  }
+  return `無法判斷哪一邊比較新: ${f.freshness_error || "未知原因"}`;
+}
+
 async function runVersionVerify() {
   const btn = document.getElementById("version-verify-btn");
   const container = document.getElementById("version-verify-result");
@@ -195,18 +216,27 @@ function renderVerifyResult(data) {
       ${s.error ? `　⚠️ 無法讀取 <strong>${s.error}</strong>` : ""}
     </div>`;
 
+  const freshnessLegend = s.modified ? `
+    <div style="background:#eff6ff; color:#374151; padding:8px 12px; border-radius:6px; font-size:12px; line-height:1.7; margin-bottom:8px;">
+      內容不同的檔案:🛠️ 開發中 <strong>${s.local_newer}</strong>　⬇️ 待更新 <strong>${s.github_newer}</strong>${s.freshness_unknown ? `　❔ 無法判斷 <strong>${s.freshness_unknown}</strong>` : ""}<br>
+      🛠️ <strong>開發中</strong>:本地檔案比 GitHub 上的新,應該是還在開發、尚未發布的檔案。<br>
+      ⬇️ <strong>待更新</strong>:GitHub 上的檔案比本地新,應該是需要更新的檔案。<br>
+      <span style="color:#6b7280;">新舊是比較本地檔案的修改時間,跟該檔案在 GitHub ${escapeHtml(data.tag)} 最後一次 commit 的時間。複製或還原舊檔也會改變修改時間,實際內容請展開檔案確認差異。</span>
+    </div>` : "";
+
   const rows = verifyFiles.map((f, idx) => `
     <div style="border-bottom:1px solid var(--border-color);">
       <div class="verify-file-row" data-idx="${idx}" style="font-size:12px; font-family:var(--mono); padding:5px 0; cursor:pointer; display:flex; align-items:center; gap:8px;">
         <span class="verify-toggle-icon">▶</span>
         <span style="min-width:150px;">${VERIFY_STATUS_LABEL[f.status] || escapeHtml(f.status)}</span>
+        ${verifyFreshnessBadge(f)}
         <span>${escapeHtml(f.repo_path)}</span>
       </div>
       <div class="verify-detail hidden" style="padding:4px 0 10px 22px;"></div>
     </div>
   `).join("");
 
-  container.innerHTML = `${header}${truncatedWarn}${badges}
+  container.innerHTML = `${header}${truncatedWarn}${badges}${freshnessLegend}
     <div style="max-height:420px; overflow-y:auto; background:#f8f9fb; border-radius:6px; padding:6px 12px;">${rows}</div>`;
 }
 
@@ -225,7 +255,8 @@ async function loadVerifyDetail(f, tag) {
     const body = res.data.patch
       ? renderPatchHtml(res.data.patch)
       : `<p style="color:#9ca3af; font-size:12px;">${escapeHtml(res.data.note || "沒有可顯示的差異")}</p>`;
-    return `${legend}${body}${res.data.patch ? note : ""}`;
+    const freshness = `<p style="color:#374151; font-size:12px; margin:0 0 4px 0;">${escapeHtml(verifyFreshnessNote(f, tag))}</p>`;
+    return `${freshness}${legend}${body}${res.data.patch ? note : ""}`;
   }
   const notes = {
     line_endings_only: "內容相同,只有換行符號(CRLF/LF)不同,不影響程式內容。網頁介面在執行 .sh 之前會自動把 CRLF 轉成 LF,所以 .sh 檔案出現這種情況通常是正常的。",

@@ -314,6 +314,57 @@ def _classify_difference(local_bytes, repo_sha):
     return "modified"
 
 
+def fetch_file_last_commit_time(owner, repo, tag, full_repo_path, timeout=20, github_token=None):
+    """取得這個檔案在這個版本標籤底下,最後一次被修改的commit時間。
+    回傳 (datetime, error),datetime帶時區。"""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits"
+    params = {"sha": tag, "path": full_repo_path, "per_page": 1}
+    try:
+        resp = requests.get(url, headers=_github_headers(github_token), params=params, timeout=timeout)
+    except requests.RequestException as e:
+        return None, f"連線失敗: {e}"
+    if resp.status_code != 200:
+        return None, _friendly_error_from_response(resp)
+    try:
+        commits = resp.json()
+        date_text = commits[0]["commit"]["committer"]["date"]
+        return datetime.datetime.fromisoformat(date_text.replace("Z", "+00:00")), None
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None, "GitHub API回應格式無法解析"
+
+
+def _annotate_modified_freshness(owner, repo, tag, cfg, files, summary, timeout=20, github_token=None):
+    """替「內容不同」的檔案判斷哪一邊比較新:比較本地檔案的修改時間,跟這個檔案在GitHub這個版本
+    最後一次commit的時間。本地較新視為開發中的檔案,GitHub較新視為待更新的檔案。
+    每個檔案需要1次API呼叫,所以只查內容不同的檔案;一旦查詢失敗(例如撞到速率限制)就不再繼續查,
+    剩下的檔案標示為無法判斷,不影響校驗結果本身。"""
+    subfolder = cfg["repo_subfolder"].rstrip("/") + "/"
+    fetch_err = None
+    for f in files:
+        if f["status"] != "modified":
+            continue
+        github_time = None
+        if not fetch_err:
+            github_time, fetch_err = fetch_file_last_commit_time(
+                owner, repo, tag, subfolder + f["repo_path"], timeout=timeout, github_token=github_token,
+            )
+        try:
+            local_time = datetime.datetime.fromtimestamp(os.path.getmtime(f["local_path"])).astimezone()
+        except OSError as e:
+            local_time = None
+            f["freshness_error"] = str(e)
+        if github_time is None or local_time is None:
+            f["freshness"] = "unknown"
+            if fetch_err:
+                f["freshness_error"] = fetch_err
+            summary["freshness_unknown"] += 1
+            continue
+        f["freshness"] = "local_newer" if local_time > github_time else "github_newer"
+        f["local_time"] = local_time.strftime("%Y-%m-%d %H:%M")
+        f["github_time"] = github_time.astimezone().strftime("%Y-%m-%d %H:%M")
+        summary[f["freshness"]] += 1
+
+
 VERIFY_STATUS_ORDER = {"modified": 0, "line_endings_only": 1, "missing_local": 2, "extra_local": 3, "error": 4}
 
 
@@ -322,7 +373,8 @@ def verify_version_files(owner, repo, tag, cfg, timeout=20, github_token=None):
 
     做法:取得GitHub這個版本每個檔案的git blob SHA(1次API呼叫),在本地端用同樣算法算出雜湊值
     直接比對,不用下載任何檔案內容。只有「內容不同」的檔案,才需要另外下載內容來顯示逐行差異
-    (見build_verify_diff,使用者展開那個檔案時才會去抓)。
+    (見build_verify_diff,使用者展開那個檔案時才會去抓),以及每個檔案多1次API呼叫判斷哪一邊
+    比較新(見_annotate_modified_freshness)。
 
     每個檔案的狀態:
       modified           內容不同
@@ -340,7 +392,8 @@ def verify_version_files(owner, repo, tag, cfg, timeout=20, github_token=None):
         return None, err
 
     summary = {"compared": 0, "identical": 0, "modified": 0, "line_endings_only": 0,
-               "missing_local": 0, "extra_local": 0, "error": 0}
+               "missing_local": 0, "extra_local": 0, "error": 0,
+               "local_newer": 0, "github_newer": 0, "freshness_unknown": 0}
     files = []
     repo_paths = set()
 
@@ -375,6 +428,8 @@ def verify_version_files(owner, repo, tag, cfg, timeout=20, github_token=None):
         if rel_path not in repo_paths:
             files.append({"repo_path": rel_path, "local_path": local_path, "status": "extra_local"})
             summary["extra_local"] += 1
+
+    _annotate_modified_freshness(owner, repo, tag, cfg, files, summary, timeout=timeout, github_token=github_token)
 
     files.sort(key=lambda x: (VERIFY_STATUS_ORDER.get(x["status"], 99), x["repo_path"]))
     return {

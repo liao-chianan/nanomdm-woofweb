@@ -5674,7 +5674,8 @@ def api_version_current():
 @login_required
 def api_version_verify():
     """版本校驗:比對本地端程式碼,跟GitHub上「同一個版本」(目前記錄的版本號)的內容是否一致。
-    只需要呼叫1次GitHub API(用檔案雜湊值比對,不下載檔案內容),列出不一致的檔案。"""
+    用檔案雜湊值比對(1次GitHub API呼叫,不下載檔案內容),列出不一致的檔案;
+    內容不同的檔案每個再多1次API呼叫,判斷本地端跟GitHub哪一邊比較新。"""
     cfg = CFG["update"]
     current = utils_version.get_current_version(cfg["version_file"])
     if not current:
