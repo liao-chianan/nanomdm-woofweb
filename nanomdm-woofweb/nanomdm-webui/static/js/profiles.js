@@ -191,6 +191,7 @@ function renderPayloadsSection(payloadsData, filename) {
     const existing = (payloadsData && payloadsData[key]) || (isSingular ? { enabled: false, fields: {} } : { enabled: false, instances: [] });
     const enrollOnly = ENROLL_ONLY_PAYLOAD_KEYS.includes(key);
     if (enrollOnly && !isEnrollTemplate) return;
+    if (key === "homescreen" && isEnrollTemplate) return; // 註冊描述檔要保持精簡,不放主畫面排列
     const locked = enrollOnly && isEnrollTemplate;
     if (locked) existing.enabled = true;
 
@@ -575,6 +576,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   document.getElementById("new-profile-btn").addEventListener("click", openNewProfile);
+  document.getElementById("payloads-container").addEventListener("click", (e) => {
+    if (e.target.closest(".homescreen-edit-btn")) openHomeScreenEditor();
+  });
   document.getElementById("validate-profile-btn").addEventListener("click", validateProfile);
   document.getElementById("save-profile-btn").addEventListener("click", saveProfile);
   document.getElementById("duplicate-profile-btn").addEventListener("click", () => openDuplicateModal(currentFilename));

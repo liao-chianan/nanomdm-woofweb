@@ -173,7 +173,79 @@ PAYLOAD_SCHEMA = {
             },
         ],
     },
+    "homescreen": {
+        "label": "主畫面排列",
+        "payload_type": "com.apple.homescreenlayout",
+        "singular": True,
+        "help": "指定裝置主畫面的 Dock、頁面與資料夾(需要監管模式)。描述檔裝在裝置上時,裝置上的小工具會消失;"
+                "沒有排入的 App 會由裝置自動排在後面。移除這份描述檔或取消這個項目後,裝置會恢復原本的排列。",
+        "fields": [
+            {"name": "Layout", "label": "主畫面排列", "type": "homescreen_layout", "default": {"Dock": [], "Pages": []}},
+        ],
+    },
 }
+
+# 主畫面排列的原生 App 候選清單。MDM 沒有辦法查詢裝置有哪些內建 App,所以這裡要自己維護
+# (以 iPadOS 26 實際裝置讀到的清單為準);限制清單裡可隱藏的 App 由 get_native_home_screen_apps() 併入,
+# 新版 iPadOS 多出來、這裡還沒列到的 App,裝置會自動排在後面,不會消失。
+NATIVE_HOME_SCREEN_APPS = [
+    {"bundle_id": "com.apple.mobilesafari", "label": "Safari"},
+    {"bundle_id": "com.apple.camera", "label": "相機"},
+    {"bundle_id": "com.apple.mobileslideshow", "label": "照片"},
+    {"bundle_id": "com.apple.mobilenotes", "label": "備忘錄"},
+    {"bundle_id": "com.apple.Preferences", "label": "設定"},
+    {"bundle_id": "com.apple.AppStore", "label": "App Store"},
+    {"bundle_id": "com.apple.DocumentsApp", "label": "檔案"},
+    {"bundle_id": "com.apple.mobilecal", "label": "行事曆"},
+    {"bundle_id": "com.apple.mobilemail", "label": "郵件"},
+    {"bundle_id": "com.apple.Maps", "label": "地圖"},
+    {"bundle_id": "com.apple.mobiletimer", "label": "時鐘"},
+    {"bundle_id": "com.apple.calculator", "label": "計算機"},
+    {"bundle_id": "com.apple.weather", "label": "天氣"},
+    {"bundle_id": "com.apple.Translate", "label": "翻譯"},
+    {"bundle_id": "com.apple.shortcuts", "label": "捷徑"},
+    {"bundle_id": "com.apple.VoiceMemos", "label": "語音備忘錄"},
+    {"bundle_id": "com.apple.measure", "label": "測距儀"},
+    {"bundle_id": "com.apple.Magnifier", "label": "放大鏡"},
+    {"bundle_id": "com.apple.Passwords", "label": "密碼"},
+    {"bundle_id": "com.apple.Preview", "label": "預覽"},
+    {"bundle_id": "com.apple.freeform", "label": "無邊記"},
+]
+
+
+def get_native_home_screen_apps():
+    """主畫面排列用的原生 App 清單:固定清單,再加上限制清單裡可隱藏的 App(不重複)。
+    回傳的是完整清單,哪些已經被隱藏,由前端依目前表單上的限制清單扣掉。"""
+    apps = list(NATIVE_HOME_SCREEN_APPS)
+    seen = {a["bundle_id"] for a in apps}
+    for field in PAYLOAD_SCHEMA["restrictions"]["fields"]:
+        if field["type"] != "app_checklist":
+            continue
+        for opt in field["options"]:
+            if opt["bundle_id"] not in seen:
+                seen.add(opt["bundle_id"])
+                apps.append(opt)
+    return apps
+
+
+def get_home_screen_group_apps(groups_path, vpp_rows, filename):
+    """找出這份描述檔配對的群組,以及群組綁定的 App(用 VPP 清單對應 Bundle ID 與名稱)。
+    回傳 (group_name, apps, missing_adam_ids);VPP 清單查不到的 adamId 列在 missing_adam_ids,
+    沒有 Bundle ID 就沒辦法放進排列裡,要讓使用者知道。"""
+    groups = utils.load_groups(groups_path)
+    group_name = utils.find_group_by_paired_file(groups, "mobileconfig", filename)
+    if not group_name:
+        return None, [], []
+    by_adam = {(r.get("Adam ID") or "").strip(): r for r in vpp_rows}
+    apps, missing = [], []
+    for adam_id in groups[group_name].get("apps") or []:
+        row = by_adam.get(str(adam_id))
+        bundle_id = (row or {}).get("Bundle ID", "").strip()
+        if not bundle_id:
+            missing.append(str(adam_id))
+            continue
+        apps.append({"bundle_id": bundle_id, "label": row.get("軟體名稱") or bundle_id, "adam_id": str(adam_id)})
+    return group_name, apps, missing
 
 TOP_LEVEL_FIELDS = [
     {"name": "PayloadDisplayName", "label": "描述檔顯示名稱", "type": "text", "default": ""},
@@ -446,6 +518,8 @@ def read_mobileconfig_as_form(dir_path, filename):
                 fields_out[fname] = bool(payload.get("IdentityCertificateUUID"))
             elif fname == "Keysize":
                 fields_out[fname] = str(source.get(fname, field["default"]))
+            elif field["type"] == "homescreen_layout":
+                fields_out[fname] = {"Dock": source.get("Dock", []), "Pages": source.get("Pages", [])}
             elif field["type"] == "image_upload":
                 icon_bytes = source.get(fname)
                 fields_out[fname] = base64.b64encode(icon_bytes).decode("ascii") if icon_bytes else ""
@@ -600,12 +674,56 @@ def _build_restrictions_payload(fields, payload_uuid, identifier_prefix):
     return payload
 
 
+def _normalize_home_screen_item(item, allow_folder):
+    """只保留 Apple 文件定義的欄位。資料夾不能再包資料夾,第一版也不開放放進 Dock。"""
+    item_type = (item or {}).get("Type")
+    if item_type == "Application" and item.get("BundleID"):
+        return {"Type": "Application", "BundleID": str(item["BundleID"])}
+    if item_type == "WebClip" and item.get("URL"):
+        return {"Type": "WebClip", "URL": str(item["URL"])}
+    if item_type == "Folder" and allow_folder:
+        pages = [[_normalize_home_screen_item(i, False) for i in page] for page in item.get("Pages") or []]
+        return {"Type": "Folder", "DisplayName": str(item.get("DisplayName") or "資料夾"), "Pages": [p for p in pages if p]}
+    raise ValueError(f"主畫面排列裡有不支援的項目: {item}")
+
+
+def _build_homescreen_payload(fields, payload_uuid, identifier_prefix):
+    layout = fields.get("Layout") or {}
+    pages = [[_normalize_home_screen_item(i, True) for i in page] for page in layout.get("Pages") or []]
+    return {
+        "PayloadType": "com.apple.homescreenlayout",
+        "PayloadIdentifier": f"{identifier_prefix}.homescreen",
+        "PayloadUUID": payload_uuid,
+        "PayloadVersion": 1,
+        "PayloadDisplayName": "主畫面排列",
+        "PayloadDescription": "設定主畫面的 Dock、頁面與資料夾",
+        "Dock": [_normalize_home_screen_item(i, False) for i in layout.get("Dock") or []],
+        "Pages": [p for p in pages if p],
+    }
+
+
+def _home_screen_bundle_ids(payload):
+    """列出排列裡所有的 Bundle ID,包含資料夾裡面的"""
+    def walk(items):
+        for item in items:
+            if item["Type"] == "Folder":
+                for page in item["Pages"]:
+                    yield from walk(page)
+            elif item["Type"] == "Application":
+                yield item["BundleID"]
+    found = list(walk(payload["Dock"]))
+    for page in payload["Pages"]:
+        found.extend(walk(page))
+    return found
+
+
 _BUILDERS = {
     "scep": _build_scep_payload,
     "wifi": _build_wifi_payload,
     "webclip": _build_webclip_payload,
     "shareddevice": _build_shareddevice_payload,
     "restrictions": _build_restrictions_payload,
+    "homescreen": _build_homescreen_payload,
 }
 
 
@@ -639,10 +757,19 @@ def build_mobileconfig(top_level, payloads, unmanaged_payloads=None, existing_uu
             warnings.append("MDM payload 勾選了「使用 SCEP 身份憑證」,但這份描述檔沒有包含 SCEP payload,IdentityCertificateUUID 不會被設定。")
         payload_contents.append(_build_mdm_payload(mdm_fields, get_uuid("mdm"), identifier_prefix, scep_uuid))
 
-    for key in ("shareddevice", "restrictions"):
+    for key in ("shareddevice", "restrictions", "homescreen"):
         if payloads.get(key, {}).get("enabled"):
             builder = _BUILDERS[key]
             payload_contents.append(builder(payloads[key]["fields"], get_uuid(key), identifier_prefix))
+            if key == "homescreen":
+                bundle_ids = _home_screen_bundle_ids(payload_contents[-1])
+                if not bundle_ids and not payload_contents[-1]["Pages"]:
+                    warnings.append("主畫面排列還沒有排入任何項目,請按「主畫面排列」設定,或取消勾選這個項目。")
+                restrictions = payloads.get("restrictions", {})
+                blocked = set((restrictions.get("fields") or {}).get("blockedAppBundleIDs") or []) if restrictions.get("enabled") else set()
+                conflicts = sorted(blocked.intersection(bundle_ids))
+                if conflicts:
+                    warnings.append(f"主畫面排列裡有已被隱藏的 App: {', '.join(conflicts)}。請重新開啟「主畫面排列」確認。")
             if key == "shareddevice":
                 warnings.append("共用裝置資訊 (SharedDeviceConfiguration) 需要裝置為 Supervised 狀態才能安裝成功,非 Supervised 裝置安裝這份描述檔可能會被判定為無效。")
 
@@ -685,6 +812,22 @@ def build_mobileconfig(top_level, payloads, unmanaged_payloads=None, existing_uu
 
     plist_bytes = plistlib.dumps(top)
     return plist_bytes, warnings
+
+
+def enroll_only_payload_warnings(filename, payloads):
+    """MDM/SCEP 只屬於 enroll-template(裝置實際拿去完成註冊的那份):註冊描述檔少了它們就無法註冊;
+    其他描述檔是註冊完成後才透過 MDM 通道推送,多帶 MDM 會讓裝置拒絕安裝整份描述檔,
+    多帶 SCEP 則只會多要一張用不到的憑證。"""
+    is_enabled = lambda key: bool((payloads or {}).get(key, {}).get("enabled"))
+    if filename == "enroll-template.mobileconfig":
+        missing = [label for key, label in (("mdm", "MDM"), ("scep", "SCEP")) if not is_enabled(key)]
+        return [f"註冊描述檔缺少 {'、'.join(missing)},裝置將無法完成註冊。"] if missing else []
+    warnings = []
+    if is_enabled("mdm"):
+        warnings.append("這份描述檔包含 MDM,裝置會拒絕安裝,整份描述檔都不會生效。只有註冊描述檔需要 MDM。")
+    if is_enabled("scep"):
+        warnings.append("這份描述檔包含 SCEP,裝置只會多要一張用不到的憑證。只有註冊描述檔需要 SCEP。")
+    return warnings
 
 
 def check_duplicate_payload_identifier(dir_path, payload_identifier, exclude_filename=None):

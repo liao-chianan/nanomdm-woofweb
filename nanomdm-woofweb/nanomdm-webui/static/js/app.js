@@ -34,6 +34,15 @@ function renderField(field, value) {
       </div>
     `;
   }
+  if (field.type === "homescreen_layout") {
+    return `
+      <div style="display:flex; align-items:center; gap:10px; margin:6px 0;">
+        <input type="hidden" data-field="${escapeHtml(field.name)}" value="${encodeURIComponent(JSON.stringify(val))}">
+        <button type="button" class="secondary homescreen-edit-btn">${escapeHtml(field.label)}</button>
+        <span class="homescreen-summary" style="font-size:12px; color:#6b7280;">${escapeHtml(homeScreenLayoutSummary(val))}</span>
+      </div>
+    `;
+  }
   if (field.type === "image_upload") {
     const hasExisting = !!val;
     const previewSrc = hasExisting ? `data:image/png;base64,${val}` : "";
@@ -74,7 +83,19 @@ function renderField(field, value) {
   `;
 }
 
+function homeScreenLayoutSummary(layout) {
+  const pages = (layout && layout.Pages) || [];
+  const dock = (layout && layout.Dock) || [];
+  if (dock.length === 0 && pages.length === 0) return "尚未設定";
+  const folders = pages.flat().filter((item) => item.Type === "Folder").length;
+  return `Dock ${dock.length} 個・${pages.length} 頁・${folders} 個資料夾`;
+}
+
 function readFieldValue(container, field) {
+  if (field.type === "homescreen_layout") {
+    const input = container.querySelector(`[data-field="${field.name}"]`);
+    return input ? JSON.parse(decodeURIComponent(input.value)) : field.default;
+  }
   if (field.type === "app_checklist") {
     const checkboxes = container.querySelectorAll(`[data-field="${field.name}"]`);
     return [...checkboxes].filter((cb) => cb.checked).map((cb) => cb.dataset.value);

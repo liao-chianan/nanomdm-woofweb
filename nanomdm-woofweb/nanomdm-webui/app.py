@@ -3770,6 +3770,26 @@ def api_profiles_get(filename):
         return jsonify({"ok": False, "message": f"讀取或解析失敗: {e}"}), 500
 
 
+@app.route("/api/profiles/homescreen-candidates")
+@login_required
+def api_profiles_homescreen_candidates():
+    """主畫面排列視窗的候選清單:原生 App,以及這份描述檔配對群組綁定的 App。
+    隱藏清單與網頁捷徑以編輯中的表單內容為準(可能還沒存檔),由前端處理。"""
+    filename = (request.args.get("filename") or "").strip()
+    group_name, group_apps, missing = None, [], []
+    if filename:
+        try:
+            utils_profiles.validate_filename(filename)
+        except ValueError as e:
+            return jsonify({"ok": False, "message": str(e)}), 400
+        vpp_rows, _ = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+        group_name, group_apps, missing = utils_profiles.get_home_screen_group_apps(CFG["paths"]["groups_json"], vpp_rows, filename)
+    return jsonify({
+        "ok": True, "group_name": group_name, "group_apps": group_apps, "missing_adam_ids": missing,
+        "native_apps": utils_profiles.get_native_home_screen_apps(),
+    })
+
+
 @app.route("/api/profiles/save", methods=["POST"])
 @login_required
 def api_profiles_save():

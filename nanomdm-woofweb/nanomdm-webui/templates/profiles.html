@@ -52,6 +52,24 @@
 
 </div>
 
+<!-- 主畫面排列 Modal -->
+<div class="modal-overlay hidden" id="homescreen-modal">
+  <div class="modal-box" style="width:1080px; max-width:calc(100vw - 32px); max-height:94vh;">
+    <span class="modal-close" onclick="closeModal('homescreen-modal')">✕</span>
+    <h3>主畫面排列</h3>
+    <p style="color:#6b7280; font-size:12px; line-height:1.6; margin:0 0 10px 0;">
+      跟在 iPad 上一樣用拖曳排列:拖到另一個圖示的正中央組成資料夾,點資料夾打開,拖出資料夾就移出(剩一個 App 時自動解散)。
+      要換頁可以按左右箭頭或下方圓點,拖曳時停在螢幕左右邊緣也會翻頁。
+    </p>
+    <div id="homescreen-notices"></div>
+    <div id="homescreen-editor"></div>
+    <div class="modal-actions">
+      <button class="secondary" onclick="closeModal('homescreen-modal')" type="button">取消</button>
+      <button id="homescreen-confirm-btn" type="button">確定</button>
+    </div>
+  </div>
+</div>
+
 <!-- 再製 Modal -->
 <div class="modal-overlay hidden" id="profile-duplicate-modal">
   <div class="modal-box">
@@ -71,5 +89,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{{ url_for('static', filename='js/vendor/Sortable.min.js') }}?v={{ static_version }}"></script>
+<script src="{{ url_for('static', filename='js/profiles_homescreen.js') }}?v={{ static_version }}"></script>
 <script src="{{ url_for('static', filename='js/profiles.js') }}?v={{ static_version }}"></script>
 {% endblock %}
