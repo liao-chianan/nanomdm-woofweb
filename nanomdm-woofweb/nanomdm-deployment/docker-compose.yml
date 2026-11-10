@@ -42,6 +42,9 @@ services:
       - -ca=/ca-certs/ca.pem
       # 換成你自己的網域,或是留意這裡也可以考慮改成讀取.env的WEBHOOK_URL變數
       - -webhook-url=https://YOUR_DOMAIN_HERE/webhook
+    # 讓容器把自己的網域直接對到Docker主機,webhook不再查詢外部DNS、也不會繞到外部防火牆
+    extra_hosts:
+      - "YOUR_DOMAIN_HERE:host-gateway"
     volumes:
       - ./scep-depot/ca.pem:/ca-certs/ca.pem:ro
     ports:

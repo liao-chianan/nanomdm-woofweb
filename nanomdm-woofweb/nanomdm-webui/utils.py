@@ -410,6 +410,20 @@ def backup_env_file(path, backup_dir=None):
     return backup_path
 
 
+def format_env_value(value):
+    """值含有空白時自動包上引號,讓 bash 的 source .env 也能正確讀到整個值
+    (systemd EnvironmentFile、docker compose、本程式的解析器讀取時都會去掉引號)。
+    一般用雙引號;值裡有 " $ ` \\ 這些在 bash 雙引號內會被額外解讀的字元時改用單引號(原樣讀取);
+    兩種引號都不適用(同時含有單引號)時維持原樣不加。"""
+    if not any(c.isspace() for c in value):
+        return value
+    if not any(c in value for c in '"$`\\'):
+        return f'"{value}"'
+    if "'" not in value:
+        return f"'{value}'"
+    return value
+
+
 def update_env_key(path, backup_dir, key, value):
     """只更新單一個 key 的值,保留檔案裡其他行(含註解、順序)原封不動。存檔前先備份。"""
     if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key or ""):
@@ -424,12 +438,12 @@ def update_env_key(path, backup_dir, key, value):
     new_lines = []
     for item in lines:
         if item["type"] == "kv" and item["key"] == key:
-            new_lines.append(f"{key}={value}")
+            new_lines.append(f"{key}={format_env_value(value)}")
             found = True
         else:
             new_lines.append(item["raw"])
     if not found:
-        new_lines.append(f"{key}={value}")
+        new_lines.append(f"{key}={format_env_value(value)}")
 
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:

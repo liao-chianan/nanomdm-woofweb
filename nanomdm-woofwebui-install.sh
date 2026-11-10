@@ -325,7 +325,7 @@ NANODEP_API_KEY=${API_KEY}
 NANODEP_BASE_URL=http://127.0.0.1:9001
 NANODEP_NAME=${ORG_ABBR}
 NANODEP_DB_PASSWORD=${DB_PASSWORD}
-NANODEP_DEPSYNCER_RESTART_CMD=systemctl restart nanodep-syncer.service
+NANODEP_DEPSYNCER_RESTART_CMD="systemctl restart nanodep-syncer.service"
 
 # --- nanoaxm ---
 NANOAXM_API_KEY=${API_KEY}
