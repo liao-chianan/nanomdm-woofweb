@@ -331,7 +331,7 @@ function renderGroupDeviceRow(row) {
     <td style="font-size:12px;">${capacityCell}</td>
     <td style="font-size:12px;">${osCell}</td>
     <td style="font-size:12px;">${ipCell}</td>
-    <td style="font-size:12px;">${escapeHtml(row.last_seen_at || "")}</td>
+    <td style="font-size:12px;">${lastSeenCellHtml(row.last_seen_at)}</td>
     <td style="font-family: var(--mono); font-size:10px; word-break:break-all;">${escapeHtml(row.enrollment_id)}</td>
     <td>
       <button class="secondary send-command-btn" type="button">派送命令</button>

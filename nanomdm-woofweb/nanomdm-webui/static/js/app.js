@@ -152,6 +152,22 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+const DEVICE_OFFLINE_DAYS = 3;
+
+function deviceOfflineDays(lastSeenAt, now = Date.now()) {
+  const seen = Date.parse(`${(lastSeenAt || "").replace(" ", "T")}+08:00`);
+  if (Number.isNaN(seen)) return 0;
+  const days = Math.floor((now - seen) / 86400000);
+  return days >= DEVICE_OFFLINE_DAYS ? days : 0;
+}
+
+function lastSeenCellHtml(lastSeenAt) {
+  const text = escapeHtml(lastSeenAt || "");
+  const offlineDays = deviceOfflineDays(lastSeenAt);
+  if (!offlineDays) return text;
+  return `<span style="color:#d64545; font-weight:600;">${text}<br>設備已離線 ${offlineDays} 天</span>`;
+}
+
 // ---- 路徑前綴輔助函式 (部署在 nginx 子路徑,例如 /miniweb,後面時需要) ----
 function apiUrl(path) {
   const root = window.APP_ROOT || "";

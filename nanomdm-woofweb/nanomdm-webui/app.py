@@ -5461,8 +5461,7 @@ def sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5
 
         # 從nanomdm的docker log解析這台裝置最後連線的來源IP(Apple MDM協定本身不提供這項
         # 資訊,是從nanomdm服務自己的HTTP request log裡,用trace_id把x_forwarded_for的IP
-        # 兜出來的)。build_devices_status_rows()的existing_cache保留邏輯不包含ip_address
-        # 這個欄位,所以這裡沒查到新的IP時,要自己明確保留舊值,不然會被清空成空字串。
+        # 兜出來的)。沒查到新的IP時,保留 build_devices_status_rows() 從舊資料帶過來的值。
         try:
             container_name = CFG["nanomdm_docker"]["container_name"]
             tail_lines = CFG["nanomdm_docker"]["log_tail_lines"]
@@ -5471,14 +5470,8 @@ def sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5
                 ip_by_enrollment_id = utils.extract_device_ips_from_nanomdm_logs(log_text)
                 if enrollment_id in ip_by_enrollment_id:
                     updated_row["ip_address"] = ip_by_enrollment_id[enrollment_id]["ip"]
-                else:
-                    # 這次的log範圍內沒找到這台裝置的連線紀錄,保留舊值,不要清空
-                    updated_row["ip_address"] = old_row.get("ip_address", "")
-            else:
-                updated_row["ip_address"] = old_row.get("ip_address", "")
         except Exception:
-            # IP解析失敗不該讓整個同步失敗,保留舊值即可
-            updated_row["ip_address"] = old_row.get("ip_address", "")
+            pass  # IP解析失敗不該讓整個同步失敗,保留舊值即可
 
         # 只替換這一台裝置在既有快取裡的那一列,其他裝置完全不動
         existing_cache[serial] = updated_row

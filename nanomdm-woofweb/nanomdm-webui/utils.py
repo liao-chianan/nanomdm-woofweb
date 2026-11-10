@@ -1297,20 +1297,14 @@ def set_lost_mode_state(path, serial_number, enabled):
 def build_devices_status_rows(status_rows, serial_by_enrollment_id, existing_cache=None):
     """把 query_all_devices_latest_status 查回來的原始資料(依 enrollment_id 分散的多筆記錄),
     整理成每台裝置一列的 devices-status.csv 用資料。
-    existing_cache(可選,即目前檔案裡已經有的資料)用來保留 lost_mode_enabled 這種
-    本地追蹤、不是從MDM查詢結果來的狀態,避免每次重建快取就被清空。
+    existing_cache(可選,即目前檔案裡已經有的資料)整列保留,新的查詢結果再蓋上去:
+    離線裝置的舊指令回應被清理後就查不到了,這樣畫面還是看得到最後一次取得的電量、容量、
+    系統版本跟 IP;lost_mode_enabled 這種本地追蹤的狀態也不會在重建快取時被清空。
     """
     by_serial = {}
     if existing_cache:
         for serial, old_row in existing_cache.items():
-            by_serial[serial] = {
-                "serial_number": serial,
-                "lost_mode_enabled": old_row.get("lost_mode_enabled", ""),
-                "location_lat": old_row.get("location_lat", ""),
-                "location_lng": old_row.get("location_lng", ""),
-                "location_at": old_row.get("location_at", ""),
-                "location_accuracy": old_row.get("location_accuracy", ""),
-            }
+            by_serial[serial] = {**old_row, "serial_number": serial}
 
     # 依result_updated_at時間排序(由舊到新)再處理,確保有「同一個裝置欄位可能被多種
     # request_type設定」的情況時(例如os_update_status同時會被OSUpdateStatus跟

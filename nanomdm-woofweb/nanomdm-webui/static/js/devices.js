@@ -109,6 +109,7 @@ function formatOsCell(current, available) {
   return `${currentText}${availableText}`;
 }
 
+// 最後同步超過這個天數就視為離線。時間是後端轉好的台灣時間字串(YYYY-MM-DD HH:MM:SS)
 function renderRow(row) {
   const tr = document.createElement("tr");
   tr.dataset.serial = row.serial_number;
@@ -159,7 +160,7 @@ function renderRow(row) {
     <td style="font-size:12px;">${capacityCell}</td>
     <td style="font-size:12px;">${osCell}</td>
     <td style="font-size:12px;">${ipCell}</td>
-    <td style="font-size:12px;">${escapeHtml(row.last_seen_at || "")}</td>
+    <td style="font-size:12px;">${lastSeenCellHtml(row.last_seen_at)}</td>
     <td style="font-family: var(--mono); font-size:10px; word-break:break-all;">${escapeHtml(row.enrollment_id)}</td>
     <td>
       <div class="row-actions">
