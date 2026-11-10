@@ -12,14 +12,29 @@
         <img src="{{ url_for('api_logo_image') }}?v={{ static_version }}" class="brand-logo" alt="LOGO">
         <span>{{ branding.site_label }}</span>
       </div>
-      <div class="dep-info-block">
-        <div class="dep-info-line" id="dep-info-line1">
-          <span class="status-light" id="dep-status-light"></span>
-          <span>[ASM連線狀態]</span>
-          <span id="dep-info-line1-text">載入中...</span>
+
+      <div class="topbar-nav">
+        <div class="asm-status-wrap">
+          <button class="nav-group nav-group-asm asm-status-btn" id="asm-status-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="asm-status-popover">
+            <span class="status-light" id="dep-status-light"></span>
+            <span>[ASM連線狀態]</span>
+            <span class="asm-status-org" id="asm-status-org">載入中...</span>
+          </button>
+          <div class="asm-status-popover hidden" id="asm-status-popover" role="dialog" aria-label="ASM 連線詳細資訊">
+            <div class="asm-popover-title">ASM 連線詳細資訊</div>
+            <div id="asm-status-detail">載入中...</div>
+            <div class="asm-popover-note">連線狀態每 10 分鐘更新一次</div>
+          </div>
         </div>
-        <div class="dep-info-line dep-info-line2" id="dep-info-line2"></div>
+
+        <nav class="nav-group nav-group-system">
+          <a href="{{ url_for('account_management_page') }}" class="{{ 'active' if active == 'account_management' else '' }}">帳號管理</a>
+          <a href="{{ url_for('system_logs_page') }}" class="{{ 'active' if active == 'system_logs' else '' }}">系統紀錄</a>
+          <a href="{{ url_for('system_status_page') }}" class="{{ 'active' if active == 'system_status' else '' }}">系統狀態</a>
+          <a href="{{ url_for('version_page') }}" class="{{ 'active' if active == 'version' else '' }}">版本與更新</a>
+        </nav>
       </div>
+
       <div class="user-area">
         <span class="username">👤 {{ session.get('username', '') }}</span>
         <a class="logout-btn" href="{{ url_for('logout') }}">登出</a>
@@ -27,35 +42,50 @@
     </header>
 
     <nav class="sidebar">
-      <a href="{{ url_for('env_page') }}" class="{{ 'active' if active == 'env' else '' }}">系統環境參數</a>
-      <a href="{{ url_for('cert_status_page') }}" class="{{ 'active' if active == 'cert_status' else '' }}">憑證狀態檢視</a>
-      <a href="{{ url_for('groups_page') }}" class="{{ 'active' if active == 'groups' else '' }}">群組一覽</a>
-      <a href="{{ url_for('dep_profiles_page') }}" class="{{ 'active' if active == 'dep_profiles' else '' }}">群組註冊檔</a>
-      <a href="{{ url_for('profiles_page') }}" class="{{ 'active' if active == 'profiles' else '' }}">群組描述檔</a>
-      <a href="{{ url_for('devices_page') }}" class="{{ 'active' if active == 'devices' else '' }}">裝置與命令</a>
-      <a href="{{ url_for('device_enrollment_status_page') }}" class="{{ 'active' if active == 'device_enrollment_status' else '' }}">裝置註冊狀態</a>
-      <a href="{{ url_for('lockscreen_page') }}" class="{{ 'active' if active == 'lockscreen' else '' }}">鎖定畫面資訊</a>
-      <div class="sidebar-divider"></div>
-      <a href="{{ url_for('asm_page') }}" class="{{ 'active' if active == 'asm' else '' }}">ASM 軟體資訊</a>
-      <a href="{{ url_for('asm_devices_page') }}" class="{{ 'active' if active == 'asm_devices' else '' }}">ASM 所有裝置</a>
-      <div class="sidebar-divider"></div>
-      <a href="{{ url_for('account_management_page') }}" class="{{ 'active' if active == 'account_management' else '' }}">帳號管理</a>
-      <a href="{{ url_for('system_logs_page') }}" class="{{ 'active' if active == 'system_logs' else '' }}">系統紀錄</a>
-      <a href="{{ url_for('system_status_page') }}" class="{{ 'active' if active == 'system_status' else '' }}">系統狀態</a>
-      <div class="sidebar-divider"></div>
-      <a href="{{ url_for('version_page') }}" class="{{ 'active' if active == 'version' else '' }}">版本與更新</a>
+      <div class="side-group side-group-mdm">
+        <a href="{{ url_for('env_page') }}" class="{{ 'active' if active == 'env' else '' }}">系統環境參數</a>
+        <a href="{{ url_for('cert_status_page') }}" class="{{ 'active' if active == 'cert_status' else '' }}">憑證狀態檢視</a>
+        <a href="{{ url_for('groups_page') }}" class="{{ 'active' if active == 'groups' else '' }}">群組一覽</a>
+        <a href="{{ url_for('dep_profiles_page') }}" class="{{ 'active' if active == 'dep_profiles' else '' }}">群組註冊檔</a>
+        <a href="{{ url_for('profiles_page') }}" class="{{ 'active' if active == 'profiles' else '' }}">群組描述檔</a>
+        <a href="{{ url_for('devices_page') }}" class="{{ 'active' if active == 'devices' else '' }}">裝置與命令</a>
+        <a href="{{ url_for('device_enrollment_status_page') }}" class="{{ 'active' if active == 'device_enrollment_status' else '' }}">裝置註冊狀態</a>
+        <a href="{{ url_for('lockscreen_page') }}" class="{{ 'active' if active == 'lockscreen' else '' }}">鎖定畫面資訊</a>
+      </div>
+      <div class="side-group side-group-asm">
+        <a href="{{ url_for('asm_page') }}" class="{{ 'active' if active == 'asm' else '' }}">ASM 軟體資訊</a>
+        <a href="{{ url_for('asm_devices_page') }}" class="{{ 'active' if active == 'asm_devices' else '' }}">ASM 所有裝置</a>
+      </div>
+      <button class="debug-toggle-btn" id="debug-toggle-btn" type="button" aria-pressed="false">
+        <span class="debug-toggle-dot"></span>
+        <span>Debug 輸出</span>
+        <span class="debug-toggle-state" id="debug-toggle-state">關閉</span>
+      </button>
     </nav>
 
-    <main class="main-content">
+    {% set page_titles = {
+      'env': ('系統環境參數', 'mdm'), 'cert_status': ('憑證狀態檢視', 'mdm'), 'groups': ('群組一覽', 'mdm'),
+      'dep_profiles': ('群組註冊檔', 'mdm'), 'profiles': ('群組描述檔', 'mdm'), 'devices': ('裝置與命令', 'mdm'),
+      'device_enrollment_status': ('裝置註冊狀態', 'mdm'), 'lockscreen': ('鎖定畫面資訊', 'mdm'),
+      'asm': ('ASM 軟體資訊', 'asm'), 'asm_devices': ('ASM 所有裝置', 'asm'),
+      'account_management': ('帳號管理', 'system'), 'system_logs': ('系統紀錄', 'system'),
+      'system_status': ('系統狀態', 'system'), 'version': ('版本與更新', 'system'),
+    } %}
+    {% set section_names = {'mdm': 'MDM 管理', 'asm': 'Apple School Manager', 'system': '系統'} %}
+    {% set page_info = page_titles.get(active) %}
+    <main class="main-content{% if page_info %} section-{{ page_info[1] }}{% endif %}">
+      {% if page_info %}
+      <div class="page-header">
+        <h1>{{ page_info[0] }}</h1>
+        <span class="page-section-chip">{{ section_names[page_info[1]] }}</span>
+      </div>
+      {% endif %}
       {% block content %}{% endblock %}
     </main>
 
-    <footer class="debugbar">
+    <footer class="debugbar hidden" id="debugbar">
       <div class="debugbar-header">
-        <label>
-          <input type="checkbox" id="debug-toggle" checked>
-          Debug 輸出(系統回應)
-        </label>
+        <span>Debug 輸出(系統回應)</span>
         <button class="clear-debug-btn" id="clear-debug-btn" type="button">清除</button>
       </div>
       <div class="debugbar-body" id="debugbar-body"></div>

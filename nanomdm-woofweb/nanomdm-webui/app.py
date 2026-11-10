@@ -717,12 +717,32 @@ def get_nanoaxm_script_env():
 # ---------------------------------------------------------------------------
 # 頂部資訊欄 - dep-account-detail
 # ---------------------------------------------------------------------------
+# 頂部[ASM連線狀態]每個頁面載入都會呼叫,帳號資訊幾乎不會變,成功的結果快取10分鐘,
+# 避免每切一頁就連一次Apple。失敗不快取,下一頁會重試;.env的nanodep連線設定變了就視為不同快取,
+# 上傳新的DEP Token成功後由 api_cert_dep_upload_token() 清掉。
+DEP_ACCOUNT_DETAIL_CACHE_SECONDS = 600
+_dep_account_detail_cache = {"key": None, "at": 0.0, "result": None}
+_dep_account_detail_cache_lock = threading.Lock()
+
+
+def clear_dep_account_detail_cache():
+    with _dep_account_detail_cache_lock:
+        _dep_account_detail_cache.update(key=None, at=0.0, result=None)
+
+
 @app.route("/api/dep-account-detail")
 @login_required
 def api_dep_account_detail():
+    script_env = get_nanodep_script_env()
+    cache_key = tuple(sorted(script_env.items()))
+    with _dep_account_detail_cache_lock:
+        cached = _dep_account_detail_cache
+        if cached["key"] == cache_key and time.monotonic() - cached["at"] < DEP_ACCOUNT_DETAIL_CACHE_SECONDS:
+            return jsonify(cached["result"])
+
     script = CFG["paths"]["dep_account_detail_script"]
     rc, out, err = utils.run_dep_account_detail(
-        script, env_file_path=CFG["paths"]["env_file"], extra_env=get_nanodep_script_env()
+        script, env_file_path=CFG["paths"]["env_file"], extra_env=script_env
     )
 
     fields = None
@@ -743,7 +763,12 @@ def api_dep_account_detail():
         except json.JSONDecodeError:
             fields = None
 
-    return jsonify({"returncode": rc, "stdout": out, "stderr": err, "fields": fields})
+    result = {"returncode": rc, "stdout": out, "stderr": err, "fields": fields,
+              "checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    if rc == 0 and fields:
+        with _dep_account_detail_cache_lock:
+            _dep_account_detail_cache.update(key=cache_key, at=time.monotonic(), result=result)
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1283,6 +1308,7 @@ def api_cert_dep_upload_token():
         log_activity_entry("憑證管理-DEP Token更新", False, detail=err or out)
         return jsonify({"ok": False, "message": f"解密/匯入失敗: {err or out}"}), 500
 
+    clear_dep_account_detail_cache()
     log_activity_entry("憑證管理-DEP Token更新", True, detail=out[:300] if out else None)
     return jsonify({
         "ok": True,

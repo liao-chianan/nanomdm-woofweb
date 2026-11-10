@@ -107,25 +107,35 @@ function readFieldValue(container, field) {
 }
 
 // ---- Debug 面板 ----
-const DEBUG_VISIBLE_KEY = "nanomdm_webui_debug_visible";
+// Debug輸出預設關閉;改用新的key,舊版存過「開啟」的瀏覽器也會回到關閉
+const DEBUG_VISIBLE_KEY = "nanomdm_webui_debug_panel_open";
 
 function initDebugPanel() {
-  const body = document.getElementById("debugbar-body");
-  const checkbox = document.getElementById("debug-toggle");
+  const bar = document.getElementById("debugbar");
+  const toggleBtn = document.getElementById("debug-toggle-btn");
+  const stateEl = document.getElementById("debug-toggle-state");
   const clearBtn = document.getElementById("clear-debug-btn");
+  if (!bar || !toggleBtn) return;
 
-  const saved = localStorage.getItem(DEBUG_VISIBLE_KEY);
-  const visible = saved === null ? true : saved === "1";
-  checkbox.checked = visible;
-  body.classList.toggle("hidden", !visible);
+  function setVisible(visible) {
+    bar.classList.toggle("hidden", !visible);
+    toggleBtn.classList.toggle("on", visible);
+    toggleBtn.setAttribute("aria-pressed", visible ? "true" : "false");
+    stateEl.textContent = visible ? "開啟" : "關閉";
+  }
 
-  checkbox.addEventListener("change", () => {
-    body.classList.toggle("hidden", !checkbox.checked);
-    localStorage.setItem(DEBUG_VISIBLE_KEY, checkbox.checked ? "1" : "0");
+  let saved = null;
+  try { saved = localStorage.getItem(DEBUG_VISIBLE_KEY); } catch (e) { /* 無法使用localStorage時維持預設關閉 */ }
+  setVisible(saved === "1");
+
+  toggleBtn.addEventListener("click", () => {
+    const visible = bar.classList.contains("hidden");
+    setVisible(visible);
+    try { localStorage.setItem(DEBUG_VISIBLE_KEY, visible ? "1" : "0"); } catch (e) { /* 忽略 */ }
   });
 
   clearBtn.addEventListener("click", () => {
-    body.innerHTML = "";
+    document.getElementById("debugbar-body").innerHTML = "";
   });
 }
 
@@ -205,39 +215,35 @@ async function apiFetchJSON(url, method, bodyObj) {
   });
 }
 
-function formatDepAccountInfo(fields) {
-  if (!fields) return null;
-  const line1Parts = [];
-  const line2Parts = [];
-
-  if (fields.org_name) line1Parts.push(fields.org_name);
-  if (fields.server_name) line1Parts.push(`Server: ${fields.server_name}`);
-
+function depAccountDetailRows(fields) {
+  const rows = [
+    ["單位", fields.org_name],
+    ["伺服器名稱", fields.server_name],
+  ];
   if (fields.admin_id && fields.facilitator_id && fields.admin_id === fields.facilitator_id) {
-    line1Parts.push(`帳號: ${fields.admin_id}`);
+    rows.push(["帳號", fields.admin_id]);
   } else {
-    if (fields.admin_id) line1Parts.push(`管理者: ${fields.admin_id}`);
-    if (fields.facilitator_id) line1Parts.push(`Facilitator: ${fields.facilitator_id}`);
+    rows.push(["管理者", fields.admin_id], ["Facilitator", fields.facilitator_id]);
   }
-
-  if (fields.org_id) line2Parts.push(`組織代碼: ${fields.org_id}`);
-  if (fields.server_uuid) line2Parts.push(`UUID: ${fields.server_uuid}`);
-
-  return {
-    line1: line1Parts.join("  ・  "),
-    line2: line2Parts.join("  ・  "),
-  };
+  rows.push(
+    ["組織代碼", fields.org_id],
+    ["伺服器 UUID", fields.server_uuid],
+    ["Email", fields.org_email],
+    ["電話", fields.org_phone],
+    ["地址", fields.org_address],
+  );
+  return rows.filter(([, value]) => value);
 }
 
-// ---- 頂部 dep-account-detail ----
+// ---- 頂部[ASM連線狀態]按鈕與詳細資訊小視窗 ----
 async function loadDepAccountDetail() {
-  const line1El = document.getElementById("dep-info-line1-text");
-  const line2El = document.getElementById("dep-info-line2");
+  const orgEl = document.getElementById("asm-status-org");
+  const detailEl = document.getElementById("asm-status-detail");
   const lightEl = document.getElementById("dep-status-light");
-  if (!line1El) return;
+  if (!orgEl) return;
 
-  line1El.textContent = "載入中...";
-  line2El.textContent = "";
+  orgEl.textContent = "載入中...";
+  detailEl.textContent = "載入中...";
   lightEl.className = "status-light";
 
   const res = await apiFetch("/api/dep-account-detail");
@@ -246,14 +252,44 @@ async function loadDepAccountDetail() {
   lightEl.className = "status-light " + (success ? "ok" : "error");
 
   if (success) {
-    const formatted = formatDepAccountInfo(res.data.fields);
-    line1El.textContent = formatted.line1 || "(無資料)";
-    line2El.textContent = formatted.line2 || "";
+    const fields = res.data.fields;
+    orgEl.textContent = fields.org_name || fields.server_name || "(無資料)";
+    const rows = depAccountDetailRows(fields).map(([label, value]) =>
+      `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join("");
+    const checkedAt = res.data.checked_at
+      ? `<dt>最後檢查</dt><dd>${escapeHtml(res.data.checked_at)}</dd>` : "";
+    detailEl.innerHTML = `<div class="asm-popover-status ok">連線正常</div><dl class="asm-popover-list">${rows}${checkedAt}</dl>`;
   } else {
     const out = (res.data && (res.data.stdout || res.data.stderr || "").trim()) || "";
-    line1El.textContent = out || "無法取得 ASM 帳號資訊";
-    line2El.textContent = "";
+    orgEl.textContent = "連線失敗";
+    detailEl.innerHTML = `<div class="asm-popover-status error">無法取得 ASM 帳號資訊</div>`
+      + (out ? `<pre class="asm-popover-error">${escapeHtml(out)}</pre>` : "");
   }
+}
+
+function initAsmStatusPopover() {
+  const btn = document.getElementById("asm-status-btn");
+  const pop = document.getElementById("asm-status-popover");
+  if (!btn || !pop) return;
+
+  function setOpen(open) {
+    pop.classList.toggle("hidden", !open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setOpen(pop.classList.contains("hidden"));
+  });
+  document.addEventListener("click", (e) => {
+    if (!pop.classList.contains("hidden") && !pop.contains(e.target)) setOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !pop.classList.contains("hidden")) {
+      setOpen(false);
+      btn.focus();
+    }
+  });
 }
 
 // ---- Modal 共用 ----
@@ -320,6 +356,7 @@ function createTableSorter(initialKey, initialDir) {
 
 document.addEventListener("DOMContentLoaded", () => {
   initDebugPanel();
+  initAsmStatusPopover();
   loadDepAccountDetail();
 
   document.addEventListener("change", (e) => {
