@@ -92,7 +92,13 @@ def inject_static_version():
 
 @app.context_processor
 def inject_branding():
-    return {"branding": config.reload_branding()}
+    branding = config.reload_branding()
+    # favicon網址帶上LOGO檔案的修改時間,換圖後瀏覽器就會重新抓,不會一直顯示舊的快取圖示
+    try:
+        favicon_version = str(int(os.path.getmtime(_current_logo_path(branding))))
+    except OSError:
+        favicon_version = "0"
+    return {"branding": branding, "favicon_version": favicon_version}
 
 
 @app.before_request
@@ -777,18 +783,65 @@ def api_dep_account_detail():
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
+def _current_logo_path(branding=None):
+    """回傳目前品牌設定的LOGO檔案路徑,自訂圖不存在時退回預設圖(兩者都不存在時回傳的路徑也不存在)。"""
+    if branding is None:
+        branding = config.reload_branding()
+    logo_dir = CFG["paths"]["logo_dir"]
+    full_path = os.path.join(logo_dir, branding.get("logo_filename", "default.png"))
+    if not os.path.exists(full_path):
+        full_path = os.path.join(logo_dir, "default.png")
+    return full_path
+
+
 @app.route("/api/logo-image")
 @login_required
 def api_logo_image():
-    branding = config.reload_branding()
-    logo_dir = CFG["paths"]["logo_dir"]
-    filename = branding.get("logo_filename", "default.png")
-    full_path = os.path.join(logo_dir, filename)
-    if not os.path.exists(full_path):
-        full_path = os.path.join(logo_dir, "default.png")
+    full_path = _current_logo_path()
     if not os.path.exists(full_path):
         return jsonify({"ok": False, "message": "找不到LOGO圖片,連預設圖片都不存在"}), 404
     return send_file(full_path)
+
+
+# favicon快取:(LOGO路徑, 修改時間) -> 縮好的PNG位元組,LOGO沒變就不用每次重新縮圖
+_favicon_cache = {"key": None, "data": None}
+_favicon_lock = threading.Lock()
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """瀏覽器分頁圖示,直接使用品牌設定的LOGO。
+    不加login_required:登入頁也要顯示圖示,而且瀏覽器抓favicon時不一定會帶登入狀態。
+    (仍受IP白名單限制)
+    """
+    full_path = _current_logo_path()
+    if not os.path.exists(full_path):
+        return "", 404
+    key = (full_path, os.path.getmtime(full_path))
+    with _favicon_lock:
+        if _favicon_cache["key"] != key:
+            try:
+                from io import BytesIO
+                from PIL import Image
+                with Image.open(full_path) as img:
+                    img = img.convert("RGBA")
+                    img.thumbnail((64, 64), Image.LANCZOS)
+                    # 非正方形的圖置中貼到透明正方形畫布,避免分頁圖示被拉扁
+                    canvas = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+                    canvas.paste(img, ((64 - img.width) // 2, (64 - img.height) // 2))
+                    buf = BytesIO()
+                    canvas.save(buf, format="PNG")
+                _favicon_cache["data"] = buf.getvalue()
+            except Exception as e:
+                app.logger.warning("favicon縮圖失敗,改用LOGO原圖: %s", e)
+                _favicon_cache["data"] = None
+            _favicon_cache["key"] = key
+        data = _favicon_cache["data"]
+    if data is None:
+        return send_file(full_path)
+    resp = Response(data, mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
 
 
 @app.route("/api/branding/save", methods=["POST"])
