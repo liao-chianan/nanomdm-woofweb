@@ -58,8 +58,8 @@ def _add_security_headers(response):
     圖片誤判成HTML/JS執行,是瀏覽器端安全性的基本防護,不影響任何正常瀏覽/操作功能。
 
     Cache-Control/Pragma: 防止登入頁、管理介面這類含有敏感資訊的頁面,被瀏覽器或中間的代理
-    伺服器快取下來——排除靜態檔案(CSS/JS),那些本身用?v=版本號做快取破壞,加上no-store只會
-    造成每次都重新下載,沒有實質安全效益,反而拖慢畫面載入速度。
+    伺服器快取下來——排除靜態檔案(CSS/JS)與分頁圖示(/favicon.ico),那些本身用?v=版本號做快取破壞,
+    加上no-store只會造成每次都重新下載,沒有實質安全效益,反而拖慢畫面載入速度。
 
     Strict-Transport-Security(HSTS)刻意不在這裡設定——這個標頭改成只由nginx那一層負責
     (nanomdm.nginx.example裡的add_header指令)。曾經同時在Flask跟nginx兩邊都加,結果nginx
@@ -69,7 +69,7 @@ def _add_security_headers(response):
     """
     response.headers["X-Content-Type-Options"] = "nosniff"
 
-    if not request.path.startswith("/static/"):
+    if not request.path.startswith("/static/") and request.path != "/favicon.ico":
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
 
@@ -270,7 +270,9 @@ def login():
             session["username"] = username
             return redirect(url_for("devices_page"))
         error = "帳號或密碼錯誤"
-    return render_template("login.html", error=error)
+    # 登入頁大標題顯示單位名稱(.env的SCHOOL_NAME),沒設定就只顯示站台名稱
+    org_name = (get_env_dict().get("SCHOOL_NAME") or "").strip()
+    return render_template("login.html", error=error, org_name=org_name)
 
 
 @app.route("/logout")

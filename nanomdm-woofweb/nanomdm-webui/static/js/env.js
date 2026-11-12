@@ -205,7 +205,7 @@ async function saveBrandingSiteLabel() {
     alert(res.data.message);
     const brandTextEl = document.querySelector(".brand span");
     if (brandTextEl) brandTextEl.textContent = siteLabel; // 立即反映在畫面左上角,不用重新整理頁面
-    document.title = siteLabel + " 管理介面"; // 瀏覽器分頁標題也跟著更新
+    document.title = siteLabel; // 瀏覽器分頁標題也跟著更新
   } else {
     alert("儲存失敗: " + ((res.data && res.data.message) || "未知錯誤"));
   }

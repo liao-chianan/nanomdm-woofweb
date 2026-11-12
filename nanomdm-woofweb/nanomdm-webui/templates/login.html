@@ -9,7 +9,7 @@
 <body>
   <div class="login-wrap">
     <form class="login-box" method="post">
-      <h1>登入 {{ branding.site_label }}</h1>
+      <h1>登入 {% if org_name %}{{ org_name }} {% endif %}{{ branding.site_label }}</h1>
       {% if error %}
         <div class="login-error">{{ error }}</div>
       {% endif %}
