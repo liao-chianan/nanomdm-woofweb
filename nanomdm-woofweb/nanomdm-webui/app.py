@@ -5203,12 +5203,15 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
         r.get("Adam ID"): (r.get("自動更新", "") == "true") for r in existing_rows
     }
 
+    # 先用批次查詢一次拿到所有App的版本資訊(141個App約4秒),不用每個App各查一次
+    store_info_by_adam_id = utils.fetch_app_store_info_batch([r["adam_id"] for r in rows])
+
     total = len(rows)
     for i, r in enumerate(rows):
         old_version, old_release_date = existing_version_by_adam_id.get(r["adam_id"], ("", ""))
         r["auto_update"] = existing_auto_update_by_adam_id.get(r["adam_id"], False)
 
-        store_info = utils.fetch_app_store_info(r["adam_id"])
+        store_info = store_info_by_adam_id.get(str(r["adam_id"]), {})
         version, release_date = store_info.get("version", ""), store_info.get("release_date", "")
         query_succeeded = bool(version or release_date)
 
@@ -5236,7 +5239,6 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
                 print(f"[ASM軟體資訊-自動更新] 自動派送失敗: {e}")
 
         yield {"current": i + 1, "total": total, "name": r.get("name", "")}
-        time.sleep(0.3)  # 避免短時間內大量呼叫iTunes Lookup API觸發速率限制
 
 
 def refresh_app_display_names():

@@ -959,32 +959,77 @@ def fetch_app_store_info(adam_id, country="tw", timeout=10):
     country參數:某些App如果在美國(預設)以外的地區上架,不帶country參數可能會
     查無資料,這裡預設帶tw(台灣),對學校情境比較適用。
 
+    快取問題:Apple的CDN會把同一個查詢網址快取最長一天(Cache-Control: max-age=86400),
+    App發布新版後,固定網址可能一整天都拿到舊版本號(實際遇過Canva新版已上架,這裡
+    卻一直查到上一版)。所以每次查詢多帶一個時間戳參數_,讓網址每次都不一樣,
+    直接向Apple取得最新資料。
+
     回傳dict: {"version", "release_date", "artwork_url"},缺少的欄位是空字串;
     查詢失敗或找不到資料時回傳空dict。
     """
     try:
         resp = requests.get(
             "https://itunes.apple.com/lookup",
-            params={"id": adam_id, "country": country},
+            params={"id": adam_id, "country": country, "_": int(time.time())},
             timeout=timeout,
         )
         resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results") or []
+        results = resp.json().get("results") or []
         if not results:
             return {}
-        info = results[0]
-        release_date_raw = info.get("currentVersionReleaseDate", "")
-        return {
-            "version": info.get("version", ""),
-            # 日期原始格式是ISO 8601(例如"2026-07-18T07:00:00Z"),只取日期部分,不需要精確到時分秒
-            "release_date": release_date_raw.split("T")[0] if release_date_raw else "",
-            # 顯示尺寸很小(幾十px),100x100已經夠清楚(高解析螢幕也夠),檔案也小;
-            # 沒有100的話依序退而求其次用512、60
-            "artwork_url": info.get("artworkUrl100") or info.get("artworkUrl512") or info.get("artworkUrl60") or "",
-        }
+        return _parse_app_store_info(results[0])
     except Exception:
         return {}
+
+
+def _parse_app_store_info(info):
+    """把iTunes Lookup回傳的單筆結果整理成 {"version", "release_date", "artwork_url"}"""
+    release_date_raw = info.get("currentVersionReleaseDate", "")
+    return {
+        "version": info.get("version", ""),
+        # 日期原始格式是ISO 8601(例如"2026-07-18T07:00:00Z"),只取日期部分,不需要精確到時分秒
+        "release_date": release_date_raw.split("T")[0] if release_date_raw else "",
+        # 顯示尺寸很小(幾十px),100x100已經夠清楚(高解析螢幕也夠),檔案也小;
+        # 沒有100的話依序退而求其次用512、60
+        "artwork_url": info.get("artworkUrl100") or info.get("artworkUrl512") or info.get("artworkUrl60") or "",
+    }
+
+
+APP_STORE_LOOKUP_BATCH_SIZE = 100
+
+
+def fetch_app_store_info_batch(adam_ids, country="tw", timeout=30):
+    """一次查詢多個App的版本資訊:iTunes Lookup的id參數可以用逗號串接多個adamId,
+    一次請求就拿到整批結果,比逐一查詢(每個App一次請求)快很多。每批最多100個,
+    每批失敗時重試一次。跟fetch_app_store_info一樣帶時間戳參數避開CDN快取。
+
+    回傳 {adamId字串: {"version", "release_date", "artwork_url"}}。
+    App Store上找不到的App(例如已下架)不會出現在回傳結果裡;某一批查詢失敗時,
+    那一批的App也不會出現——呼叫端一律當作「這次沒查到」處理,沿用舊資料。
+    """
+    ids = [str(a) for a in adam_ids if is_valid_adam_id(a)]
+    found = {}
+    for start in range(0, len(ids), APP_STORE_LOOKUP_BATCH_SIZE):
+        chunk = ids[start:start + APP_STORE_LOOKUP_BATCH_SIZE]
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    "https://itunes.apple.com/lookup",
+                    params={"id": ",".join(chunk), "country": country, "_": int(time.time())},
+                    timeout=timeout,
+                )
+                resp.raise_for_status()
+                for info in resp.json().get("results") or []:
+                    track_id = str(info.get("trackId", ""))
+                    if track_id in chunk:
+                        found[track_id] = _parse_app_store_info(info)
+                break
+            except Exception as e:
+                if attempt == 0:
+                    time.sleep(1)
+                else:
+                    print(f"[iTunes Lookup] 批次查詢失敗({len(chunk)}個App): {e}")
+    return found
 
 
 # ---------------------------------------------------------------------------
