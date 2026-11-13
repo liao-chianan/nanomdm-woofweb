@@ -52,7 +52,8 @@ function renderUpdateNotes(notesEl, data) {
     item.style.cssText = "border-left:3px solid #d1d5db; padding:2px 0 2px 10px; margin-bottom:10px;";
     const head = document.createElement("div");
     head.style.cssText = "font-weight:600; color:#111827;";
-    head.textContent = [c.tag, c.date, c.sha].filter(Boolean).join(" · ");
+    const people = [c.author, ...(c.co_authors || [])].filter(Boolean).join(" + ");
+    head.textContent = [c.tag, c.date, c.sha, people].filter(Boolean).join(" · ");
     const msg = document.createElement("div");
     msg.textContent = c.message || "(沒有說明文字)";
     item.appendChild(head);
@@ -335,13 +336,27 @@ async function confirmApplyUpdate() {
   }
 }
 
+// 作者(有GitHub帳號的連到帳號頁面)與Co-Authored-By列出的協作者
+function renderCommitPeople(c) {
+  const parts = [];
+  if (c.author) {
+    parts.push(c.author_is_account
+      ? `<a href="https://github.com/${encodeURIComponent(c.author)}" target="_blank" rel="noopener">${escapeHtml(c.author)}</a>`
+      : escapeHtml(c.author));
+  }
+  (c.co_authors || []).forEach((name) => {
+    parts.push(`<span style="color:#6b7280;">+ ${escapeHtml(name)}</span>`);
+  });
+  return parts.join("<br>");
+}
+
 async function loadUpdateHistory(forceRefresh) {
   const tbody = document.getElementById("version-history-tbody");
-  tbody.innerHTML = `<tr><td colspan="3">載入中...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="4">載入中...</td></tr>`;
 
   const res = await apiFetch("/api/version/history" + (forceRefresh === true ? "?refresh=1" : ""));
   if (!res.ok) {
-    tbody.innerHTML = `<tr><td colspan="3" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
     return;
   }
 
@@ -351,15 +366,15 @@ async function loadUpdateHistory(forceRefresh) {
 
   // GitHub查不到commit清單時,退回只顯示本機的更新紀錄
   if (!Array.isArray(commits)) {
-    const err = `<tr><td colspan="3" style="color:#d64545;">無法取得 GitHub 修改紀錄: ${escapeHtml(data.commits_error || "未知錯誤")}</td></tr>`;
+    const err = `<tr><td colspan="4" style="color:#d64545;">無法取得 GitHub 修改紀錄: ${escapeHtml(data.commits_error || "未知錯誤")}</td></tr>`;
     tbody.innerHTML = err + history
       .map((h) => `<tr><td style="font-family:var(--mono); font-size:13px;">${escapeHtml(h.target_version)}</td>
-        <td></td><td style="font-size:12px; color:#6b7280;">${escapeHtml(h.timestamp)} 更新</td></tr>`)
+        <td></td><td></td><td style="font-size:12px; color:#6b7280;">${escapeHtml(h.timestamp)} 更新</td></tr>`)
       .join("");
     return;
   }
   if (commits.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="3" style="color:#9ca3af;">GitHub 上沒有任何修改紀錄</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" style="color:#9ca3af;">GitHub 上沒有任何修改紀錄</td></tr>`;
     return;
   }
 
@@ -397,6 +412,7 @@ async function loadUpdateHistory(forceRefresh) {
             <span style="font-size:12px; color:#6b7280;">${escapeHtml(c.date)} · <a href="${commitUrl}" target="_blank" rel="noopener" title="在 GitHub 查看這次修改">${escapeHtml(c.sha)}</a></span>
           </td>
           <td style="font-size:13px; vertical-align:top;">${escapeHtml(title)}${detail}</td>
+          <td style="font-size:12px; vertical-align:top;">${renderCommitPeople(c)}</td>
           <td style="font-size:12px; vertical-align:top;">${status.join("<br>")}</td>
         </tr>
       `;

@@ -182,14 +182,28 @@ def fetch_commits_between(owner, repo, base_tag, head_tag, tag_by_sha=None, time
     return commits, data.get("total_commits", len(commits)), None
 
 
+_CO_AUTHOR_RE = re.compile(r"^co-authored-by:\s*(.+?)\s*(<[^>]*>)?\s*$", re.IGNORECASE)
+
+
 def _commit_entry(c, tag_by_sha):
-    """把GitHub API的單筆commit整理成畫面要用的欄位"""
+    """把GitHub API的單筆commit整理成畫面要用的欄位。
+    author:作者的GitHub帳號(對應不到帳號時用commit裡的作者名稱);
+    co_authors:commit訊息裡Co-Authored-By列出的共同作者名稱(不含email)。"""
     info = c.get("commit") or {}
+    raw_message = info.get("message") or ""
+    co_authors = []
+    for line in raw_message.splitlines():
+        m = _CO_AUTHOR_RE.match(line.strip())
+        if m and m.group(1) not in co_authors:
+            co_authors.append(m.group(1))
     return {
         "sha": (c.get("sha") or "")[:7],
         "tag": tag_by_sha.get(c.get("sha") or "", ""),
         "date": ((info.get("committer") or {}).get("date") or "")[:10],
-        "message": _strip_commit_trailers(info.get("message") or ""),
+        "message": _strip_commit_trailers(raw_message),
+        "author": (c.get("author") or {}).get("login") or (info.get("author") or {}).get("name") or "",
+        "author_is_account": bool((c.get("author") or {}).get("login")),
+        "co_authors": co_authors,
     }
 
 
