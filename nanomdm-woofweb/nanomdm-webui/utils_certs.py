@@ -256,7 +256,7 @@ def check_dep_oauth_token(nanodep_mysql_cfg, db_password, dep_name):
 def check_vpp_token(token_path):
     name = "VPP Content Token"
     description = "驗證 VPP(Apps and Books)授權管理 API 呼叫用的憑證,查詢/指派/收回 App 授權都需要這個 Token。"
-    renewal = "到 https://school.apple.com/#/main/preferences/paymentsandbilling/appsandbooks (偏好設定 → 付款與帳單 → Apps 與 Books),下載對應的 VPP Token 檔案,取代目前這個 .vpptoken 檔案即可(不需要更動程式碼)。"
+    renewal = "到 https://school.apple.com/#/main/locations (地點 → 選擇指定的伺服器 → 內容代號 → 下載),下載對應的 VPP Token 檔案,取代目前這個 .vpptoken 檔案即可(不需要更動程式碼)。"
     renewal_warning = "每年需要更新1次。"
 
     if not os.path.exists(token_path):

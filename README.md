@@ -51,7 +51,7 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 
 #### VPP Content Token
 
-到 [school.apple.com 偏好設定 → 付款與帳單 → 內容與代號](https://school.apple.com/#/main/preferences/paymentsandbilling/appsandbooks)，下載對應的 VPP Token 檔案，新增/取代 `.vpptoken` 檔案即可。
+到 [school.apple.com 地點](https://school.apple.com/#/main/locations)（地點 → 選擇指定的伺服器 → 內容代號 → 下載），下載對應的 VPP Token 檔案，新增/取代 `.vpptoken` 檔案即可。
 
 #### NanoAXM 私鑰/OAuth 憑證
 
