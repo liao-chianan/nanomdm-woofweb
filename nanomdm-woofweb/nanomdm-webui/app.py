@@ -4692,19 +4692,32 @@ def get_latest_installed_apps_bulk(enrollment_ids):
     ids = [e for e in (enrollment_ids or []) if e]
     if not ids:
         return {}
-    id_list = ",".join("'" + e.replace("'", "''") + "'" for e in ids)
+    def quote(s):
+        return "'" + s.replace("'", "''") + "'"
+
+    # 分兩步查:先找出每台裝置最新一筆有內容的回應是哪一道指令(不讀 result 大欄位,很快),
+    # 再用主鍵 (id, command_uuid) 只把那幾筆的內容讀出來。
+    # 原本用相關子查詢一次做完,裝置的歷史指令一多就要跑好幾分鐘,遠超過逾時時間。
     sql = (
-        "SELECT JSON_OBJECT('id', q.id, 'result_b64', TO_BASE64(r.result)) "
-        "FROM enrollment_queue q "
-        "JOIN commands c ON c.command_uuid = q.command_uuid "
-        "JOIN command_results r ON r.command_uuid = q.command_uuid AND r.id = q.id "
-        f"WHERE c.request_type = 'InstalledApplicationList' AND q.id IN ({id_list}) AND r.result IS NOT NULL "
-        "AND q.created_at = ("
-        "  SELECT MAX(q2.created_at) FROM enrollment_queue q2 "
-        "  JOIN commands c2 ON c2.command_uuid = q2.command_uuid "
-        "  JOIN command_results r2 ON r2.command_uuid = q2.command_uuid AND r2.id = q2.id "
-        "  WHERE q2.id = q.id AND c2.request_type = 'InstalledApplicationList' AND r2.result IS NOT NULL"
-        ");"
+        "SELECT r.id, r.command_uuid FROM command_results r "
+        "JOIN commands c ON c.command_uuid = r.command_uuid "
+        f"WHERE c.request_type = 'InstalledApplicationList' AND r.id IN ({','.join(quote(e) for e in ids)}) "
+        "AND r.result IS NOT NULL ORDER BY r.updated_at DESC;"
+    )
+    rc, out, _ = _run_nanomdm_sql(sql, timeout=60)
+    if rc != 0:
+        return {}
+    latest = {}
+    for line in out.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[0] not in latest:
+            latest[parts[0]] = parts[1]
+    if not latest:
+        return {}
+    pairs = ",".join(f"({quote(eid)},{quote(cu)})" for eid, cu in latest.items())
+    sql = (
+        "SELECT JSON_OBJECT('id', id, 'result_b64', TO_BASE64(result)) FROM command_results "
+        f"WHERE (id, command_uuid) IN ({pairs});"
     )
     rc, out, _ = _run_nanomdm_sql(sql, timeout=60)
     if rc != 0:
