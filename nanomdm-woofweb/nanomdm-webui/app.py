@@ -5937,15 +5937,47 @@ def api_version_set_current():
     return jsonify({"ok": True, "current_version": tag})
 
 
+# 更新歷程記錄的GitHub commit清單快取:每次開版本頁面都會載入,未設定GITHUB_TOKEN時
+# GitHub API每小時只有60次額度,5分鐘內重複開頁面直接用快取;按「重新整理」才強制重抓
+_version_commits_cache = {"time": 0, "data": None}
+_VERSION_COMMITS_CACHE_SECONDS = 300
+
+
 @app.route("/api/version/history")
 @login_required
 def api_version_history():
+    """更新歷程記錄:列出GitHub上最近的所有commit(不只有Release的版本),
+    標出目前安裝的版本、哪些修改還沒套用,以及這台主機過去透過這個頁面更新的時間
+    (來自.update_backups的備份目錄名稱)。GitHub查詢失敗時仍回傳本機的更新紀錄。"""
+    cfg = CFG["update"]
     backup_dir = "/opt/nanomdm-webui/.update_backups"
     try:
         history = utils_version.list_update_history(backup_dir)
-        return jsonify({"ok": True, "history": history})
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
+
+    now = time.time()
+    cached = _version_commits_cache["data"]
+    if cached and request.args.get("refresh") != "1" and now - _version_commits_cache["time"] < _VERSION_COMMITS_CACHE_SECONDS:
+        commits, commits_error = cached, None
+    else:
+        token = _get_github_token()
+        tags, commits_error = utils_version.fetch_github_tags(cfg["github_owner"], cfg["github_repo"], github_token=token)
+        commits = None
+        if tags is not None:
+            tag_by_sha = {t["sha"]: t["name"] for t in tags}
+            commits, commits_error = utils_version.fetch_recent_commits(
+                cfg["github_owner"], cfg["github_repo"], tag_by_sha=tag_by_sha, github_token=token)
+        if commits is not None:
+            _version_commits_cache.update(time=now, data=commits)
+
+    return jsonify({
+        "ok": True,
+        "history": history,
+        "current_version": utils_version.get_current_version(cfg["version_file"]),
+        "commits": commits,
+        "commits_error": commits_error,
+    })
 
 
 @app.route("/api/version/check-update")
@@ -5964,14 +5996,27 @@ def api_version_check_update():
 
     current = utils_version.get_current_version(cfg["version_file"])
 
-    releases_map = utils_version.fetch_github_releases_map(cfg["github_owner"], cfg["github_repo"], github_token=token)
-    latest_notes = releases_map.get(latest, {}).get("body")
+    update_available = bool(current) and (current != latest)
+
+    # 更新說明:列出目前版本到最新版本之間所有commit的說明文字(不用另外建立Release也看得到,
+    # 跨好幾版更新時每一版的說明都會列出來)。查不到時(例如目前版本的標籤不在GitHub上)
+    # 才退回顯示最新版本的Release說明
+    commits, commits_total, latest_notes = None, 0, None
+    if update_available:
+        tag_by_sha = {t["sha"]: t["name"] for t in tags}
+        commits, commits_total, _ = utils_version.fetch_commits_between(
+            cfg["github_owner"], cfg["github_repo"], current, latest, tag_by_sha=tag_by_sha, github_token=token)
+        if commits is None:
+            releases_map = utils_version.fetch_github_releases_map(cfg["github_owner"], cfg["github_repo"], github_token=token)
+            latest_notes = releases_map.get(latest, {}).get("body")
 
     return jsonify({
         "ok": True,
         "current_version": current,
         "latest_version": latest,
-        "update_available": bool(current) and (current != latest),
+        "update_available": update_available,
+        "commits": commits,
+        "commits_total": commits_total,
         "release_notes": latest_notes,
     })
 

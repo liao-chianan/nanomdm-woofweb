@@ -65,14 +65,15 @@
     <button id="version-history-refresh-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
   </h2>
   <p style="color:#6b7280; font-size:13px; margin:6px 0;">
-    過去每一次透過這個頁面套用更新的紀錄,純粹顯示用,不能從這裡切換回舊版本。
+    GitHub 上最近 50 筆修改(包含沒有建立 Release 的版本),並標出這台主機目前的版本、還沒套用的修改,
+    以及過去透過這個頁面更新的時間。純粹顯示用,不能從這裡切換回舊版本。
   </p>
   <table class="data-table" id="version-history-table">
     <thead>
-      <tr><th>更新時間</th><th>更新到的版本</th></tr>
+      <tr><th style="width:150px;">版本</th><th>修改說明</th><th style="width:170px;">狀態</th></tr>
     </thead>
     <tbody id="version-history-tbody">
-      <tr><td colspan="2">載入中...</td></tr>
+      <tr><td colspan="3">載入中...</td></tr>
     </tbody>
   </table>
 </div>

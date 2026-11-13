@@ -34,6 +34,39 @@ async function saveManualVersion() {
   }
 }
 
+// 列出目前版本到最新版本之間每一個commit的說明(最新的在上面);
+// 後端查不到commit清單時,才退回顯示最新版本的Release說明
+function renderUpdateNotes(notesEl, data) {
+  notesEl.textContent = "";
+  const commits = data.commits;
+  if (!Array.isArray(commits) || commits.length === 0) {
+    notesEl.textContent = data.release_notes || "(這個版本沒有額外說明)";
+    return;
+  }
+  const intro = document.createElement("div");
+  intro.style.cssText = "color:#6b7280; margin-bottom:8px;";
+  intro.textContent = `這次更新包含 ${data.commits_total || commits.length} 筆修改:`;
+  notesEl.appendChild(intro);
+  commits.forEach((c) => {
+    const item = document.createElement("div");
+    item.style.cssText = "border-left:3px solid #d1d5db; padding:2px 0 2px 10px; margin-bottom:10px;";
+    const head = document.createElement("div");
+    head.style.cssText = "font-weight:600; color:#111827;";
+    head.textContent = [c.tag, c.date, c.sha].filter(Boolean).join(" · ");
+    const msg = document.createElement("div");
+    msg.textContent = c.message || "(沒有說明文字)";
+    item.appendChild(head);
+    item.appendChild(msg);
+    notesEl.appendChild(item);
+  });
+  if (data.commits_total > commits.length) {
+    const more = document.createElement("div");
+    more.style.color = "#6b7280";
+    more.textContent = `(共 ${data.commits_total} 筆,這裡只列出 ${commits.length} 筆,其餘請到 GitHub 查看)`;
+    notesEl.appendChild(more);
+  }
+}
+
 async function checkForUpdate() {
   const btn = document.getElementById("version-check-btn");
   btn.disabled = true;
@@ -61,7 +94,7 @@ async function checkForUpdate() {
     updateBtn.style.display = "none";
   } else if (data.update_available) {
     summary.textContent = `發現新版本: ${data.latest_version}(目前: ${data.current_version})`;
-    notesEl.textContent = data.release_notes || "(這個版本沒有額外說明)";
+    renderUpdateNotes(notesEl, data);
     updateBtn.style.display = "";
     updateBtn.onclick = () => openDiffModal(data.latest_version);
   } else {
@@ -302,32 +335,69 @@ async function confirmApplyUpdate() {
   }
 }
 
-async function loadUpdateHistory() {
+async function loadUpdateHistory(forceRefresh) {
   const tbody = document.getElementById("version-history-tbody");
-  tbody.innerHTML = `<tr><td colspan="2">載入中...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="3">載入中...</td></tr>`;
 
-  const res = await apiFetch("/api/version/history");
+  const res = await apiFetch("/api/version/history" + (forceRefresh === true ? "?refresh=1" : ""));
   if (!res.ok) {
-    tbody.innerHTML = `<tr><td colspan="2" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="3" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
     return;
   }
 
-  const history = res.data.history || [];
-  if (history.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="2" style="color:#9ca3af;">目前沒有任何更新歷程紀錄</td></tr>`;
+  const data = res.data;
+  const history = data.history || [];
+  const commits = data.commits;
+
+  // GitHub查不到commit清單時,退回只顯示本機的更新紀錄
+  if (!Array.isArray(commits)) {
+    const err = `<tr><td colspan="3" style="color:#d64545;">無法取得 GitHub 修改紀錄: ${escapeHtml(data.commits_error || "未知錯誤")}</td></tr>`;
+    tbody.innerHTML = err + history
+      .map((h) => `<tr><td style="font-family:var(--mono); font-size:13px;">${escapeHtml(h.target_version)}</td>
+        <td></td><td style="font-size:12px; color:#6b7280;">${escapeHtml(h.timestamp)} 更新</td></tr>`)
+      .join("");
+    return;
+  }
+  if (commits.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="3" style="color:#9ca3af;">GitHub 上沒有任何修改紀錄</td></tr>`;
     return;
   }
 
-  tbody.innerHTML = history
-    .map((h) => {
-      const releaseUrl = `https://github.com/${window.GITHUB_OWNER}/${window.GITHUB_REPO}/releases/tag/${encodeURIComponent(h.target_version)}`;
+  // 每個版本最近一次在這台主機更新的時間(history已經由新到舊排列)
+  const updatedAt = {};
+  history.forEach((h) => { if (!updatedAt[h.target_version]) updatedAt[h.target_version] = h.timestamp; });
+
+  // commits由新到舊排列:目前版本那一筆(含)以下都已經套用,上面的是還沒套用的
+  const currentIndex = commits.findIndex((c) => c.tag && c.tag === data.current_version);
+
+  tbody.innerHTML = commits
+    .map((c, i) => {
+      const lines = (c.message || "").split("\n");
+      const title = lines[0] || "(沒有說明文字)";
+      const rest = lines.slice(1).join("\n").trim();
+      const detail = rest
+        ? `<details style="margin-top:4px;"><summary style="cursor:pointer; color:#6b7280; font-size:12px;">詳細說明</summary>
+             <div style="white-space:pre-wrap; font-size:12px; color:#374151; margin-top:4px;">${escapeHtml(rest)}</div></details>`
+        : "";
+
+      const status = [];
+      if (currentIndex !== -1) {
+        if (i === currentIndex) status.push(`<span style="color:#047857; font-weight:600;">目前版本</span>`);
+        else if (i < currentIndex) status.push(`<span style="color:#b45309;">尚未套用</span>`);
+        else status.push(`<span style="color:#6b7280;">已包含</span>`);
+      }
+      if (c.tag && updatedAt[c.tag]) status.push(`<span style="color:#6b7280;">${escapeHtml(updatedAt[c.tag])} 更新</span>`);
+
+      const commitUrl = `https://github.com/${window.GITHUB_OWNER}/${window.GITHUB_REPO}/commit/${encodeURIComponent(c.sha)}`;
+      const rowStyle = i === currentIndex ? ' style="background:#ecfdf5;"' : "";
       return `
-        <tr>
-          <td style="font-size:13px;">${escapeHtml(h.timestamp)}</td>
-          <td style="font-family:var(--mono); font-size:13px;">
-            ${escapeHtml(h.target_version)}
-            <a href="${releaseUrl}" target="_blank" rel="noopener" style="margin-left:6px; font-size:12px;" title="查看這個版本的 release note">🔗</a>
+        <tr${rowStyle}>
+          <td style="font-family:var(--mono); font-size:13px; vertical-align:top;">
+            ${c.tag ? `<strong>${escapeHtml(c.tag)}</strong><br>` : ""}
+            <span style="font-size:12px; color:#6b7280;">${escapeHtml(c.date)} · <a href="${commitUrl}" target="_blank" rel="noopener" title="在 GitHub 查看這次修改">${escapeHtml(c.sha)}</a></span>
           </td>
+          <td style="font-size:13px; vertical-align:top;">${escapeHtml(title)}${detail}</td>
+          <td style="font-size:12px; vertical-align:top;">${status.join("<br>")}</td>
         </tr>
       `;
     })
@@ -341,7 +411,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("version-manual-save-btn").addEventListener("click", saveManualVersion);
   document.getElementById("version-check-btn").addEventListener("click", checkForUpdate);
-  document.getElementById("version-history-refresh-btn").addEventListener("click", loadUpdateHistory);
+  document.getElementById("version-history-refresh-btn").addEventListener("click", () => loadUpdateHistory(true));
   document.getElementById("version-apply-confirm-btn").addEventListener("click", confirmApplyUpdate);
 
   document.getElementById("version-verify-btn").addEventListener("click", runVersionVerify);

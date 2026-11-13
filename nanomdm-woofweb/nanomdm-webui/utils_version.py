@@ -143,6 +143,73 @@ def fetch_github_releases_map(owner, repo, timeout=15, github_token=None):
     return result
 
 
+_COMMIT_TRAILER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: \S")
+
+
+def _strip_commit_trailers(message):
+    """去掉commit訊息最後一段的署名區塊(例如Co-Authored-By、Claude-Session),
+    規則跟git判斷trailer一樣:最後一段(空行之後)每一行都是「英文欄位名: 內容」才算。"""
+    paragraphs = message.strip().split("\n\n")
+    if len(paragraphs) > 1 and all(_COMMIT_TRAILER_RE.match(l) for l in paragraphs[-1].splitlines()):
+        paragraphs.pop()
+    return "\n\n".join(paragraphs).strip()
+
+
+def fetch_commits_between(owner, repo, base_tag, head_tag, tag_by_sha=None, timeout=20, github_token=None):
+    """列出從base_tag(目前版本)到head_tag(最新版本)之間、還沒套用的所有commit,
+    給「檢測更新」顯示每次修改的說明文字用。不需要另外建立GitHub Release也看得到。
+
+    tag_by_sha:{commit sha: tag名稱},有帶的話會標出每個commit對應的版本標籤。
+    commit訊息最後的署名區塊(Co-Authored-By等)不顯示。
+    回傳 (commits, total, error)。commits由新到舊排列,每個元素:
+      {"sha": 前7碼, "tag": 版本標籤或空字串, "date": "YYYY-MM-DD", "message": 說明文字}
+    GitHub的比對API最多回傳250個commit,total是實際總數(超過時呼叫端可以提示)。
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/{base_tag}...{head_tag}"
+    try:
+        resp = requests.get(url, headers=_github_headers(github_token), timeout=timeout)
+    except requests.RequestException as e:
+        return None, 0, f"連線失敗: {e}"
+    if resp.status_code != 200:
+        return None, 0, _friendly_error_from_response(resp)
+    try:
+        data = resp.json()
+    except Exception:
+        return None, 0, "GitHub API回應格式無法解析"
+
+    commits = [_commit_entry(c, tag_by_sha or {}) for c in data.get("commits") or []]
+    commits.reverse()  # GitHub由舊到新排列,畫面上最新的放最上面
+    return commits, data.get("total_commits", len(commits)), None
+
+
+def _commit_entry(c, tag_by_sha):
+    """把GitHub API的單筆commit整理成畫面要用的欄位"""
+    info = c.get("commit") or {}
+    return {
+        "sha": (c.get("sha") or "")[:7],
+        "tag": tag_by_sha.get(c.get("sha") or "", ""),
+        "date": ((info.get("committer") or {}).get("date") or "")[:10],
+        "message": _strip_commit_trailers(info.get("message") or ""),
+    }
+
+
+def fetch_recent_commits(owner, repo, limit=50, tag_by_sha=None, timeout=20, github_token=None):
+    """列出repo預設分支最近的commit(由新到舊),給「更新歷程記錄」顯示所有修改用,
+    不只是有建立Release的版本。回傳 (commits, error),commits格式同fetch_commits_between。"""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits"
+    try:
+        resp = requests.get(url, params={"per_page": limit}, headers=_github_headers(github_token), timeout=timeout)
+    except requests.RequestException as e:
+        return None, f"連線失敗: {e}"
+    if resp.status_code != 200:
+        return None, _friendly_error_from_response(resp)
+    try:
+        data = resp.json()
+    except Exception:
+        return None, "GitHub API回應格式無法解析"
+    return [_commit_entry(c, tag_by_sha or {}) for c in data], None
+
+
 def map_repo_path_to_local(relative_path, cfg):
     """把「已經去除repo_subfolder前綴」的相對路徑,對應到本地實際檔案路徑。
     例如 "nanomdm-webui/app.py" -> "/opt/nanomdm-webui/app.py"
