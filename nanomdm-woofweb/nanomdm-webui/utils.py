@@ -1243,38 +1243,60 @@ def find_devices_in_groups(devices_csv_path, group_names):
 
 def query_all_devices_latest_status(mysql_cfg, db_password, enrollment_id=None):
     """一次查出「每一台裝置」最近一筆 DeviceInformation / AvailableOSUpdates /
-    OSUpdateStatus / DeviceLocation 回應,用 window function(ROW_NUMBER)在單一SQL裡完成,
+    OSUpdateStatus / DeviceLocation 回應,用 window function(ROW_NUMBER)一次查出所有裝置,
     不用對每台裝置各自呼叫一次(那樣裝置一多會很慢)。
 
     enrollment_id: 選填,只查這一台裝置(給單一裝置手動同步用,不用每次都撈出全部裝置)。
     回傳 (rows, rc, err),rows 是 [{id, request_type, result, result_updated_at}, ...]
     """
-    enrollment_filter = ""
+    def run_sql(sql):
+        args = [
+            "docker", "exec",
+            mysql_cfg["docker_container"],
+            "mysql",
+            f"-u{mysql_cfg['db_user']}",
+            f"-p{db_password}",
+            "-N", "-B", "--raw",
+            mysql_cfg["db_name"],
+            "-e", sql,
+        ]
+        return run_cmd(args, timeout=30)
+
+    def quote(s):
+        return "'" + s.replace("'", "''") + "'"
+
+    # 分兩步查,避免把所有歷史回應的 result 大欄位都讀進來排序(原本經 view_queue 一次做完,
+    # 歷史資料十幾萬筆時要 25~85 秒,超過逾時,CPU 也被吃滿):
+    # 第一步只用小欄位找出每台裝置、每種指令最新一筆回應是哪一道指令;
+    # 第二步用主鍵 (id, command_uuid) 只讀出那幾筆的內容。
     if enrollment_id:
-        safe_id = enrollment_id.replace("'", "''")
-        enrollment_filter = f"AND id = '{safe_id}' "
+        hint, enrollment_filter = "", f"AND r.id = {quote(enrollment_id)} "
+    else:
+        # 查全部裝置時改用 hash join:逐筆用主鍵 JOIN 十幾萬筆會在 MySQL 記憶體快取裡不斷換頁,反而更慢
+        hint, enrollment_filter = "/*+ NO_INDEX(c) NO_INDEX(r) */ ", ""
     sql = (
-        "SELECT JSON_ARRAYAGG(JSON_OBJECT("
-        "'id', id, 'request_type', request_type, 'result_b64', TO_BASE64(result), "
-        "'result_updated_at', DATE_FORMAT(CONVERT_TZ(result_updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
-        ")) FROM (SELECT id, request_type, result, result_updated_at, "
-        "ROW_NUMBER() OVER (PARTITION BY id, request_type ORDER BY result_updated_at DESC) AS rn "
-        "FROM view_queue "
-        "WHERE request_type IN ('DeviceInformation', 'AvailableOSUpdates', 'OSUpdateStatus', 'DeviceLocation', 'ScheduleOSUpdate') "
-        f"AND result IS NOT NULL {enrollment_filter}"
+        f"SELECT id, command_uuid FROM (SELECT {hint}r.id, r.command_uuid, "
+        "ROW_NUMBER() OVER (PARTITION BY r.id, c.request_type ORDER BY r.updated_at DESC) AS rn "
+        "FROM command_results r JOIN commands c ON c.command_uuid = r.command_uuid "
+        "WHERE c.request_type IN ('DeviceInformation', 'AvailableOSUpdates', 'OSUpdateStatus', 'DeviceLocation', 'ScheduleOSUpdate') "
+        f"AND r.result IS NOT NULL {enrollment_filter}"
         ") t WHERE rn = 1;"
     )
-    args = [
-        "docker", "exec",
-        mysql_cfg["docker_container"],
-        "mysql",
-        f"-u{mysql_cfg['db_user']}",
-        f"-p{db_password}",
-        "-N", "-B", "--raw",
-        mysql_cfg["db_name"],
-        "-e", sql,
-    ]
-    rc, out, err = run_cmd(args, timeout=30)
+    rc, out, err = run_sql(sql)
+    if rc != 0:
+        return None, rc, (err or out)
+    pairs = [line.split("\t") for line in out.strip().splitlines() if line.count("\t") == 1]
+    if not pairs:
+        return [], 0, None
+
+    sql = (
+        "SELECT JSON_ARRAYAGG(JSON_OBJECT("
+        "'id', r.id, 'request_type', c.request_type, 'result_b64', TO_BASE64(r.result), "
+        "'result_updated_at', DATE_FORMAT(CONVERT_TZ(r.updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
+        ")) FROM command_results r JOIN commands c ON c.command_uuid = r.command_uuid "
+        f"WHERE (r.id, r.command_uuid) IN ({','.join(f'({quote(i)},{quote(u)})' for i, u in pairs)});"
+    )
+    rc, out, err = run_sql(sql)
     if rc != 0:
         return None, rc, (err or out)
 
