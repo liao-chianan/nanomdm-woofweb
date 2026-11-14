@@ -68,6 +68,7 @@
     GitHub 上最近 50 筆修改(包含沒有建立 Release 的版本),並標出這台主機目前的版本、還沒套用的修改,
     作者與協作者,以及過去透過這個頁面更新的時間。純粹顯示用,不能從這裡切換回舊版本。
   </p>
+  <div id="version-rollback-box" style="background:#f8f9fb; border:1px solid var(--border-color); border-radius:8px; padding:10px 14px; margin:8px 0 12px 0; font-size:13px;">載入中...</div>
   <table class="data-table" id="version-history-table">
     <thead>
       <tr><th style="width:150px;">版本</th><th>修改說明</th><th style="width:150px;">作者 / 協作者</th><th style="width:150px;">狀態</th></tr>
@@ -88,6 +89,12 @@
     <p style="font-size:13px; color:#374151;">以下檔案會被覆蓋或新增/刪除(執行前會自動備份現有內容):</p>
     <div id="version-diff-file-list" style="max-height:300px; overflow-y:auto; background:#f8f9fb; border-radius:6px; padding:10px; margin-bottom:10px;"></div>
     <p style="font-size:12px; color:#9ca3af;" id="version-diff-empty-hint"></p>
+    <div id="version-diff-risk" class="hidden" style="background:#fef2f2; border:1px solid #fecaca; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#991b1b;">
+      <div style="font-weight:700; margin-bottom:4px;">⚠️ 這次更新無法退版,請先自行備份系統(例如 VM 快照)</div>
+      <div id="version-diff-risk-detail" style="white-space:pre-wrap; line-height:1.6;"></div>
+      <label style="display:block; margin-top:8px; font-weight:600;"><input type="checkbox" id="version-backup-confirm" style="width:auto;"> 我已自行備份系統</label>
+    </div>
+    <p id="version-diff-risk-error" class="hidden" style="font-size:12px; color:#b45309;"></p>
     <p style="font-size:13px; color:#b42318; font-weight:600;">⚠️ 相關服務會自動重啟,執行過程中網頁介面可能會短暫無法連線。</p>
     <div class="field-row"><label>請輸入您目前登入的密碼以確認</label><input type="password" id="version-apply-password-input"></div>
     <button id="version-apply-confirm-btn" type="button" style="margin-top:10px;">確認執行</button>

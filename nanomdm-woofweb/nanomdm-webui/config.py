@@ -121,6 +121,9 @@ DEFAULT_CONFIG = {
         "repo_subfolder": "nanomdm-woofweb",
         "version_file": "/opt/nanomdm-webui/VERSION",
         "eligible_extensions": [".py", ".sh", ".css", ".js", ".html"],
+        # 更新範圍內出現這些檔案時,代表需要管理者手動處理(更新機制不會套用),
+        # 更新前會提醒先自行備份系統,而且這次更新不能退版
+        "manual_change_patterns": ["docker-compose*.yml", "docker-compose*.yaml", "*.sql", ".env*", "*.env"],
         "path_map": {
             "nanomdm-webui": "/opt/nanomdm-webui",
             "nanomdm-deployment": "/opt/nanomdm-deployment"

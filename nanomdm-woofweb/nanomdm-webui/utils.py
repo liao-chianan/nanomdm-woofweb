@@ -1654,6 +1654,45 @@ def send_mdm_command(nanomdm_base_url, api_user, api_key, enrollment_id, request
     return resp.status_code, result_json
 
 
+def send_mdm_command_bulk(nanomdm_base_url, api_user, api_key, enrollment_ids, request_type, params=None, timeout=30):
+    """把同一道指令一次派送給多台裝置(nanomdm 的 /v1/enqueue/{id,id,...})。
+    nanomdm 只建立一筆 commands,再替每台裝置各排入一筆 enrollment_queue,結果也是逐台記錄。
+
+    回傳 dict:
+      queued:        True 代表這批已經排入佇列(全部裝置)
+      command_error: 排入佇列失敗的原因(例如其中一台不是已註冊的裝置)——這時整批都「沒有」寫入,
+                     呼叫端可以安全地改成逐台派送
+      push_errors:   {enrollment_id: 錯誤} 推播失敗的裝置——指令「已經」排入佇列,只是這次沒喚醒裝置,
+                     呼叫端不可以重送,不然會重複排入同一道指令
+      unknown:       連線失敗或逾時,不確定有沒有排入——呼叫端不要重送,交給下一輪排程的 pending 檢查處理
+    """
+    result = {"queued": False, "command_error": None, "push_errors": {}, "unknown": None}
+    plist_bytes = build_command_plist(request_type, params)
+    url = f"{nanomdm_base_url.rstrip('/')}/v1/enqueue/{','.join(enrollment_ids)}"
+    try:
+        resp = requests.put(url, data=plist_bytes, auth=(api_user, api_key), timeout=timeout, verify=True)
+    except requests.RequestException as e:
+        result["unknown"] = str(e)
+        return result
+    try:
+        data = resp.json()
+    except Exception:
+        result["unknown"] = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        return result
+
+    if data.get("command_error"):
+        result["command_error"] = data["command_error"]
+        return result
+    if not data.get("command_uuid"):
+        result["unknown"] = f"HTTP {resp.status_code}: 回應裡沒有 command_uuid"
+        return result
+    result["queued"] = True
+    for eid, st in (data.get("status") or {}).items():
+        if isinstance(st, dict) and st.get("push_error"):
+            result["push_errors"][eid] = st["push_error"]
+    return result
+
+
 def trigger_push(nanomdm_base_url, api_user, api_key, enrollment_id, timeout=15):
     url = f"{nanomdm_base_url.rstrip('/')}/v1/push/{enrollment_id}"
     resp = requests.get(url, auth=(api_user, api_key), timeout=timeout)

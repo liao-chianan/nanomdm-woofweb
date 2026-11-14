@@ -5,7 +5,9 @@ Release的版本說明當作選配的加分資訊,有的話顯示,沒有的話�
 """
 import datetime
 import difflib
+import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -585,15 +587,43 @@ def build_verify_diff(owner, repo, tag, repo_path, cfg, timeout=20, github_token
     return {"patch": "".join(diff_lines), "note": note}, None
 
 
+UPDATE_MANIFEST_NAME = "manifest.json"
+NO_ROLLBACK_MARKER = "【無法退版】"
+
+
+def _read_manifest(folder_path):
+    try:
+        with open(os.path.join(folder_path, UPDATE_MANIFEST_NAME), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _write_manifest(folder_path, manifest):
+    tmp = os.path.join(folder_path, UPDATE_MANIFEST_NAME + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, os.path.join(folder_path, UPDATE_MANIFEST_NAME))
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def list_update_history(backup_dir):
-    """掃描更新備份目錄底下的子目錄,解析出過去每一次更新的時間跟目標版本,
+    """掃描更新備份目錄底下的子目錄,解析出過去每一次更新/退版的時間跟版本,
     給[版本與更新]頁面的「更新歷程記錄」使用。
 
-    每個子目錄的命名格式是「{YYYYMMDD_HHMMSS}_to_{target_tag}」(apply_version_update()
-    建立備份時的命名慣例),從這個名稱反推出「什麼時候更新到了哪個版本」,不需要另外
-    維護一份獨立的歷程記錄資料庫。
+    子目錄命名:
+      更新:「{YYYYMMDD_HHMMSS}_to_{target_tag}」(apply_version_update() 建立)
+      退版:「{YYYYMMDD_HHMMSS}_rollback_{from_tag}_to_{target_tag}」(rollback_update() 建立)
+    有 manifest.json 的(退版功能加入之後的更新)會多帶 from_version / rolled_back_at。
 
-    回傳一個list,每個元素是{"timestamp", "target_version", "folder_name"},
+    回傳 list,每個元素是 {"timestamp", "target_version", "folder_name", "kind", "from_version", "rolled_back_at"},
     依時間新到舊排序。目錄不存在或解析失敗的項目會被跳過,不會讓整個函式出錯。
     """
     if not os.path.exists(backup_dir):
@@ -604,29 +634,85 @@ def list_update_history(backup_dir):
         full_path = os.path.join(backup_dir, folder_name)
         if not os.path.isdir(full_path):
             continue
-        match = re.match(r"^(\d{8}_\d{6})_to_(.+)$", folder_name)
+        match = re.match(r"^(\d{8}_\d{6})_(?:rollback_(.+?)_)?to_(.+)$", folder_name)
         if not match:
             continue
-        timestamp_raw, target_version = match.groups()
+        timestamp_raw, rollback_from, target_version = match.groups()
         try:
             dt = datetime.datetime.strptime(timestamp_raw, "%Y%m%d_%H%M%S")
-            timestamp_display = dt.strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
+        manifest = _read_manifest(full_path) or {}
         history.append({
-            "timestamp": timestamp_display,
+            "timestamp": dt.strftime("%Y-%m-%d %H:%M:%S"),
             "target_version": target_version,
             "folder_name": folder_name,
+            "kind": "rollback" if rollback_from else "update",
+            "from_version": rollback_from or manifest.get("from_version"),
+            "rolled_back_at": manifest.get("rolled_back_at"),
         })
 
     history.sort(key=lambda h: h["timestamp"], reverse=True)
     return history
 
 
-def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github_token=None):
+def _is_manual_change_file(relative_path, cfg):
+    """更新機制不會處理、需要管理者手動處理的檔案(例如 docker-compose.yml、資料庫結構)"""
+    name = relative_path.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(name, pat) for pat in cfg.get("manual_change_patterns", []))
+
+
+def analyze_update_risk(owner, repo, base_tag, head_tag, cfg, timeout=20, github_token=None):
+    """判斷從 base_tag 更新到 head_tag 之後還能不能退版,需不需要提醒管理者先自行備份系統。
+    兩種情況要提醒:
+      1. 更新範圍內有更新機制不會處理的檔案(manual_change_patterns,例如 docker-compose.yml、.sql),
+         代表這次更新還需要手動調整,單純退回程式檔案無法復原
+      2. commit 說明裡有「【無法退版】原因」這一行(發布時手動標記)
+    回傳 (risk, error):risk = {"requires_backup", "manual_files", "no_rollback_reasons"}。
+    """
+    subfolder = cfg["repo_subfolder"].rstrip("/") + "/"
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/{base_tag}...{head_tag}"
+    try:
+        resp = requests.get(url, headers=_github_headers(github_token), timeout=timeout)
+    except requests.RequestException as e:
+        return None, f"連線失敗: {e}"
+    if resp.status_code != 200:
+        return None, _friendly_error_from_response(resp)
+    try:
+        data = resp.json()
+    except Exception:
+        return None, "GitHub API回應格式無法解析"
+
+    manual_files = []
+    for f in data.get("files") or []:
+        filename = f.get("filename", "")
+        if filename.startswith(subfolder) and _is_manual_change_file(filename[len(subfolder):], cfg):
+            manual_files.append(filename[len(subfolder):])
+
+    reasons = []
+    for c in data.get("commits") or []:
+        message = (c.get("commit") or {}).get("message") or ""
+        title = message.strip().splitlines()[0] if message.strip() else ""
+        for line in message.splitlines():
+            if NO_ROLLBACK_MARKER in line:
+                reason = line.split(NO_ROLLBACK_MARKER, 1)[1].strip(" :：") or "(未註明原因)"
+                reasons.append({"sha": (c.get("sha") or "")[:7], "title": title, "reason": reason})
+
+    return {
+        "requires_backup": bool(manual_files or reasons),
+        "manual_files": manual_files,
+        "no_rollback_reasons": reasons,
+    }, None
+
+
+def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github_token=None,
+                         from_version=None, rollback_block_reasons=None):
     """實際套用更新:對每個檔案,先備份現有內容(如果存在),再寫入新版本的內容。
     files是compare_versions()回傳的清單格式。
     對於status="removed"的檔案(新版本裡已經被刪除),本地也會跟著刪除(先備份)。
+
+    同時在備份目錄寫入 manifest.json(退版用):從哪一版更新到哪一版、每個檔案是新增/修改/刪除、
+    更新後的內容雜湊值(之後用來判斷有沒有被手動改過)、以及這次更新不能退版的原因(如果有)。
 
     回傳 (results, overall_ok, this_backup_dir)。results是每個檔案的結果清單:
       {"repo_path", "local_path", "ok", "error"}
@@ -636,6 +722,18 @@ def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github
     this_backup_dir = os.path.join(backup_dir, f"{timestamp}_to_{target_tag}")
     os.makedirs(this_backup_dir, exist_ok=True)
 
+    manifest = {
+        "kind": "update",
+        "from_version": from_version,
+        "to_version": target_tag,
+        "applied_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "complete": False,
+        "rollback_block_reasons": rollback_block_reasons or [],
+        "rolled_back_at": None,
+        "files": [],
+    }
+    _write_manifest(this_backup_dir, manifest)
+
     results = []
     overall_ok = True
     for f in files:
@@ -643,12 +741,18 @@ def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github
         local_path = f["local_path"]
         status = f["status"]
         result = {"repo_path": repo_path, "local_path": local_path, "ok": False, "error": None}
+        backup_name = repo_path.replace("/", "__")
+        existed = os.path.exists(local_path)
+        entry = {"repo_path": repo_path, "local_path": local_path,
+                 "action": "removed" if status == "removed" else ("modified" if existed else "created"),
+                 "backup": backup_name if existed else None, "sha256_after": None, "ok": False}
+        manifest["files"].append(entry)
 
         try:
             old_mode = None
-            if os.path.exists(local_path):
+            if existed:
                 old_mode = os.stat(local_path).st_mode  # 更新前先記住舊檔案的權限設定,寫入新內容後要套用回去
-                backup_target = os.path.join(this_backup_dir, repo_path.replace("/", "__"))
+                backup_target = os.path.join(this_backup_dir, backup_name)
                 shutil.copy2(local_path, backup_target)
 
             if status == "removed":
@@ -682,13 +786,135 @@ def apply_version_update(owner, repo, target_tag, files, cfg, backup_dir, github
                     os.chmod(local_path, current_mode | 0o111)
 
                 result["ok"] = True
+                entry["sha256_after"] = _sha256_file(local_path)
         except Exception as e:
             result["error"] = str(e)
             overall_ok = False
 
+        entry["ok"] = result["ok"]
         results.append(result)
 
+    manifest["complete"] = overall_ok
+    _write_manifest(this_backup_dir, manifest)
     return results, overall_ok, this_backup_dir
+
+
+def get_rollback_candidate(backup_dir, current_version):
+    """找出「現在可以退回的那一次更新」並檢查能不能退。一次只退一版:
+    取最近一次還沒被退版的更新,而且它的目標版本必須等於目前版本。
+
+    回傳 dict:
+      available: 能不能退版;reason: 不能退的原因
+      folder, from_version, to_version, applied_at
+      restore: 要還原的檔案(修改/刪除過的);delete: 要刪除的檔案(那次新增的)
+      modified_since: 更新後被手動改過的檔案(可以退,但要提醒)
+    """
+    info = {"available": False, "reason": None, "folder": None, "from_version": None, "to_version": None,
+            "applied_at": None, "restore": [], "delete": [], "modified_since": []}
+    updates = [h for h in list_update_history(backup_dir) if h["kind"] == "update" and not h.get("rolled_back_at")]
+    if not updates:
+        info["reason"] = "目前沒有可以退版的更新紀錄(只有透過這個頁面套用的更新才能退版)"
+        return info
+
+    latest = updates[0]
+    folder_path = os.path.join(backup_dir, latest["folder_name"])
+    manifest = _read_manifest(folder_path)
+    info.update(folder=latest["folder_name"], to_version=latest["target_version"], applied_at=latest["timestamp"])
+    if not manifest:
+        info["reason"] = (f"最近一次更新(到 {latest['target_version']})是在退版功能加入之前執行的,"
+                          "沒有完整的更新紀錄,無法退版")
+        return info
+    info["from_version"] = manifest.get("from_version")
+    if not info["from_version"]:
+        info["reason"] = "更新紀錄裡沒有原本的版本號,無法退版"
+        return info
+    if manifest.get("to_version") != current_version:
+        info["reason"] = (f"目前版本({current_version or '未知'})跟最近一次更新的目標版本({manifest.get('to_version')})不同,"
+                          "可能有手動修改過版本,為了安全不提供退版")
+        return info
+    blocks = manifest.get("rollback_block_reasons") or []
+    if blocks:
+        info["reason"] = "這次更新被標記為無法退版:" + ";".join(blocks)
+        return info
+
+    missing = []
+    for entry in manifest.get("files") or []:
+        local_path = entry["local_path"]
+        if entry["action"] in ("modified", "removed"):
+            if not entry.get("backup") or not os.path.exists(os.path.join(folder_path, entry["backup"])):
+                missing.append(entry["repo_path"])
+                continue
+            info["restore"].append(entry["repo_path"])
+        elif entry["action"] == "created":
+            info["delete"].append(entry["repo_path"])
+        # 更新後被手動改過(內容雜湊值跟更新當下不同)
+        if entry["action"] != "removed" and entry.get("sha256_after") and os.path.exists(local_path):
+            if _sha256_file(local_path) != entry["sha256_after"]:
+                info["modified_since"].append(entry["repo_path"])
+    if missing:
+        info["reason"] = "備份檔案不完整,無法退版(缺少:" + "、".join(missing[:5]) + ("…" if len(missing) > 5 else "") + ")"
+        return info
+
+    info["available"] = True
+    return info
+
+
+def rollback_update(backup_dir, folder_name, current_version):
+    """退回 folder_name 這次更新之前的版本:還原修改/刪除過的檔案、刪除那次新增的檔案。
+    動手前先把目前的檔案備份到「{時間}_rollback_{目前版本}_to_{原版本}」目錄,退錯了還能再更新回來。
+    資料庫、.env、docker-compose.yml、webui_config.json 不在退版範圍內。
+
+    回傳 (ok, error, info):info = {"from_version", "changed_local_paths", "results", "backup_dir"}
+    """
+    candidate = get_rollback_candidate(backup_dir, current_version)
+    if not candidate["available"]:
+        return False, candidate["reason"], None
+    if candidate["folder"] != folder_name:
+        return False, "可以退版的更新已經改變,請重新整理頁面後再試一次", None
+
+    folder_path = os.path.join(backup_dir, folder_name)
+    manifest = _read_manifest(folder_path)
+    target_version = manifest["from_version"]
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    this_backup_dir = os.path.join(backup_dir, f"{timestamp}_rollback_{current_version}_to_{target_version}")
+    os.makedirs(this_backup_dir, exist_ok=True)
+
+    rollback_manifest = {"kind": "rollback", "from_version": current_version, "to_version": target_version,
+                         "applied_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                         "rolled_back_update": folder_name, "files": []}
+    results, changed, ok = [], [], True
+    for entry in manifest.get("files") or []:
+        local_path = entry["local_path"]
+        result = {"repo_path": entry["repo_path"], "local_path": local_path, "ok": False, "error": None}
+        try:
+            if os.path.exists(local_path):
+                backup_name = entry["repo_path"].replace("/", "__")
+                shutil.copy2(local_path, os.path.join(this_backup_dir, backup_name))
+                rollback_manifest["files"].append({"repo_path": entry["repo_path"], "local_path": local_path,
+                                                   "backup": backup_name})
+            if entry["action"] == "created":
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+            else:
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                tmp_path = local_path + ".rollback_tmp"
+                shutil.copy2(os.path.join(folder_path, entry["backup"]), tmp_path)
+                os.replace(tmp_path, local_path)
+            result["ok"] = True
+            changed.append(local_path)
+        except Exception as e:
+            result["error"] = str(e)
+            ok = False
+        results.append(result)
+
+    _write_manifest(this_backup_dir, rollback_manifest)
+    if ok:
+        manifest["rolled_back_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _write_manifest(folder_path, manifest)
+    return ok, None if ok else "部分檔案還原失敗", {
+        "from_version": target_version, "changed_local_paths": changed,
+        "results": results, "backup_dir": this_backup_dir,
+    }
 
 
 def determine_services_to_restart(local_paths, cfg):

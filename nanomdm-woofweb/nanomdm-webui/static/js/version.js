@@ -105,6 +105,27 @@ async function checkForUpdate() {
   }
 }
 
+let pendingDiffRequiresBackup = false;
+
+// 更新前的退版風險:包含需要手動處理的檔案、或commit說明標記【無法退版】時,要求先自行備份
+function renderUpdateRisk(risk, riskError) {
+  const box = document.getElementById("version-diff-risk");
+  const errEl = document.getElementById("version-diff-risk-error");
+  if (riskError) {
+    errEl.textContent = `無法確認這次更新能不能退版(${riskError}),建議先自行備份系統再更新。`;
+    errEl.classList.remove("hidden");
+  }
+  if (!risk || !risk.requires_backup) return;
+  const lines = [];
+  if (risk.manual_files && risk.manual_files.length) {
+    lines.push(`包含更新機制不會處理、需要手動調整的檔案:${risk.manual_files.join("、")}`);
+  }
+  (risk.no_rollback_reasons || []).forEach((r) => lines.push(`${r.title}:${r.reason}`));
+  document.getElementById("version-diff-risk-detail").textContent = lines.join("\n");
+  box.classList.remove("hidden");
+  pendingDiffRequiresBackup = true;
+}
+
 async function openDiffModal(targetTag) {
   pendingDiffTargetTag = targetTag;
   document.getElementById("version-diff-target").textContent = targetTag;
@@ -113,6 +134,10 @@ async function openDiffModal(targetTag) {
   document.getElementById("version-diff-file-list").innerHTML = "載入中...";
   document.getElementById("version-diff-empty-hint").textContent = "";
   document.getElementById("version-apply-password-input").value = "";
+  document.getElementById("version-diff-risk").classList.add("hidden");
+  document.getElementById("version-diff-risk-error").classList.add("hidden");
+  document.getElementById("version-backup-confirm").checked = false;
+  pendingDiffRequiresBackup = false;
   openModal("version-diff-modal");
 
   const res = await apiFetch(`/api/version/diff?target_tag=${encodeURIComponent(targetTag)}`);
@@ -124,6 +149,7 @@ async function openDiffModal(targetTag) {
 
   const data = res.data;
   document.getElementById("version-diff-current").textContent = data.current_version;
+  renderUpdateRisk(data.risk, data.risk_error);
 
   const statusLabel = { added: "新增", modified: "修改", removed: "刪除" };
   const files = data.files || [];
@@ -308,13 +334,18 @@ async function confirmApplyUpdate() {
     return;
   }
   if (!pendingDiffTargetTag) return;
+  const backupConfirmed = document.getElementById("version-backup-confirm").checked;
+  if (pendingDiffRequiresBackup && !backupConfirmed) {
+    alert("這次更新無法退版,請先自行備份系統,並勾選「我已自行備份系統」");
+    return;
+  }
 
   const btn = document.getElementById("version-apply-confirm-btn");
   btn.disabled = true;
   btn.textContent = "執行中...";
 
   const res = await apiFetchJSON("/api/version/apply", "POST", {
-    password, target_tag: pendingDiffTargetTag,
+    password, target_tag: pendingDiffTargetTag, backup_confirmed: backupConfirmed,
   });
 
   btn.disabled = false;
@@ -350,6 +381,70 @@ function renderCommitPeople(c) {
   return parts.join("<br>");
 }
 
+// ---------------------------------------------------------------------------
+// 退版:一次退回最近一次更新之前的版本
+// ---------------------------------------------------------------------------
+let rollbackCandidate = null;
+
+async function loadRollbackInfo() {
+  const box = document.getElementById("version-rollback-box");
+  const res = await apiFetch("/api/version/rollback-info");
+  if (!res.ok) {
+    box.innerHTML = `<span style="color:#d64545;">無法取得退版資訊</span>`;
+    return;
+  }
+  const rb = res.data.rollback;
+  rollbackCandidate = rb;
+  if (!rb.available) {
+    box.innerHTML = `<strong>退版</strong>:<span style="color:#6b7280;">${escapeHtml(rb.reason || "目前無法退版")}</span>`;
+    return;
+  }
+  const modified = rb.modified_since.length
+    ? `<div style="color:#b45309; margin-top:4px;">⚠️ 更新後有 ${rb.modified_since.length} 個檔案被修改過,退版會覆蓋這些修改:${escapeHtml(rb.modified_since.join("、"))}</div>`
+    : "";
+  box.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+      <div><strong>退版</strong>:最近一次更新是 ${escapeHtml(rb.applied_at)} 從 <strong>${escapeHtml(rb.from_version)}</strong> 更新到 <strong>${escapeHtml(rb.to_version)}</strong>,
+        可以退回 ${escapeHtml(rb.from_version)}(還原 ${rb.restore.length} 個檔案、刪除 ${rb.delete.length} 個新增的檔案)</div>
+      <button id="version-rollback-btn" class="danger" type="button" style="font-size:12px;">退回 ${escapeHtml(rb.from_version)}</button>
+    </div>${modified}`;
+  document.getElementById("version-rollback-btn").addEventListener("click", runRollback);
+}
+
+async function runRollback() {
+  const rb = rollbackCandidate;
+  if (!rb || !rb.available) return;
+  const fileLines = [...rb.restore.map((f) => `還原 ${f}`), ...rb.delete.map((f) => `刪除 ${f}`)];
+  const msg = `確定要從 ${rb.to_version} 退回 ${rb.from_version} 嗎?\n\n` +
+    `${fileLines.slice(0, 15).join("\n")}${fileLines.length > 15 ? `\n…共 ${fileLines.length} 個檔案` : ""}\n\n` +
+    (rb.modified_since.length ? `更新後被修改過的檔案也會被覆蓋:${rb.modified_since.join("、")}\n\n` : "") +
+    `只會還原程式檔案,資料庫、.env、docker-compose.yml 與系統設定不會變回去。相關服務會自動重啟。`;
+  if (!confirm(msg)) return;
+  const password = await askPassword("請輸入您目前登入的密碼以確認退版:");
+  if (!password) return;
+
+  const btn = document.getElementById("version-rollback-btn");
+  btn.disabled = true;
+  btn.textContent = "退版中...";
+  const res = await apiFetchJSON("/api/version/rollback", "POST", { folder: rb.folder, password });
+  if (!res.ok) {
+    btn.disabled = false;
+    btn.textContent = `退回 ${rb.from_version}`;
+    alert("退版失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    loadRollbackInfo();
+    return;
+  }
+  if (res.data.self_restarting) {
+    alert(res.data.message + "\n\n頁面將在 5 秒後自動重新整理。");
+    setTimeout(() => window.location.reload(), 5000);
+  } else {
+    alert(res.data.message);
+    loadCurrentVersion();
+    loadRollbackInfo();
+    loadUpdateHistory(true);
+  }
+}
+
 async function loadUpdateHistory(forceRefresh) {
   const tbody = document.getElementById("version-history-tbody");
   tbody.innerHTML = `<tr><td colspan="4">載入中...</td></tr>`;
@@ -369,7 +464,7 @@ async function loadUpdateHistory(forceRefresh) {
     const err = `<tr><td colspan="4" style="color:#d64545;">無法取得 GitHub 修改紀錄: ${escapeHtml(data.commits_error || "未知錯誤")}</td></tr>`;
     tbody.innerHTML = err + history
       .map((h) => `<tr><td style="font-family:var(--mono); font-size:13px;">${escapeHtml(h.target_version)}</td>
-        <td></td><td></td><td style="font-size:12px; color:#6b7280;">${escapeHtml(h.timestamp)} 更新</td></tr>`)
+        <td></td><td></td><td style="font-size:12px; color:#6b7280;">${escapeHtml(h.timestamp)} ${h.kind === "rollback" ? "退版" : "更新"}${h.rolled_back_at ? "(已退版)" : ""}</td></tr>`)
       .join("");
     return;
   }
@@ -380,7 +475,11 @@ async function loadUpdateHistory(forceRefresh) {
 
   // 每個版本最近一次在這台主機更新的時間(history已經由新到舊排列)
   const updatedAt = {};
-  history.forEach((h) => { if (!updatedAt[h.target_version]) updatedAt[h.target_version] = h.timestamp; });
+  history.forEach((h) => {
+    if (h.kind === "update" && !updatedAt[h.target_version]) {
+      updatedAt[h.target_version] = h.timestamp + (h.rolled_back_at ? "(已退版)" : "");
+    }
+  });
 
   // commits由新到舊排列:目前版本那一筆(含)以下都已經套用,上面的是還沒套用的
   const currentIndex = commits.findIndex((c) => c.tag && c.tag === data.current_version);
@@ -423,6 +522,7 @@ async function loadUpdateHistory(forceRefresh) {
 document.addEventListener("DOMContentLoaded", () => {
   loadCurrentVersion();
   loadUpdateHistory();
+  loadRollbackInfo();
   checkForUpdate(); // 一進頁面就自動檢測一次,不用使用者自己按按鈕
 
   document.getElementById("version-manual-save-btn").addEventListener("click", saveManualVersion);

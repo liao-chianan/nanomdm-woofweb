@@ -5643,6 +5643,9 @@ def sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5
         return False, f"同步時發生未預期的錯誤: {type(e).__name__}: {e}(詳細內容已記錄到伺服器log,可用journalctl查看)"
 
 
+STATUS_QUERY_BATCH_SIZE = 50  # 背景狀態查詢每次派送最多幾台裝置(網址長度跟單次寫入量都保持在合理範圍)
+
+
 def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=False):
     """重建 devices-status.csv 的產生器版本,派送查詢指令的過程中會逐步yield進度更新,
     方便SSE串流即時顯示派送進度給使用者看(例如「已派送 15/96 台」)。
@@ -5709,29 +5712,58 @@ def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=Fa
             except (ValueError, TypeError):
                 return False  # 時間格式解析失敗,保守起見維持原本「已經pending,不重送」的行為
 
+        # 先逐台判斷要送哪些查詢(規則跟以前一樣),再按指令類型分組,每組每 STATUS_QUERY_BATCH_SIZE 台
+        # 一次派送:一道指令對應多台裝置,HTTP 請求跟 commands 資料表的筆數都大幅減少
         step_started = datetime.datetime.now()
-        total = len(devices)
-        for i, d in enumerate(devices):
+        targets = {"DeviceInformation": [], "AvailableOSUpdates": [], "OSUpdateStatus": [],
+                   "InstalledApplicationList": [], "DeviceLocation": []}
+        for d in devices:
+            eid = d["enrollment_id"]
+            for request_type in ("DeviceInformation", "AvailableOSUpdates", "OSUpdateStatus"):
+                if _should_send_query(eid, request_type):
+                    targets[request_type].append(eid)
+            last_apps = apps_last_sent.get(eid)
+            if force or not last_apps or (datetime.datetime.now() - last_apps).total_seconds() / 60 >= apps_interval_minutes:
+                targets["InstalledApplicationList"].append(eid)
+            # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,
+            # 沒開遺失模式的裝置送DeviceLocation一定會失敗,不用浪費請求
+            old_row = existing_cache_before.get(d["serial_number"], {})
+            if old_row.get("lost_mode_enabled") == "true" and _should_send_query(eid, "DeviceLocation"):
+                targets["DeviceLocation"].append(eid)
+
+        command_params = {"DeviceInformation": di_params, "AvailableOSUpdates": aou_params,
+                          "InstalledApplicationList": apps_params}
+        batches = [(rt, ids[i:i + STATUS_QUERY_BATCH_SIZE])
+                   for rt, ids in targets.items() for i in range(0, len(ids), STATUS_QUERY_BATCH_SIZE)]
+        push_error_count = fallback_count = unknown_count = 0
+        for n, (request_type, ids) in enumerate(batches, start=1):
+            params = command_params.get(request_type, {})
             try:
-                eid = d["enrollment_id"]
-                if _should_send_query(eid, "DeviceInformation"):
-                    utils.send_mdm_command(base_url, api_user, api_key, eid, "DeviceInformation", di_params)
-                if _should_send_query(eid, "AvailableOSUpdates"):
-                    utils.send_mdm_command(base_url, api_user, api_key, eid, "AvailableOSUpdates", aou_params)
-                if _should_send_query(eid, "OSUpdateStatus"):
-                    utils.send_mdm_command(base_url, api_user, api_key, eid, "OSUpdateStatus", {})
-                last_apps = apps_last_sent.get(eid)
-                if force or not last_apps or (datetime.datetime.now() - last_apps).total_seconds() / 60 >= apps_interval_minutes:
-                    utils.send_mdm_command(base_url, api_user, api_key, eid, "InstalledApplicationList", apps_params)
-                # 只對本地記錄「目前已啟用遺失模式」的裝置額外查詢定位,
-                # 沒開遺失模式的裝置送DeviceLocation一定會失敗,不用浪費請求
-                old_row = existing_cache_before.get(d["serial_number"], {})
-                if old_row.get("lost_mode_enabled") == "true" and _should_send_query(eid, "DeviceLocation"):
-                    utils.send_mdm_command(base_url, api_user, api_key, eid, "DeviceLocation", {})
-            except Exception:
-                pass  # 個別裝置排入失敗不該影響整批,繼續往下一台
-            yield {"progress": True, "current": i + 1, "total": total}
-        print(f"[裝置狀態排程]   派送查詢指令完成,耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
+                res = utils.send_mdm_command_bulk(base_url, api_user, api_key, ids, request_type, params)
+                push_error_count += len(res["push_errors"])
+                if res["unknown"]:
+                    # 不確定有沒有排入:不重送,下一輪排程的pending檢查會判斷要不要再送
+                    unknown_count += 1
+                    print(f"[裝置狀態排程]   {request_type} 批次派送結果不明({len(ids)} 台),下一輪再判斷: {res['unknown']}")
+                elif res["command_error"]:
+                    # 整批都沒有排入(例如其中一台剛好被移除註冊),改成逐台派送,
+                    # 有問題的那台自己失敗,不影響其他裝置
+                    fallback_count += 1
+                    print(f"[裝置狀態排程]   {request_type} 批次派送失敗,改為逐台派送({len(ids)} 台): {res['command_error']}")
+                    for eid in ids:
+                        try:
+                            utils.send_mdm_command(base_url, api_user, api_key, eid, request_type, params)
+                        except Exception:
+                            pass  # 個別裝置排入失敗不該影響其他裝置
+            except Exception as e:
+                print(f"[裝置狀態排程]   {request_type} 批次派送發生例外({len(ids)} 台): {e}")
+            yield {"progress": True, "current": n, "total": len(batches), "label": request_type}
+        summary = ", ".join(f"{rt} {len(ids)} 台" for rt, ids in targets.items() if ids) or "沒有需要派送的查詢"
+        print(f"[裝置狀態排程]   派送查詢指令完成({summary};共 {len(batches)} 批"
+              + (f",推播失敗 {push_error_count} 台" if push_error_count else "")
+              + (f",改為逐台派送 {fallback_count} 批" if fallback_count else "")
+              + (f",結果不明 {unknown_count} 批" if unknown_count else "")
+              + f"),耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
 
     # 稍等一下,讓在線上的裝置有機會立刻處理推播、回應查詢(非強制,只是盡量提高這次就抓到新資料的機會)
     if wait_for_response_seconds > 0:
@@ -6025,9 +6057,8 @@ def api_version_history():
     標出目前安裝的版本、哪些修改還沒套用,以及這台主機過去透過這個頁面更新的時間
     (來自.update_backups的備份目錄名稱)。GitHub查詢失敗時仍回傳本機的更新紀錄。"""
     cfg = CFG["update"]
-    backup_dir = "/opt/nanomdm-webui/.update_backups"
     try:
-        history = utils_version.list_update_history(backup_dir)
+        history = utils_version.list_update_history(UPDATE_BACKUP_DIR)
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
 
@@ -6117,7 +6148,14 @@ def api_version_diff():
     if files is None:
         return jsonify({"ok": False, "message": err}), 500
 
-    return jsonify({"ok": True, "current_version": current, "target_version": target_tag, "files": files})
+    risk, risk_err = utils_version.analyze_update_risk(
+        cfg["github_owner"], cfg["github_repo"], current, target_tag, cfg, github_token=token,
+    )
+    return jsonify({"ok": True, "current_version": current, "target_version": target_tag, "files": files,
+                    "risk": risk, "risk_error": risk_err})
+
+
+UPDATE_BACKUP_DIR = "/opt/nanomdm-webui/.update_backups"
 
 
 def _delayed_restart_self():
@@ -6159,9 +6197,19 @@ def api_version_apply():
     if not files:
         return jsonify({"ok": False, "message": "沒有任何符合條件的檔案需要更新,目前已經是這個版本的內容"}), 400
 
-    backup_dir = "/opt/nanomdm-webui/.update_backups"
+    risk, risk_err = utils_version.analyze_update_risk(
+        cfg["github_owner"], cfg["github_repo"], current, target_tag, cfg, github_token=token,
+    )
+    block_reasons = []
+    if risk and risk["requires_backup"]:
+        if not data.get("backup_confirmed"):
+            return jsonify({"ok": False, "message": "這次更新包含無法退版的變動,請先自行備份系統,並勾選「我已自行備份系統」後再執行"}), 400
+        block_reasons = ([f"包含需要手動處理的檔案({'、'.join(risk['manual_files'])})"] if risk["manual_files"] else []) + \
+                        [f"{r['reason']}({r['sha']})" for r in risk["no_rollback_reasons"]]
+
     results, overall_ok, this_backup_dir = utils_version.apply_version_update(
-        cfg["github_owner"], cfg["github_repo"], target_tag, files, cfg, backup_dir, github_token=token,
+        cfg["github_owner"], cfg["github_repo"], target_tag, files, cfg, UPDATE_BACKUP_DIR, github_token=token,
+        from_version=current, rollback_block_reasons=block_reasons,
     )
 
     failed_files = [r for r in results if not r["ok"]]
@@ -6169,22 +6217,15 @@ def api_version_apply():
         utils_version.set_current_version(cfg["version_file"], target_tag)
 
     changed_local_paths = [f["local_path"] for f in files]
-    services_to_restart = utils_version.determine_services_to_restart(changed_local_paths, cfg)
-
-    # nanomdm-webui.service重啟自己放到最後、用延遲執行緒處理,其他服務可以直接同步重啟
-    restarted = []
-    self_restart_needed = False
-    for svc in services_to_restart:
-        if svc == "nanomdm-webui.service":
-            self_restart_needed = True
-            continue
-        restart_ok, restart_err = restart_service_and_log("systemd", svc, f"版本更新後重啟(更新到{target_tag})")
-        restarted.append({"service": svc, "ok": restart_ok, "error": restart_err})
+    services_to_restart, self_restart_needed = _restart_services_for_changed_files(
+        changed_local_paths, f"版本更新後重啟(更新到{target_tag})")
 
     log_activity_entry(
         "系統維護-版本更新", overall_ok and not failed_files,
         detail=f"從 {current} 更新到 {target_tag}, 檔案數={len(files)}, 失敗數={len(failed_files)}, "
-               f"重啟服務={services_to_restart}, 備份位置={this_backup_dir}",
+               f"重啟服務={services_to_restart}, 備份位置={this_backup_dir}"
+               + (f", 無法退版原因={';'.join(block_reasons)}" if block_reasons else "")
+               + (f", 退版風險檢查失敗={risk_err}" if risk_err else ""),
     )
 
     if self_restart_needed:
@@ -6201,6 +6242,62 @@ def api_version_apply():
             + (f" webui 服務即將自動重啟,幾秒後請重新整理頁面。" if self_restart_needed else "")
         ),
     })
+
+
+def _restart_services_for_changed_files(changed_local_paths, reason):
+    """依照變更到的檔案重啟相關服務(更新跟退版共用)。nanomdm-webui.service 自己不在這裡重啟,
+    回傳 (services_to_restart, self_restart_needed),呼叫端回應送出前再呼叫 _delayed_restart_self()。"""
+    services_to_restart = utils_version.determine_services_to_restart(changed_local_paths, CFG["update"])
+    self_restart_needed = False
+    for svc in services_to_restart:
+        if svc == "nanomdm-webui.service":
+            self_restart_needed = True
+            continue
+        restart_service_and_log("systemd", svc, reason)
+    return services_to_restart, self_restart_needed
+
+
+@app.route("/api/version/rollback-info")
+@login_required
+def api_version_rollback_info():
+    current = utils_version.get_current_version(CFG["update"]["version_file"])
+    return jsonify({"ok": True, "current_version": current,
+                    "rollback": utils_version.get_rollback_candidate(UPDATE_BACKUP_DIR, current)})
+
+
+@app.route("/api/version/rollback", methods=["POST"])
+@login_required
+def api_version_rollback():
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統維護-版本退版", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    cfg = CFG["update"]
+    current = utils_version.get_current_version(cfg["version_file"])
+    folder = (data.get("folder") or "").strip()
+    ok, err, info = utils_version.rollback_update(UPDATE_BACKUP_DIR, folder, current)
+    if info is None:
+        log_activity_entry("系統維護-版本退版", False, detail=f"目前版本={current}, 無法退版: {err}")
+        return jsonify({"ok": False, "message": err}), 400
+
+    if ok:
+        utils_version.set_current_version(cfg["version_file"], info["from_version"])
+    services_to_restart, self_restart_needed = _restart_services_for_changed_files(
+        info["changed_local_paths"], f"版本退版後重啟(退回{info['from_version']})")
+    failed = [r for r in info["results"] if not r["ok"]]
+    log_activity_entry(
+        "系統維護-版本退版", ok,
+        detail=f"從 {current} 退回 {info['from_version']}, 檔案數={len(info['results'])}, 失敗數={len(failed)}, "
+               f"重啟服務={services_to_restart}, 退版前備份位置={info['backup_dir']}",
+    )
+    if self_restart_needed:
+        _delayed_restart_self()
+    return jsonify({
+        "ok": ok, "results": info["results"], "self_restarting": self_restart_needed,
+        "message": (f"已退回 {info['from_version']}(還原 {len(info['results']) - len(failed)}/{len(info['results'])} 個檔案)。"
+                    if ok else f"退版未完全成功:{err},失敗的檔案請參考操作紀錄。")
+                   + (" webui 服務即將自動重啟,幾秒後請重新整理頁面。" if self_restart_needed else ""),
+    }), (200 if ok else 500)
 
 
 @app.route("/api/devices/status-cache")
@@ -6233,8 +6330,8 @@ def api_devices_status_sync_stream():
         try:
             for item in _refresh_devices_status_cache_once_gen(wait_for_response_seconds=5, force=True):
                 if item.get("progress"):
-                    current, total = item["current"], item["total"]
-                    yield f"data: {json.dumps({'message': f'已派送查詢指令: {current}/{total} 台', 'done': False}, ensure_ascii=False)}\n\n"
+                    current, total, label = item["current"], item["total"], item.get("label", "")
+                    yield f"data: {json.dumps({'message': f'已派送查詢指令: 第 {current}/{total} 批({label})', 'done': False}, ensure_ascii=False)}\n\n"
                 elif item.get("final"):
                     if not item["ok"]:
                         yield f"data: {json.dumps({'error': item['msg'], 'done': True}, ensure_ascii=False)}\n\n"
