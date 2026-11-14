@@ -1720,49 +1720,27 @@ def get_pending_status_query_types(mysql_cfg, db_password):
     return pending
 
 
-def _cleanup_safe_where_clause(retention_days):
-    """組出安全的清理條件:夠舊(超過保留天數) 且 沒有任何裝置的佇列項目「真的還沒收到回應」。
+def _cleanup_where_clause(retention_days):
+    """清理條件:建立時間超過保留天數的指令一律清除,包含還沒收到裝置回應的。
 
-    重要修正記錄:原本這裡用 active=1 當作「還有裝置在等」的判斷依據,但查證nanomdm
-    官方schema.sql後發現這個假設是錯的——active這個欄位似乎不會因為裝置成功回應
-    (Acknowledged)就自動被nanomdm改成0(官方文件說明,nanomdm自己內建的清理機制
-    -storage-options delete=1,做的是「直接刪除整筆紀錄」,不是「把active改成0」,
-    代表active很可能從建立那一刻起就一直維持在預設值1,直到那筆紀錄被刪除為止,
-    跟裝置有沒有回應完全無關)。這個問題經過實際資料驗證確認:有Acknowledged超過
-    13天的紀錄,active依然是1。
-
-    如果繼續用active=1判斷,會把絕大多數早就處理完畢的指令,都誤判成「還有裝置在等」
-    而永遠排除在清理範圍外,這正是保留天數設定生效卻清不掉舊資料的根本原因。
-
-    正確的判斷依據改成:這個佇列項目(enrollment_queue的每一列,代表某台裝置在等
-    某個指令)是不是「還沒收到回應」而且「還沒被取消」——兩個條件都要符合,才是真正
-    該保護、不能清理的對象:
-      - 沒有收到回應(LEFT JOIN command_results後cr.id IS NULL):對應nanomdm自己
-        在view_queue裡描述「outstanding」(未處理)的定義
-      - active仍然是1:如果是active=0(不管是「取消命令」功能手動設的,還是其他原因),
-        代表這個佇列項目已經不再被視為需要處理,即使沒有command_results也不該
-        阻擋清理,不然「已取消」的舊紀錄會被誤判成「還在等待」而永遠清不掉,
-        跟已取消也該正常被清理的設計互相矛盾
+    超過保留天數還沒回應,代表裝置長時間沒有連線(離線、清除重置、不再使用等),
+    由管理者自行確認裝置狀況、需要時重新派送;不再為了等這些裝置而無限期保留紀錄,
+    避免資料表一直變大。背景排程的狀態查詢(DeviceInformation等)本來就會定期重送,
+    刪掉舊的不影響之後的查詢。
     """
     retention_days = int(retention_days)  # 防止SQL injection,確定是整數才拼進SQL
-    return (
-        f"created_at < (NOW() - INTERVAL {retention_days} DAY) "
-        f"AND command_uuid NOT IN ("
-        f"SELECT eq.command_uuid FROM enrollment_queue eq "
-        f"LEFT JOIN command_results cr ON cr.command_uuid = eq.command_uuid AND cr.id = eq.id "
-        f"WHERE cr.id IS NULL AND eq.active = 1"
-        f")"
-    )
+    return f"created_at < (NOW() - INTERVAL {retention_days} DAY)"
 
 
 def preview_command_cleanup(mysql_cfg, db_password, retention_days):
     """預覽清理效果,只查COUNT,不會真的刪除任何資料。
     回傳dict: {ok, commands_count, command_results_count, enrollment_queue_count,
-               by_request_type: [(request_type, count), ...], error}
+               pending_queue_count, by_request_type: [(request_type, count), ...], error}
+    pending_queue_count是會被清除的佇列紀錄中,「還沒收到裝置回應」的筆數(裝置之後上線也不會再收到)。
     command_results_count/enrollment_queue_count是「會被cascade一併刪除」的估計筆數,
     不是這兩個表本身有獨立的刪除條件。
     """
-    where_clause = _cleanup_safe_where_clause(retention_days)
+    where_clause = _cleanup_where_clause(retention_days)
 
     def run_query(sql):
         args = [
@@ -1794,6 +1772,14 @@ def preview_command_cleanup(mysql_cfg, db_password, retention_days):
     )
     enrollment_queue_count = int(out3.strip() or 0) if rc3 == 0 else None
 
+    rc5, out5, _ = run_query(
+        f"SELECT COUNT(*) FROM enrollment_queue eq "
+        f"LEFT JOIN command_results cr ON cr.command_uuid = eq.command_uuid AND cr.id = eq.id "
+        f"WHERE cr.id IS NULL AND eq.active = 1 AND eq.command_uuid IN "
+        f"(SELECT command_uuid FROM commands WHERE {where_clause});"
+    )
+    pending_queue_count = int(out5.strip() or 0) if rc5 == 0 else None
+
     rc4, out4, err4 = run_query(
         f"SELECT request_type, COUNT(*) FROM commands WHERE {where_clause} "
         f"GROUP BY request_type ORDER BY COUNT(*) DESC;"
@@ -1812,16 +1798,17 @@ def preview_command_cleanup(mysql_cfg, db_password, retention_days):
         "commands_count": commands_count,
         "command_results_count": command_results_count,
         "enrollment_queue_count": enrollment_queue_count,
+        "pending_queue_count": pending_queue_count,
         "by_request_type": by_request_type,
     }
 
 
 def execute_command_cleanup(mysql_cfg, db_password, retention_days):
-    """實際執行清理:刪除commands裡符合安全條件的紀錄,command_results/enrollment_queue
+    """實際執行清理:刪除commands裡超過保留天數的紀錄,command_results/enrollment_queue
     會透過資料庫本身的ON DELETE CASCADE自動一併清除,不需要另外下刪除指令。
     回傳dict: {ok, deleted_count, error}
     """
-    where_clause = _cleanup_safe_where_clause(retention_days)
+    where_clause = _cleanup_where_clause(retention_days)
     sql = f"DELETE FROM commands WHERE {where_clause};"
 
     args = [

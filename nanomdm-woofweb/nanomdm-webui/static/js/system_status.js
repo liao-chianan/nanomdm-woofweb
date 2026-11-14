@@ -504,6 +504,8 @@ async function previewCleanup() {
     data.command_results_count !== null ? data.command_results_count : "未知";
   document.getElementById("cleanup-preview-queue-count").textContent =
     data.enrollment_queue_count !== null ? data.enrollment_queue_count : "未知";
+  document.getElementById("cleanup-preview-pending-count").textContent =
+    data.pending_queue_count !== null && data.pending_queue_count !== undefined ? data.pending_queue_count : "未知";
 
   const breakdownEl = document.getElementById("cleanup-preview-breakdown");
   if (data.by_request_type && data.by_request_type.length > 0) {
@@ -516,7 +518,7 @@ async function previewCleanup() {
   document.getElementById("cleanup-preview-result").style.display = "";
 
   if (data.commands_count === 0) {
-    alert("目前沒有符合條件、可以安全清除的指令紀錄");
+    alert("目前沒有超過保留天數的指令紀錄");
   }
 }
 
@@ -524,7 +526,7 @@ async function executeCleanup() {
   const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
   const previewCount = document.getElementById("cleanup-preview-commands-count").textContent;
 
-  if (!confirm(`確定要清除這 ${previewCount} 筆指令紀錄嗎?此操作無法復原(不會影響裝置目前排隊等待中的指令)。`)) {
+  if (!confirm(`確定要清除這 ${previewCount} 筆指令紀錄嗎?此操作無法復原,超過保留天數仍未回應的指令也會一併清除。`)) {
     return;
   }
 
