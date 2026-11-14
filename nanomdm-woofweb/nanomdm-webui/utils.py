@@ -1246,23 +1246,31 @@ def query_all_devices_latest_status(mysql_cfg, db_password, enrollment_id=None):
     OSUpdateStatus / DeviceLocation 回應,用 window function(ROW_NUMBER)在單一SQL裡完成,
     不用對每台裝置各自呼叫一次(那樣裝置一多會很慢)。
 
+    排序只用時間欄位(不碰回應內容),選出每台裝置每種類型最新的那一筆後,才讀那幾筆的回應內容;
+    舊寫法把所有回應內容一起放進暫存表再排序,資料一多會寫到磁碟暫存表、比較慢。
+
     enrollment_id: 選填,只查這一台裝置(給單一裝置手動同步用,不用每次都撈出全部裝置)。
     回傳 (rows, rc, err),rows 是 [{id, request_type, result, result_updated_at}, ...]
     """
     enrollment_filter = ""
     if enrollment_id:
         safe_id = enrollment_id.replace("'", "''")
-        enrollment_filter = f"AND id = '{safe_id}' "
+        enrollment_filter = f"AND q.id = '{safe_id}' "
     sql = (
         "SELECT JSON_ARRAYAGG(JSON_OBJECT("
-        "'id', id, 'request_type', request_type, 'result_b64', TO_BASE64(result), "
-        "'result_updated_at', DATE_FORMAT(CONVERT_TZ(result_updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
-        ")) FROM (SELECT id, request_type, result, result_updated_at, "
-        "ROW_NUMBER() OVER (PARTITION BY id, request_type ORDER BY result_updated_at DESC) AS rn "
-        "FROM view_queue "
-        "WHERE request_type IN ('DeviceInformation', 'AvailableOSUpdates', 'OSUpdateStatus', 'DeviceLocation', 'ScheduleOSUpdate') "
-        f"AND result IS NOT NULL {enrollment_filter}"
-        ") t WHERE rn = 1;"
+        "'id', t.id, 'request_type', t.request_type, 'result_b64', TO_BASE64(r.result), "
+        "'result_updated_at', DATE_FORMAT(CONVERT_TZ(t.updated_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s')"
+        ")) FROM ("
+        "  SELECT id, command_uuid, request_type, updated_at FROM ("
+        "    SELECT r.id, r.command_uuid, c.request_type, r.updated_at, "
+        "    ROW_NUMBER() OVER (PARTITION BY r.id, c.request_type ORDER BY r.updated_at DESC) AS rn "
+        "    FROM enrollment_queue q "
+        "    JOIN commands c ON c.command_uuid = q.command_uuid "
+        "    JOIN command_results r ON r.command_uuid = q.command_uuid AND r.id = q.id "
+        "    WHERE c.request_type IN ('DeviceInformation', 'AvailableOSUpdates', 'OSUpdateStatus', 'DeviceLocation', 'ScheduleOSUpdate') "
+        f"    {enrollment_filter}"
+        "  ) x WHERE rn = 1"
+        ") t JOIN command_results r ON r.id = t.id AND r.command_uuid = t.command_uuid;"
     )
     args = [
         "docker", "exec",

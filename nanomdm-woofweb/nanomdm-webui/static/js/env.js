@@ -12,12 +12,22 @@ function formatMtimeEnv(epochSeconds) {
 // ---------------------------------------------------------------------------
 // 表單式 .env 欄位
 // ---------------------------------------------------------------------------
+// 名稱看起來是密碼、金鑰、權杖的 .env 變數,值預設遮蔽(例如 MYSQL_ROOT_PASSWORD、NANOMDM_API_KEY、SCEP_CHALLENGE)
+const SENSITIVE_ENV_KEY_RE = /(PASSWORD|PASSPHRASE|SECRET|TOKEN|API_KEY|CHALLENGE)$/i;
+
 function renderEnvFieldRow(field) {
   const tr = document.createElement("tr");
   tr.dataset.key = field.key;
+  const sensitive = SENSITIVE_ENV_KEY_RE.test(field.key);
+  const valueCell = sensitive
+    ? `<div style="display:flex; gap:6px;">
+         <input type="password" class="env-field-value" value="${escapeHtml(field.value)}" autocomplete="off" style="flex:1; font-family:var(--mono);">
+         <button class="secondary env-field-toggle-btn" type="button" style="font-size:12px; white-space:nowrap;">顯示</button>
+       </div>`
+    : `<input type="text" class="env-field-value" value="${escapeHtml(field.value)}" style="width:100%; font-family:var(--mono);">`;
   tr.innerHTML = `
     <td style="font-family:var(--mono); font-size:13px; word-break:break-all;">${escapeHtml(field.key)}</td>
-    <td><input type="text" class="env-field-value" value="${escapeHtml(field.value)}" style="width:100%; font-family:var(--mono);"></td>
+    <td>${valueCell}</td>
     <td>
       <button class="secondary env-field-save-btn" type="button" style="font-size:12px;">儲存</button>
       <button class="danger env-field-delete-btn" type="button" style="font-size:12px;">刪除</button>
@@ -161,6 +171,221 @@ async function loadGroupsJson() {
 // ---------------------------------------------------------------------------
 // 品牌設定 (站台名稱 / LOGO)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// MySQL 設定(buffer pool)
+// ---------------------------------------------------------------------------
+let mysqlTuningStatus = null;
+
+function mysqlTuningRow(label, value) {
+  return `<tr><td class="k">${escapeHtml(label)}</td><td>${value}</td></tr>`;
+}
+
+async function loadMysqlTuningStatus() {
+  const box = document.getElementById("mysql-tuning-status");
+  const res = await apiFetch("/api/mysql-tuning/status");
+  if (!res.ok) {
+    box.innerHTML = `<span style="color:#d64545;">${escapeHtml((res.data && res.data.message) || "載入失敗")}</span>`;
+    return null;
+  }
+  const st = res.data.status;
+  mysqlTuningStatus = st;
+
+  let sourceText = escapeHtml(st.source_label);
+  if (st.persisted_mb === null && (st.source === "PERSISTED" || st.source === "DYNAMIC") && st.size_mb !== st.default_mb) {
+    sourceText += `<br><span style="color:#b45309;">下次重新啟動 MySQL 後會回到 ${st.default_mb} MB</span>`;
+  } else if (st.persisted_mb !== null && st.persisted_mb !== st.size_mb) {
+    sourceText += `<br><span style="color:#b45309;">已設定為 ${st.persisted_mb} MB,調整完成或重新啟動 MySQL 後生效</span>`;
+  }
+  const pct = (v) => (v === null || v === undefined ? "-" : `${v}%`);
+  box.innerHTML = `
+    <table class="kv-table">
+      ${mysqlTuningRow("目前大小", `<strong>${st.size_mb} MB</strong>`)}
+      ${mysqlTuningRow("設定來源", sourceText)}
+      ${mysqlTuningRow("主機總記憶體", `${st.host_memory_mb} MB(最多可設定 ${st.max_mb} MB,約一半)`)}
+      ${mysqlTuningRow("nanomdm 資料量", `${st.data_mb} MB(資料+索引)`)}
+      ${mysqlTuningRow("快取命中率", pct(st.hit_ratio))}
+      ${mysqlTuningRow("快取空閒比例", pct(st.free_ratio))}
+      ${st.resize_status ? mysqlTuningRow("最近一次調整狀態", escapeHtml(st.resize_status)) : ""}
+    </table>`;
+
+  const input = document.getElementById("mysql-tuning-size-input");
+  input.min = st.min_mb;
+  input.max = st.max_mb;
+  input.step = st.unit_mb;
+  if (!input.value) input.value = st.size_mb;
+  document.getElementById("mysql-tuning-size-hint").textContent =
+    `會自動換成 ${st.unit_mb} MB 的倍數,範圍 ${st.min_mb}~${st.max_mb} MB`;
+  return st;
+}
+
+function normalizeBufferPoolMb(value, st) {
+  const unit = st.unit_mb;
+  const rounded = Math.max(unit, Math.round(value / unit) * unit);
+  return Math.min(Math.max(rounded, st.min_mb), st.max_mb);
+}
+
+async function applyMysqlBufferPool() {
+  const st = mysqlTuningStatus || await loadMysqlTuningStatus();
+  if (!st) return;
+  const requested = parseInt(document.getElementById("mysql-tuning-size-input").value, 10);
+  if (!requested || requested < 1) {
+    alert("請輸入大於0的整數(MB)");
+    return;
+  }
+  const target = normalizeBufferPoolMb(requested, st);
+  const note = target !== requested ? `(輸入的 ${requested} MB 會調整成 ${target} MB)` : "";
+  if (!confirm(`確定要把 MySQL buffer pool 從 ${st.size_mb} MB 調整為 ${target} MB 嗎?${note}\n調整會在背景進行,不需要重新啟動 MySQL,重新啟動後也會保留這個設定。`)) return;
+  const password = await askPassword("請輸入您目前登入的密碼以確認調整:");
+  if (!password) return;
+
+  const btn = document.getElementById("mysql-tuning-apply-btn");
+  btn.disabled = true;
+  const res = await apiFetchJSON("/api/mysql-tuning/buffer-pool", "POST", { size_mb: requested, password });
+  btn.disabled = false;
+  if (!res.ok) {
+    alert("調整失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+  document.getElementById("mysql-tuning-size-input").value = res.data.size_mb;
+  watchMysqlResize(res.data.size_mb);
+}
+
+// MySQL 在背景調整大小,每2秒查一次狀態,直到目前大小變成目標大小(最多約2分鐘)
+async function watchMysqlResize(targetMb) {
+  const progress = document.getElementById("mysql-tuning-progress");
+  for (let i = 0; i < 60; i++) {
+    const st = await loadMysqlTuningStatus();
+    const statusText = st && st.resize_status ? `(${st.resize_status})` : "";
+    if (st && st.size_mb === targetMb) {
+      progress.textContent = `✅ 已調整為 ${targetMb} MB ${statusText}`;
+      return;
+    }
+    progress.textContent = `調整中... 目前 ${st ? st.size_mb : "-"} MB → ${targetMb} MB ${statusText}`;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  progress.textContent = "調整時間較長,請稍後按「重新整理」確認目前大小";
+}
+
+async function resetMysqlBufferPool() {
+  const st = mysqlTuningStatus;
+  const defaultMb = st ? st.default_mb : 128;
+  if (!confirm(`確定要恢復預設嗎?\n會清除手動設定,目前大小不變,下次重新啟動 MySQL 後才會回到 ${defaultMb} MB。`)) return;
+  const password = await askPassword("請輸入您目前登入的密碼以確認:");
+  if (!password) return;
+  const res = await apiFetchJSON("/api/mysql-tuning/buffer-pool/reset", "POST", { password });
+  if (!res.ok) {
+    alert("恢復預設失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+  document.getElementById("mysql-tuning-progress").textContent =
+    `已清除手動設定,下次重新啟動 MySQL 後回到 ${defaultMb} MB`;
+  loadMysqlTuningStatus();
+}
+
+// ---------------------------------------------------------------------------
+// nanomdm 指令歷史清理
+// ---------------------------------------------------------------------------
+async function loadCleanupSettings() {
+  const res = await apiFetch("/api/cleanup/settings");
+  if (!res.ok) return;
+  document.getElementById("cleanup-retention-days-input").value = res.data.settings.retention_days;
+  document.getElementById("cleanup-auto-enabled-input").checked = res.data.settings.auto_enabled;
+}
+
+async function saveCleanupSettings() {
+  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
+  const autoEnabled = document.getElementById("cleanup-auto-enabled-input").checked;
+
+  if (!retentionDays || retentionDays < 1) {
+    alert("保留天數必須是大於0的整數");
+    return;
+  }
+
+  const res = await apiFetchJSON("/api/cleanup/settings", "POST", {
+    retention_days: retentionDays, auto_enabled: autoEnabled,
+  });
+  if (res.ok) {
+    alert("設定已儲存");
+  } else {
+    alert("儲存失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
+async function previewCleanup() {
+  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
+  if (!retentionDays || retentionDays < 1) {
+    alert("保留天數必須是大於0的整數");
+    return;
+  }
+
+  const btn = document.getElementById("cleanup-preview-btn");
+  btn.disabled = true;
+  btn.textContent = "查詢中...";
+
+  const res = await apiFetch(`/api/cleanup/preview?retention_days=${retentionDays}`);
+
+  btn.disabled = false;
+  btn.textContent = "預覽清理範圍";
+
+  if (!res.ok) {
+    alert("預覽失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+
+  const data = res.data;
+  document.getElementById("cleanup-preview-commands-count").textContent = data.commands_count;
+  document.getElementById("cleanup-preview-results-count").textContent =
+    data.command_results_count !== null ? data.command_results_count : "未知";
+  document.getElementById("cleanup-preview-queue-count").textContent =
+    data.enrollment_queue_count !== null ? data.enrollment_queue_count : "未知";
+  document.getElementById("cleanup-preview-pending-count").textContent =
+    data.pending_queue_count !== null && data.pending_queue_count !== undefined ? data.pending_queue_count : "未知";
+
+  const breakdownEl = document.getElementById("cleanup-preview-breakdown");
+  if (data.by_request_type && data.by_request_type.length > 0) {
+    breakdownEl.innerHTML = "<strong>依指令類型分類：</strong><br>" +
+      data.by_request_type.map(item => `${escapeHtml(item.request_type)}: ${item.count} 筆`).join("　");
+  } else {
+    breakdownEl.innerHTML = "";
+  }
+
+  document.getElementById("cleanup-preview-result").style.display = "";
+
+  if (data.commands_count === 0) {
+    alert("目前沒有超過保留天數的指令紀錄");
+  }
+}
+
+async function executeCleanup() {
+  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
+  const previewCount = document.getElementById("cleanup-preview-commands-count").textContent;
+
+  if (!confirm(`確定要清除這 ${previewCount} 筆指令紀錄嗎?此操作無法復原,超過保留天數仍未回應的指令也會一併清除。`)) {
+    return;
+  }
+
+  const password = await askPassword("請輸入您目前登入的密碼以確認執行清理:");
+  if (!password) return;
+
+  const btn = document.getElementById("cleanup-execute-btn");
+  btn.disabled = true;
+  btn.textContent = "執行中...";
+
+  const res = await apiFetchJSON("/api/cleanup/execute", "POST", {
+    retention_days: retentionDays, password,
+  });
+
+  btn.disabled = false;
+  btn.textContent = "確認執行清理";
+
+  if (res.ok) {
+    alert(res.data.message);
+    document.getElementById("cleanup-preview-result").style.display = "none";
+  } else {
+    alert("清理失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
 async function loadSystemParams() {
   const res = await apiFetch("/api/system-params");
   if (!res.ok) return;
@@ -169,6 +394,7 @@ async function loadSystemParams() {
   document.getElementById("param-vpp-interval").value = p.vpp_interval_minutes;
   document.getElementById("param-devices-status-interval").value = p.devices_status_interval_minutes;
   document.getElementById("param-pending-retry-hours").value = p.pending_retry_threshold_hours;
+  document.getElementById("param-installed-apps-interval").value = p.installed_apps_interval_hours;
 }
 
 async function saveSystemParams() {
@@ -177,6 +403,7 @@ async function saveSystemParams() {
     vpp_interval_minutes: document.getElementById("param-vpp-interval").value,
     devices_status_interval_minutes: document.getElementById("param-devices-status-interval").value,
     pending_retry_threshold_hours: document.getElementById("param-pending-retry-hours").value,
+    installed_apps_interval_hours: document.getElementById("param-installed-apps-interval").value,
   };
   const res = await apiFetchJSON("/api/system-params", "POST", payload);
   if (res.ok) {
@@ -263,6 +490,14 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSystemParams();
 
   document.getElementById("system-params-save-btn").addEventListener("click", saveSystemParams);
+  loadMysqlTuningStatus();
+  document.getElementById("mysql-tuning-refresh-btn").addEventListener("click", loadMysqlTuningStatus);
+  document.getElementById("mysql-tuning-apply-btn").addEventListener("click", applyMysqlBufferPool);
+  document.getElementById("mysql-tuning-reset-btn").addEventListener("click", resetMysqlBufferPool);
+  loadCleanupSettings();
+  document.getElementById("cleanup-save-settings-btn").addEventListener("click", saveCleanupSettings);
+  document.getElementById("cleanup-preview-btn").addEventListener("click", previewCleanup);
+  document.getElementById("cleanup-execute-btn").addEventListener("click", executeCleanup);
 
   document.getElementById("branding-save-label-btn").addEventListener("click", saveBrandingSiteLabel);
   document.getElementById("branding-upload-logo-btn").addEventListener("click", () => {
@@ -284,6 +519,11 @@ document.addEventListener("DOMContentLoaded", () => {
       saveEnvField(tr);
     } else if (e.target.classList.contains("env-field-delete-btn")) {
       deleteEnvField(tr);
+    } else if (e.target.classList.contains("env-field-toggle-btn")) {
+      const input = tr.querySelector(".env-field-value");
+      const show = input.type === "password";
+      input.type = show ? "text" : "password";
+      e.target.textContent = show ? "隱藏" : "顯示";
     }
   });
 });

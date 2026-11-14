@@ -30,6 +30,7 @@ import utils_signing
 import utils_auth
 import utils_logging
 import utils_lockscreen
+import utils_mysql_tuning
 
 try:
     CFG = load_config()
@@ -909,6 +910,7 @@ def api_system_params_get():
             "vpp_interval_minutes": CFG["vpp_cache"]["refresh_interval_seconds"] // 60,
             "devices_status_interval_minutes": CFG["devices_status_cache"]["refresh_interval_seconds"] // 60,
             "pending_retry_threshold_hours": CFG["devices_status_cache"]["pending_retry_threshold_minutes"] / 60,
+            "installed_apps_interval_hours": CFG["devices_status_cache"].get("installed_apps_interval_minutes", 360) // 60,
         },
     })
 
@@ -932,6 +934,7 @@ def api_system_params_save():
         vpp_minutes = _to_positive_int(data.get("vpp_interval_minutes"), "ASM 軟體資訊的自動背景更新時間")
         devices_status_minutes = _to_positive_int(data.get("devices_status_interval_minutes"), "裝置與命令的自動背景更新時間")
         retry_hours = _to_positive_int(data.get("pending_retry_threshold_hours"), "逾時命令可重派時間")
+        installed_apps_hours = _to_positive_int(data.get("installed_apps_interval_hours"), "裝置 App 清單查詢間隔")
     except ValueError as e:
         return jsonify({"ok": False, "message": str(e)}), 400
 
@@ -939,15 +942,86 @@ def api_system_params_save():
     CFG["vpp_cache"]["refresh_interval_seconds"] = vpp_minutes * 60
     CFG["devices_status_cache"]["refresh_interval_seconds"] = devices_status_minutes * 60
     CFG["devices_status_cache"]["pending_retry_threshold_minutes"] = retry_hours * 60
+    CFG["devices_status_cache"]["installed_apps_interval_minutes"] = installed_apps_hours * 60
     config.save_config(CFG)
 
     log_activity_entry(
         "系統參數-背景排程時間設定", True,
         detail=(
             f"ASM所有裝置={asm_devices_minutes}分鐘, ASM軟體資訊={vpp_minutes}分鐘, "
-            f"裝置與命令={devices_status_minutes}分鐘, 逾時命令可重派時間={retry_hours}小時"
+            f"裝置與命令={devices_status_minutes}分鐘, 逾時命令可重派時間={retry_hours}小時, "
+            f"裝置App清單查詢間隔={installed_apps_hours}小時"
         ),
     )
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# MySQL 設定(InnoDB buffer pool 記憶體快取)
+# ---------------------------------------------------------------------------
+def _mysql_root_conn():
+    """回傳 (docker_container, root_password);.env 沒有 root 密碼時 root_password 是空字串"""
+    env = get_env_dict()
+    return CFG["mysql"]["docker_container"], env.get(CFG["mysql"].get("root_password_env_key", "MYSQL_ROOT_PASSWORD"), "")
+
+
+@app.route("/api/mysql-tuning/status")
+@login_required
+def api_mysql_tuning_status():
+    container, root_password = _mysql_root_conn()
+    if not root_password:
+        return jsonify({"ok": False, "message": ".env 裡沒有設定 MYSQL_ROOT_PASSWORD,無法查詢或調整 MySQL 設定"}), 400
+    status, err = utils_mysql_tuning.get_buffer_pool_status(container, root_password)
+    if err:
+        return jsonify({"ok": False, "message": f"查詢 MySQL 狀態失敗: {err}"}), 500
+    return jsonify({"ok": True, "status": status})
+
+
+@app.route("/api/mysql-tuning/buffer-pool", methods=["POST"])
+@login_required
+def api_mysql_tuning_apply():
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統參數-MySQL buffer pool 調整", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    container, root_password = _mysql_root_conn()
+    if not root_password:
+        return jsonify({"ok": False, "message": ".env 裡沒有設定 MYSQL_ROOT_PASSWORD,無法調整 MySQL 設定"}), 400
+    try:
+        requested_mb = int(data.get("size_mb"))
+        if requested_mb < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "大小必須是大於0的整數(MB)"}), 400
+
+    status, err = utils_mysql_tuning.get_buffer_pool_status(container, root_password)
+    if err:
+        return jsonify({"ok": False, "message": f"查詢 MySQL 狀態失敗: {err}"}), 500
+    size_mb = utils_mysql_tuning.normalize_buffer_pool_mb(requested_mb, status)
+    ok, err = utils_mysql_tuning.apply_buffer_pool_size(container, root_password, size_mb)
+    log_activity_entry(
+        "系統參數-MySQL buffer pool 調整", ok,
+        detail=f"{status['size_mb']} MB → {size_mb} MB(輸入 {requested_mb} MB)" + (f", error={err}" if err else ""),
+    )
+    if not ok:
+        return jsonify({"ok": False, "message": f"調整失敗: {err}"}), 500
+    return jsonify({"ok": True, "size_mb": size_mb, "previous_mb": status["size_mb"]})
+
+
+@app.route("/api/mysql-tuning/buffer-pool/reset", methods=["POST"])
+@login_required
+def api_mysql_tuning_reset():
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統參數-MySQL buffer pool 恢復預設", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    container, root_password = _mysql_root_conn()
+    if not root_password:
+        return jsonify({"ok": False, "message": ".env 裡沒有設定 MYSQL_ROOT_PASSWORD,無法調整 MySQL 設定"}), 400
+    ok, err = utils_mysql_tuning.reset_buffer_pool_size(container, root_password)
+    log_activity_entry("系統參數-MySQL buffer pool 恢復預設", ok, detail=err or "已清除手動設定,下次重新啟動 MySQL 後生效")
+    if not ok:
+        return jsonify({"ok": False, "message": f"恢復預設失敗: {err}"}), 500
     return jsonify({"ok": True})
 
 
@@ -4688,23 +4762,24 @@ def api_group_devices(group_name):
 def get_latest_installed_apps_bulk(enrollment_ids):
     """一次查出多台裝置各自最近一次「有回應內容」的 InstalledApplicationList。
     回傳 {enrollment_id: [已安裝 App, ...]};沒有回報過、或最近一次回應是錯誤的裝置不會出現在結果裡。
-    逐台呼叫 get_latest_installed_apps() 每台都要 docker exec 一次,群組裝置一多會很慢,所以合併成一次查詢。"""
+    逐台呼叫 get_latest_installed_apps() 每台都要 docker exec 一次,群組裝置一多會很慢,所以合併成一次查詢。
+
+    查詢分兩步:先只用時間欄位(不碰回應內容)找出每台裝置最新的那一筆,再只讀那幾筆的回應內容。
+    舊寫法用相關子查詢對每一筆候選資料重複算一次MAX,資料一多每批要30~50秒、CPU整顆吃滿。"""
     ids = [e for e in (enrollment_ids or []) if e]
     if not ids:
         return {}
     id_list = ",".join("'" + e.replace("'", "''") + "'" for e in ids)
     sql = (
-        "SELECT JSON_OBJECT('id', q.id, 'result_b64', TO_BASE64(r.result)) "
-        "FROM enrollment_queue q "
-        "JOIN commands c ON c.command_uuid = q.command_uuid "
-        "JOIN command_results r ON r.command_uuid = q.command_uuid AND r.id = q.id "
-        f"WHERE c.request_type = 'InstalledApplicationList' AND q.id IN ({id_list}) AND r.result IS NOT NULL "
-        "AND q.created_at = ("
-        "  SELECT MAX(q2.created_at) FROM enrollment_queue q2 "
-        "  JOIN commands c2 ON c2.command_uuid = q2.command_uuid "
-        "  JOIN command_results r2 ON r2.command_uuid = q2.command_uuid AND r2.id = q2.id "
-        "  WHERE q2.id = q.id AND c2.request_type = 'InstalledApplicationList' AND r2.result IS NOT NULL"
-        ");"
+        "SELECT JSON_OBJECT('id', r.id, 'result_b64', TO_BASE64(r.result)) FROM ("
+        "  SELECT id, command_uuid FROM ("
+        "    SELECT q.id, q.command_uuid, ROW_NUMBER() OVER (PARTITION BY q.id ORDER BY q.created_at DESC) AS rn "
+        "    FROM enrollment_queue q "
+        "    JOIN commands c ON c.command_uuid = q.command_uuid "
+        "    JOIN command_results r2 ON r2.command_uuid = q.command_uuid AND r2.id = q.id "
+        f"    WHERE c.request_type = 'InstalledApplicationList' AND q.id IN ({id_list})"
+        "  ) x WHERE rn = 1"
+        ") t JOIN command_results r ON r.id = t.id AND r.command_uuid = t.command_uuid;"
     )
     rc, out, _ = _run_nanomdm_sql(sql, timeout=60)
     if rc != 0:
@@ -4726,7 +4801,7 @@ def get_latest_installed_apps_bulk(enrollment_ids):
 
 
 _installed_apps_cache_lock = threading.Lock()
-INSTALLED_APPS_BATCH_SIZE = 10  # 讀取清單內容每台要 1 秒多,分批查才不會超過單次 SQL 的逾時
+INSTALLED_APPS_BATCH_SIZE = 20  # 每台的清單內容約30KB,分批讀取避免單次輸出過大
 
 
 def refresh_installed_apps_cache():

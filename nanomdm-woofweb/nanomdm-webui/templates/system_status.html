@@ -68,6 +68,11 @@
     <button id="refresh-mysql-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
   </h2>
   <div id="mysql-status-container">載入中...</div>
+  <div style="margin-top:12px; padding:10px 12px; background:#f8f9fb; border-radius:6px; font-size:13px; color:#374151;">
+    指令歷史會隨時間累積,資料表太大會讓背景排程查詢變慢。請到「系統環境參數」設定 nanomdm 指令歷史清理的保留天數與自動排程,避免資料庫無限制成長;
+    MySQL 記憶體快取(buffer pool)也在同一頁調整。
+    <button class="secondary" type="button" style="margin-left:6px; font-size:12px;" onclick="location.href='{{ url_for('env_page') }}#nanomdm-cleanup-panel'">前往設定指令歷史清理</button>
+  </div>
 </div>
 
 <div class="panel">
@@ -76,34 +81,6 @@
     <button id="refresh-static-files-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
   </h2>
   <div id="static-files-container">載入中...</div>
-</div>
-
-<div class="panel">
-  <h2>資料庫維護 — nanomdm 指令歷史清理</h2>
-  <p style="color:#6b7280; font-size:13px; margin:6px 0;">
-    每次派送給裝置的 MDM 指令、裝置的回應紀錄,都會累積在 nanomdm 的資料庫裡。
-    這裡可以設定保留天數,超過保留天數的指令紀錄會被清除,避免資料庫無限成長。
-    超過保留天數仍未回應的指令(例如裝置長時間離線)也會一併清除,裝置之後上線不會再收到;
-    這類裝置請自行確認狀況,需要時重新派送。
-  </p>
-  <div class="field-row">
-    <label>保留天數</label>
-    <input type="number" id="cleanup-retention-days-input" min="1" style="width:100px;" value="60">
-  </div>
-  <div class="field-row">
-    <label><input type="checkbox" id="cleanup-auto-enabled-input" style="width:auto;"> 開啟自動排程清理(每天自動檢查一次)</label>
-  </div>
-  <button id="cleanup-save-settings-btn" class="secondary" type="button" style="font-size:12px;">儲存設定</button>
-  <button id="cleanup-preview-btn" type="button" style="font-size:12px;">預覽清理範圍</button>
-  <div id="cleanup-preview-result" style="margin-top:12px; display:none;">
-    <div style="background:#f8f9fb; border-radius:6px; padding:14px;">
-      <p style="margin:4px 0;">超過保留天數、將被清除的指令紀錄:<strong id="cleanup-preview-commands-count">-</strong> 筆</p>
-      <p style="margin:4px 0; color:#6b7280; font-size:13px;">連帶會一併清除的回應紀錄:約 <span id="cleanup-preview-results-count">-</span> 筆;佇列紀錄:約 <span id="cleanup-preview-queue-count">-</span> 筆</p>
-      <p style="margin:4px 0; color:#b45309; font-size:13px;">其中仍未收到裝置回應的佇列紀錄:<span id="cleanup-preview-pending-count">-</span> 筆(裝置之後上線不會再收到這些指令)</p>
-      <div id="cleanup-preview-breakdown" style="margin-top:8px; font-size:13px;"></div>
-      <button id="cleanup-execute-btn" class="danger" type="button" style="margin-top:10px; font-size:12px;">確認執行清理</button>
-    </div>
-  </div>
 </div>
 
 <div class="panel">

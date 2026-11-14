@@ -273,7 +273,7 @@ async function checkApnsTopicOnFileSelect() {
 }
 
 async function deleteApnsCert(topic) {
-  const password = prompt(
+  const password = await askPassword(
     `確定要刪除 topic「${topic}」這組APNs推播憑證嗎?\n\n` +
     `刪除後,所有目前用這個topic註冊的裝置會立刻失去推播能力` +
     `(伺服器無法再喚醒它們執行任何MDM指令,包括查詢狀態、安裝App、遠端清除等,直到裝置重新註冊為止)。\n\n` +

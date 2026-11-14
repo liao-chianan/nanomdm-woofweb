@@ -153,8 +153,12 @@ function debugLog(label, data, isError) {
   }
   entry.innerHTML = `<span class="ts">[${ts}]</span><strong>${escapeHtml(label)}</strong>\n${escapeHtml(dataStr)}`;
   body.appendChild(entry);
+  // 只保留最近 DEBUG_LOG_MAX_ENTRIES 筆:有些頁面會定時自動更新(例如系統狀態每2秒一次),不限制的話會越積越多
+  while (body.childElementCount > DEBUG_LOG_MAX_ENTRIES) body.removeChild(body.firstElementChild);
   body.scrollTop = body.scrollHeight;
 }
+
+const DEBUG_LOG_MAX_ENTRIES = 300;
 
 function escapeHtml(str) {
   const div = document.createElement("div");
@@ -298,6 +302,43 @@ function openModal(id) {
 }
 function closeModal(id) {
   document.getElementById(id).classList.add("hidden");
+}
+
+// ---- 密碼確認視窗(輸入內容遮蔽) ----
+// 瀏覽器內建的 prompt() 無法遮蔽輸入,密碼會以明碼顯示在畫面上,所以改用這個共用視窗。
+// 回傳 Promise:按確認回傳輸入的密碼,取消、按 Esc 或點背景回傳 null。
+function askPassword(message) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML = `
+      <div class="modal-box" style="width:440px;">
+        <h3>確認身分</h3>
+        <p class="password-dialog-message"></p>
+        <input type="password" class="password-dialog-input" autocomplete="current-password" placeholder="目前登入的密碼">
+        <div class="password-dialog-actions">
+          <button type="button" class="secondary password-dialog-cancel">取消</button>
+          <button type="button" class="password-dialog-ok">確認</button>
+        </div>
+      </div>`;
+    overlay.querySelector(".password-dialog-message").textContent = message || "請輸入您目前登入的密碼以確認:";
+    const input = overlay.querySelector(".password-dialog-input");
+    const finish = (value) => {
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); finish(null); }
+      else if (e.key === "Enter" && document.activeElement === input) { e.preventDefault(); finish(input.value || null); }
+    };
+    overlay.querySelector(".password-dialog-ok").addEventListener("click", () => finish(input.value || null));
+    overlay.querySelector(".password-dialog-cancel").addEventListener("click", () => finish(null));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) finish(null); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(overlay);
+    input.focus();
+  });
 }
 
 // ---------------------------------------------------------------------------

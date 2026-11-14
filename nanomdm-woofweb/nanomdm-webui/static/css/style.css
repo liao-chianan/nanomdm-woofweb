@@ -553,10 +553,32 @@ table.data-table input[type="text"] { width: 100%; padding: 5px 8px; font-size: 
   box-shadow: 0 1px 6px rgba(0,0,0,0.15);
 }
 .modal-close:hover { background: #f1f3f6; color: var(--text-main); }
+/* ---- 密碼確認視窗(askPassword) ---- */
+.password-dialog-message { white-space: pre-wrap; font-size: 13px; color: #374151; line-height: 1.6; margin: 0 0 12px 0; }
+.password-dialog-input { width: 100%; }
+.password-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
 table.kv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.kv-table td { padding: 8px 10px; border-bottom: 1px solid #edf0f4; vertical-align: top; }
 table.kv-table td.k { color: var(--text-muted); width: 38%; }
+
+/* ---- 設定清單(左邊說明、右邊數值+單位) ---- */
+.settings-list { border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; }
+.settings-group-title { background: #f8f9fb; padding: 8px 16px; font-size: 12px; font-weight: 700; color: #6b7280; letter-spacing: .03em; border-bottom: 1px solid var(--border-color); }
+.settings-group-title:not(:first-child) { border-top: 1px solid var(--border-color); }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border-bottom: 1px solid #eef0f4; }
+.settings-row:last-child { border-bottom: none; }
+.settings-row-text { min-width: 0; }
+.settings-row-label { font-size: 14px; font-weight: 600; color: var(--text-main); }
+.settings-row-desc { font-size: 12px; color: #6b7280; margin-top: 2px; line-height: 1.5; }
+.settings-row-input { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.settings-row-input input[type="number"] { width: 96px; text-align: right; }
+.settings-row-input .unit { font-size: 13px; color: #6b7280; width: 28px; }
+.settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 14px; }
+.settings-actions .hint { font-size: 12px; color: #6b7280; }
+@media (max-width: 640px) {
+  .settings-row { flex-direction: column; align-items: flex-start; }
+}
 
 .field-row { margin-bottom: 12px; }
 .field-row label { display: block; font-size: 12px; font-weight: 600; color: #4b5563; margin-bottom: 5px; }

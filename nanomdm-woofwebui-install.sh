@@ -435,6 +435,27 @@ for i in $(seq 1 60); do
     sleep 5
 done
 
+# MySQL 記憶體快取(InnoDB buffer pool)預設 512MB(MySQL 本身預設只有 128MB,裝置一多查詢會變慢)。
+# 用 SET PERSIST 設定:立即生效、重新啟動後仍然保留,不需要修改 docker-compose.yml;
+# 之後可以在 WebUI「系統環境參數 → MySQL 設定」調整。
+# 已經手動設定過的(例如保留舊資料重新安裝)不覆蓋;主機記憶體不足 1GB 時維持 MySQL 預設值。
+BUFFER_POOL_MB=512
+HOST_MEM_MB=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+if [ "${HOST_MEM_MB:-0}" -lt $((BUFFER_POOL_MB * 2)) ]; then
+    log_warn "主機記憶體只有 ${HOST_MEM_MB}MB,MySQL buffer pool 維持預設 128MB"
+else
+    PERSISTED_BP=$(MYSQL_PWD="${DB_PASSWORD}" docker exec -e MYSQL_PWD nanomdm-mysql mysql -uroot -N -B -e \
+        "SELECT VARIABLE_VALUE FROM performance_schema.persisted_variables WHERE VARIABLE_NAME = 'innodb_buffer_pool_size';" 2>/dev/null)
+    if [ -n "$PERSISTED_BP" ]; then
+        log_ok "MySQL buffer pool 先前已手動設定為 $((PERSISTED_BP / 1024 / 1024))MB,維持不變"
+    elif MYSQL_PWD="${DB_PASSWORD}" docker exec -e MYSQL_PWD nanomdm-mysql mysql -uroot -e \
+        "SET PERSIST innodb_buffer_pool_size = $((BUFFER_POOL_MB * 1024 * 1024));" > /dev/null 2>&1; then
+        log_ok "MySQL buffer pool 已設定為 ${BUFFER_POOL_MB}MB"
+    else
+        log_warn "MySQL buffer pool 設定失敗,維持預設 128MB(之後可以在 WebUI「系統環境參數 → MySQL 設定」調整)"
+    fi
+fi
+
 # =============================================================================
 # 建立 SCEP 根 CA(必須在啟動scep容器前完成,容器啟動時需要ca.pem/ca.key已經存在於depot)
 # =============================================================================

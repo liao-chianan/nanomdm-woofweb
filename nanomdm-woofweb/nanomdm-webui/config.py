@@ -63,7 +63,8 @@ DEFAULT_CONFIG = {
         "docker_container": "nanomdm-mysql",
         "db_user": "nanomdm",
         "db_name": "nanomdm",
-        "db_password_env_key": "NANOMDM_DB_PASSWORD"
+        "db_password_env_key": "NANOMDM_DB_PASSWORD",
+        "root_password_env_key": "MYSQL_ROOT_PASSWORD"
     },
     "nanodep_mysql": {
         "docker_container": "nanomdm-mysql",
@@ -106,11 +107,12 @@ DEFAULT_CONFIG = {
     "devices_status_cache": {
         "csv_path": "/opt/nanomdm-deployment/devices-status.csv",
         "refresh_interval_seconds": 600,
-        "pending_retry_threshold_minutes": 360
+        "pending_retry_threshold_minutes": 360,
+        "installed_apps_interval_minutes": 360
     },
     "nanomdm_cleanup": {
-        "retention_days": 60,
-        "auto_enabled": False,
+        "retention_days": 7,
+        "auto_enabled": True,
         "check_interval_seconds": 86400
     },
     "update": {

@@ -89,6 +89,18 @@ def get_cpu_usage_percpu(sample_interval=0.3):
     return results
 
 
+def get_cpu_model():
+    """CPU 型號(/proc/cpuinfo 的 model name),讀不到時退回 platform.processor()"""
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or "未知"
+
+
 def get_memory_usage():
     """解析/proc/meminfo,回傳記憶體使用狀況(單位MB)"""
     info = {}
@@ -144,6 +156,8 @@ def get_system_status():
     return {
         "current_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "os_info": get_os_info(),
+        "cpu_model": get_cpu_model(),
+        "cpu_count": os.cpu_count(),
         "cpu": get_cpu_usage_percpu(),
         "memory": get_memory_usage(),
         "disk": get_disk_usage("/"),

@@ -41,17 +41,35 @@ async function loadSystemStatus() {
           <tr><td class="k">目前時間</td><td>${escapeHtml(d.current_time)}</td></tr>
           <tr><td class="k">作業系統</td><td>${escapeHtml(d.os_info.os_name)}</td></tr>
           <tr><td class="k">核心版本</td><td style="font-family:var(--mono); font-size:12px;">${escapeHtml(d.os_info.kernel_version)}</td></tr>
+          <tr><td class="k">CPU 型號</td><td>${escapeHtml(d.cpu_model || "未知")}${d.cpu_count ? `(${d.cpu_count} 核心)` : ""}</td></tr>
         </table>
         ${renderUsageBar("記憶體", d.memory.percent, `${d.memory.used_mb} / ${d.memory.total_mb} MB`)}
         ${renderUsageBar("磁碟空間 (/)", d.disk.percent, `${d.disk.used_gb} / ${d.disk.total_gb} GB`)}
       </div>
       <div>
-        <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">CPU 使用率</div>
+        <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">CPU 使用率(每 2 秒自動更新)</div>
         ${cpuHtml}
       </div>
     </div>
   `;
 }
+
+// 系統狀態(CPU/記憶體使用率)每2秒自動更新:上一次查詢完成後才排下一次,不會重疊;
+// 分頁切到背景時暫停,切回來馬上更新一次
+const SYSTEM_STATUS_REFRESH_MS = 2000;
+let systemStatusTimer = null;
+
+async function refreshSystemStatusLoop() {
+  clearTimeout(systemStatusTimer);
+  if (document.hidden) return;
+  await loadSystemStatus();
+  systemStatusTimer = setTimeout(refreshSystemStatusLoop, SYSTEM_STATUS_REFRESH_MS);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearTimeout(systemStatusTimer);
+  else refreshSystemStatusLoop();
+});
 
 // ---------------------------------------------------------------------------
 // Docker
@@ -412,21 +430,17 @@ function restartAllServices() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  loadSystemStatus();
+  refreshSystemStatusLoop();
   loadDockerStatus();
   loadSystemdStatus();
   loadMysqlStatus(false);
   loadStaticFilesStatus();
-  loadCleanupSettings();
 
-  document.getElementById("refresh-system-btn").addEventListener("click", loadSystemStatus);
+  document.getElementById("refresh-system-btn").addEventListener("click", refreshSystemStatusLoop);
   document.getElementById("restart-all-btn").addEventListener("click", restartAllServices);
   document.getElementById("refresh-mysql-btn").addEventListener("click", () => loadMysqlStatus(false));
   document.getElementById("refresh-mysql-exact-btn").addEventListener("click", () => loadMysqlStatus(true));
   document.getElementById("refresh-static-files-btn").addEventListener("click", loadStaticFilesStatus);
-  document.getElementById("cleanup-save-settings-btn").addEventListener("click", saveCleanupSettings);
-  document.getElementById("cleanup-preview-btn").addEventListener("click", previewCleanup);
-  document.getElementById("cleanup-execute-btn").addEventListener("click", executeCleanup);
   document.getElementById("sh-permissions-scan-btn").addEventListener("click", scanShPermissions);
   document.getElementById("sh-permissions-grant-btn").addEventListener("click", grantShPermissions);
 
@@ -447,107 +461,3 @@ document.addEventListener("DOMContentLoaded", () => {
   // 系統資源每10秒自動更新一次(輕量,不影響Docker/systemd/MySQL的手動重新整理)
   setInterval(loadSystemStatus, 10000);
 });
-
-// ---------------------------------------------------------------------------
-// nanomdm 指令歷史清理
-// ---------------------------------------------------------------------------
-async function loadCleanupSettings() {
-  const res = await apiFetch("/api/cleanup/settings");
-  if (!res.ok) return;
-  document.getElementById("cleanup-retention-days-input").value = res.data.settings.retention_days;
-  document.getElementById("cleanup-auto-enabled-input").checked = res.data.settings.auto_enabled;
-}
-
-async function saveCleanupSettings() {
-  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
-  const autoEnabled = document.getElementById("cleanup-auto-enabled-input").checked;
-
-  if (!retentionDays || retentionDays < 1) {
-    alert("保留天數必須是大於0的整數");
-    return;
-  }
-
-  const res = await apiFetchJSON("/api/cleanup/settings", "POST", {
-    retention_days: retentionDays, auto_enabled: autoEnabled,
-  });
-  if (res.ok) {
-    alert("設定已儲存");
-  } else {
-    alert("儲存失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-  }
-}
-
-async function previewCleanup() {
-  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
-  if (!retentionDays || retentionDays < 1) {
-    alert("保留天數必須是大於0的整數");
-    return;
-  }
-
-  const btn = document.getElementById("cleanup-preview-btn");
-  btn.disabled = true;
-  btn.textContent = "查詢中...";
-
-  const res = await apiFetch(`/api/cleanup/preview?retention_days=${retentionDays}`);
-
-  btn.disabled = false;
-  btn.textContent = "預覽清理範圍";
-
-  if (!res.ok) {
-    alert("預覽失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-    return;
-  }
-
-  const data = res.data;
-  document.getElementById("cleanup-preview-commands-count").textContent = data.commands_count;
-  document.getElementById("cleanup-preview-results-count").textContent =
-    data.command_results_count !== null ? data.command_results_count : "未知";
-  document.getElementById("cleanup-preview-queue-count").textContent =
-    data.enrollment_queue_count !== null ? data.enrollment_queue_count : "未知";
-  document.getElementById("cleanup-preview-pending-count").textContent =
-    data.pending_queue_count !== null && data.pending_queue_count !== undefined ? data.pending_queue_count : "未知";
-
-  const breakdownEl = document.getElementById("cleanup-preview-breakdown");
-  if (data.by_request_type && data.by_request_type.length > 0) {
-    breakdownEl.innerHTML = "<strong>依指令類型分類：</strong><br>" +
-      data.by_request_type.map(item => `${escapeHtml(item.request_type)}: ${item.count} 筆`).join("　");
-  } else {
-    breakdownEl.innerHTML = "";
-  }
-
-  document.getElementById("cleanup-preview-result").style.display = "";
-
-  if (data.commands_count === 0) {
-    alert("目前沒有超過保留天數的指令紀錄");
-  }
-}
-
-async function executeCleanup() {
-  const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
-  const previewCount = document.getElementById("cleanup-preview-commands-count").textContent;
-
-  if (!confirm(`確定要清除這 ${previewCount} 筆指令紀錄嗎?此操作無法復原,超過保留天數仍未回應的指令也會一併清除。`)) {
-    return;
-  }
-
-  const password = prompt("請輸入您目前登入的密碼以確認執行清理:");
-  if (!password) return;
-
-  const btn = document.getElementById("cleanup-execute-btn");
-  btn.disabled = true;
-  btn.textContent = "執行中...";
-
-  const res = await apiFetchJSON("/api/cleanup/execute", "POST", {
-    retention_days: retentionDays, password,
-  });
-
-  btn.disabled = false;
-  btn.textContent = "確認執行清理";
-
-  if (res.ok) {
-    alert(res.data.message);
-    document.getElementById("cleanup-preview-result").style.display = "none";
-  } else {
-    alert("清理失敗: " + ((res.data && res.data.message) || "未知錯誤"));
-  }
-}
