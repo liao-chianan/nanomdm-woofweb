@@ -34,6 +34,7 @@ import utils_lockscreen
 import utils_mysql_tuning
 import utils_logmaint
 import compose_manager
+import utils_nginx_ssl
 
 try:
     CFG = load_config()
@@ -1346,6 +1347,97 @@ def api_cert_nginx_renew_stream():
             yield f"data: {json.dumps({'message': f'certbot renew 完成,但 nginx reload 失敗: {reload_err},請手動確認 nginx 狀態', 'done': True, 'ok': False}, ensure_ascii=False)}\n\n"
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# nginx HTTPS 憑證切換(實際處理在 utils_nginx_ssl.py)
+# ---------------------------------------------------------------------------
+def _sync_env_after_ssl_change(domain):
+    """改用 /etc/nginx/ssl/current 之後,讓 .env 的 NGINX_CERT_PATH 指向它(憑證狀態頁、到期檢查腳本都讀這個),
+    並補上 SERVER_DOMAIN(原本描述檔的網域是從 NGINX_CERT_PATH 的 /live/<網域>/ 推出來的,改路徑後就推不出來了)。"""
+    env_path = CFG["paths"]["env_file"]
+    st_mode = os.stat(env_path).st_mode & 0o7777
+    env = get_env_dict()
+    if env.get("NGINX_CERT_PATH") != utils_nginx_ssl.CURRENT_FULLCHAIN:
+        utils.update_env_key(env_path, CFG["paths"]["env_backup_dir"], "NGINX_CERT_PATH", utils_nginx_ssl.CURRENT_FULLCHAIN)
+    if not (env.get("SERVER_DOMAIN") or "").strip() and domain:
+        utils.update_env_key(env_path, CFG["paths"]["env_backup_dir"], "SERVER_DOMAIN", domain)
+    os.chmod(env_path, st_mode)  # .env 有密碼,維持原本的權限
+    CFG["cert_status"]["nginx_cert_path"] = utils_nginx_ssl.CURRENT_FULLCHAIN
+
+
+@app.route("/api/nginx-ssl/status")
+@login_required
+def api_nginx_ssl_status():
+    return jsonify({"ok": True, "status": utils_nginx_ssl.status()})
+
+
+@app.route("/api/nginx-ssl/acme", methods=["POST"])
+@login_required
+def api_nginx_ssl_acme():
+    data = request.json or {}
+    mode = data.get("mode", "")
+    label = utils_nginx_ssl.MODE_LABELS.get(mode, mode)
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("憑證管理-更換 nginx 憑證", False, detail=f"{label}: 密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    if mode == "staging" and not data.get("confirm_untrusted"):
+        return jsonify({"ok": False, "message": "測試環境的憑證不受裝置信任,請勾選確認後再執行"}), 400
+    try:
+        result = utils_nginx_ssl.request_acme(
+            mode, email=(data.get("email") or "").strip(),
+            eab_kid=(data.get("eab_kid") or "").strip(), eab_hmac=(data.get("eab_hmac") or "").strip())
+    except utils_nginx_ssl.SSLError as e:
+        log_activity_entry("憑證管理-更換 nginx 憑證", False, detail=f"{label}: {e}")
+        return jsonify({"ok": False, "message": str(e)}), 400
+    st = utils_nginx_ssl.status()
+    if st.get("migrated"):
+        _sync_env_after_ssl_change(st.get("domain"))
+    log_activity_entry("憑證管理-更換 nginx 憑證", result["ok"], detail=f"{label}: {result['message']}")
+    return jsonify({**result, "status": st}), (200 if result["ok"] else 500)
+
+
+def _read_manual_upload():
+    def field(name):
+        f = request.files.get(name)
+        if f and f.filename:
+            return f.read(1024 * 1024).decode("utf-8", errors="replace")
+        return request.form.get(name, "")
+    return field("cert"), field("key"), field("chain")
+
+
+@app.route("/api/nginx-ssl/manual/validate", methods=["POST"])
+@login_required
+def api_nginx_ssl_manual_validate():
+    st = utils_nginx_ssl.status()
+    if not st["ok"]:
+        return jsonify({"ok": False, "message": st["error"]}), 400
+    cert, key, chain = _read_manual_upload()
+    result, staged = utils_nginx_ssl.validate_manual(cert, key, chain, st["domain"])
+    utils_nginx_ssl.discard_staged(staged)
+    return jsonify({"ok": True, "validation": result})
+
+
+@app.route("/api/nginx-ssl/manual/apply", methods=["POST"])
+@login_required
+def api_nginx_ssl_manual_apply():
+    if not verify_current_user_password(request.form.get("password", "")):
+        log_activity_entry("憑證管理-更換 nginx 憑證", False, detail="手動上傳: 密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    cert, key, chain = _read_manual_upload()
+    try:
+        result = utils_nginx_ssl.apply_manual(cert, key, chain)
+    except utils_nginx_ssl.SSLError as e:
+        log_activity_entry("憑證管理-更換 nginx 憑證", False, detail=f"手動上傳: {e}")
+        return jsonify({"ok": False, "message": str(e)}), 400
+    st = utils_nginx_ssl.status()
+    if st.get("migrated"):
+        _sync_env_after_ssl_change(st.get("domain"))
+    cert_info = (result.get("validation") or {}).get("cert") or {}
+    log_activity_entry("憑證管理-更換 nginx 憑證", result["ok"],
+                       detail=f"手動上傳: {result['message']}, 涵蓋={'、'.join(cert_info.get('sans', []))}, "
+                              f"到期日={cert_info.get('not_after')}")
+    return jsonify({**result, "status": st}), (200 if result["ok"] else 400)
 
 
 @app.route("/api/cert-status/vpp/upload", methods=["POST"])

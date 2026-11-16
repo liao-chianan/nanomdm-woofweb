@@ -59,8 +59,16 @@ function renderCertDetail(item) {
   `;
 
   const btnContainer = div.querySelector(".cert-action-buttons");
-  if (item.name === "nginx (Let's Encrypt)") {
-    btnContainer.innerHTML = `<button class="secondary cert-nginx-renew-btn" type="button" style="font-size:12px;">立即續期 (certbot renew)</button>`;
+  if (item.name === "nginx HTTPS 憑證") {
+    const renewBtn = nginxSslStatus && nginxSslStatus.mode === "manual"
+      ? ""
+      : `<button class="secondary cert-nginx-renew-btn" type="button" style="font-size:12px;">立即續期 (certbot renew)</button> `;
+    btnContainer.innerHTML = renewBtn +
+      `<button class="secondary cert-nginx-change-btn" type="button" style="font-size:12px;">更換憑證...</button>`;
+    const statusBox = document.createElement("div");
+    statusBox.style.cssText = "margin-top:8px;";
+    statusBox.innerHTML = renderNginxSslStatusHtml();
+    btnContainer.before(statusBox);
   } else if (item.name === "SCEP 根 CA (自簽)") {
     btnContainer.innerHTML = `<button class="danger cert-scep-regen-btn" type="button" style="font-size:12px;">重新產生...</button>`;
   } else if (item.name === "APNs Push 憑證") {
@@ -142,7 +150,7 @@ async function renewNginxCert() {
     appendProgressLog(update.message, update.done, update.done && !update.ok);
     if (update.done) {
       es.close();
-      loadCertStatus();
+      reloadAllCertStatus();
     }
   };
   es.onerror = () => es.close();
@@ -548,15 +556,192 @@ async function toggleProfileSigning() {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// nginx HTTPS 憑證設定
+// ---------------------------------------------------------------------------
+let nginxSslStatus = null;
+let nginxSslValidated = false;
+
+let nginxSslStatusError = "";
+
+async function loadNginxSslStatus() {
+  const res = await apiFetch("/api/nginx-ssl/status");
+  if (!res.ok || !res.data.status.ok) {
+    nginxSslStatus = null;
+    nginxSslStatusError = (res.data && (res.data.message || (res.data.status && res.data.status.error))) || "未知錯誤";
+    return;
+  }
+  nginxSslStatus = res.data.status;
+  nginxSslStatusError = "";
+}
+
+// 重新讀取 nginx 憑證設定與所有憑證狀態(nginx 區塊的設定明細是在 loadCertStatus 裡一起畫出來的)
+async function reloadAllCertStatus() {
+  await loadNginxSslStatus();
+  await loadCertStatus();
+}
+
+function renderNginxSslStatusHtml() {
+  const st = nginxSslStatus;
+  if (!st) {
+    return `<p style="color:#d64545; font-size:13px;">無法取得 nginx 憑證設定: ${escapeHtml(nginxSslStatusError || "未知錯誤")}</p>`;
+  }
+  const c = st.cert || {};
+  const trust = c.trusted
+    ? `<span style="color:#1c7c3f;">受公開信任(iPad 可以正常連線)</span>`
+    : `<span style="color:#d64545;">不受信任(${escapeHtml(c.trust_error || "")}),裝置無法連線</span>`;
+  const days = c.days_left !== undefined
+    ? `${escapeHtml(c.not_after)}(剩 <strong style="color:${c.days_left < 14 ? "#d64545" : c.days_left < 30 ? "#b45309" : "#1c7c3f"};">${c.days_left}</strong> 天)`
+    : "未知";
+  const renew = st.mode === "manual"
+    ? `<span style="color:#b45309;">不會自動續期,到期前請重新上傳</span>`
+    : (st.auto_renew ? "certbot 自動續期" : "未知");
+  return `
+    <table class="kv-table" style="font-size:13px;">
+      <tr><td class="k">網域</td><td>${escapeHtml(st.domain)}</td></tr>
+      <tr><td class="k">目前來源</td><td><strong>${escapeHtml(st.mode_label)}</strong></td></tr>
+      <tr><td class="k">簽發者</td><td>${escapeHtml(c.issuer || "")}</td></tr>
+      <tr><td class="k">涵蓋網域</td><td>${escapeHtml((c.sans || []).join("、"))}${st.covers_domain ? "" : ` <span style="color:#d64545;">(不包含本台網域)</span>`}</td></tr>
+      <tr><td class="k">到期日</td><td>${days}</td></tr>
+      <tr><td class="k">信任狀態</td><td>${trust}</td></tr>
+      <tr><td class="k">續期</td><td>${renew}</td></tr>
+      <tr><td class="k">憑證位置</td><td style="font-family:var(--mono); font-size:12px;">${escapeHtml(st.cert_dir)}${st.migrated ? "" : `<div style="color:#6b7280; font-family:inherit;">第一次更換憑證時,會把 nginx 改成使用固定路徑 /etc/nginx/ssl/current(會先備份設定)</div>`}</td></tr>
+    </table>`;
+}
+
+function onNginxSslModeChange() {
+  const mode = document.getElementById("nginx-ssl-mode-select").value;
+  const isManual = mode === "manual";
+  document.getElementById("nginx-ssl-acme-fields").classList.toggle("hidden", isManual);
+  document.getElementById("nginx-ssl-manual-fields").classList.toggle("hidden", !isManual);
+  document.getElementById("nginx-ssl-zerossl-fields").classList.toggle("hidden", mode !== "zerossl");
+  document.getElementById("nginx-ssl-staging-fields").classList.toggle("hidden", mode !== "staging");
+  document.getElementById("nginx-ssl-apply-btn").textContent = isManual ? "上傳並套用" : "申請並套用";
+}
+
+function openNginxSslModal() {
+  const st = nginxSslStatus;
+  document.getElementById("nginx-ssl-modal-current").textContent = st
+    ? `目前使用:${st.mode_label}(${st.domain},到期日 ${(st.cert && st.cert.not_after) || "未知"})`
+    : "";
+  ["nginx-ssl-eab-kid-input", "nginx-ssl-eab-hmac-input", "nginx-ssl-cert-file", "nginx-ssl-key-file", "nginx-ssl-chain-file"]
+    .forEach((id) => { document.getElementById(id).value = ""; });
+  document.getElementById("nginx-ssl-staging-confirm").checked = false;
+  document.getElementById("nginx-ssl-validate-result").innerHTML = "";
+  nginxSslValidated = false;
+  const select = document.getElementById("nginx-ssl-mode-select");
+  select.value = st && st.mode === "letsencrypt" ? "manual" : "letsencrypt";
+  onNginxSslModeChange();
+  openModal("nginx-ssl-modal");
+}
+
+function nginxSslManualFormData() {
+  const fd = new FormData();
+  [["cert", "nginx-ssl-cert-file"], ["key", "nginx-ssl-key-file"], ["chain", "nginx-ssl-chain-file"]].forEach(([name, id]) => {
+    const f = document.getElementById(id).files[0];
+    if (f) fd.append(name, f);
+  });
+  return fd;
+}
+
+function renderNginxSslValidation(v) {
+  const rows = (v.checks || []).map((c) =>
+    `<div style="color:${c.ok ? "#1c7c3f" : "#d64545"};">${c.ok ? "✓" : "✗"} ${escapeHtml(c.name)}${c.detail ? `:<span style="color:#374151;">${escapeHtml(c.detail)}</span>` : ""}</div>`).join("");
+  document.getElementById("nginx-ssl-validate-result").innerHTML =
+    `<div style="background:#f8f9fb; border-radius:6px; padding:10px 12px; line-height:1.7;">${rows}
+      <div style="margin-top:4px; font-weight:600; color:${v.ok ? "#1c7c3f" : "#d64545"};">${v.ok ? "檢查通過,可以套用" : "檢查沒有通過,請修正後再上傳"}</div></div>`;
+}
+
+async function validateNginxSslManual() {
+  if (!document.getElementById("nginx-ssl-cert-file").files[0] || !document.getElementById("nginx-ssl-key-file").files[0]) {
+    alert("請選擇憑證檔與私鑰檔");
+    return false;
+  }
+  const btn = document.getElementById("nginx-ssl-validate-btn");
+  btn.disabled = true;
+  btn.textContent = "檢查中...";
+  const res = await apiFetch("/api/nginx-ssl/manual/validate", { method: "POST", body: nginxSslManualFormData() });
+  btn.disabled = false;
+  btn.textContent = "檢查憑證";
+  if (!res.ok) {
+    alert("檢查失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return false;
+  }
+  renderNginxSslValidation(res.data.validation);
+  nginxSslValidated = res.data.validation.ok;
+  return nginxSslValidated;
+}
+
+async function applyNginxSsl() {
+  const mode = document.getElementById("nginx-ssl-mode-select").value;
+  const btn = document.getElementById("nginx-ssl-apply-btn");
+  let res;
+  if (mode === "manual") {
+    if (!nginxSslValidated && !(await validateNginxSslManual())) return;
+    if (!confirm("確定要改用這份手動上傳的憑證嗎?\n\n手動上傳的憑證不會自動續期,到期前請記得重新上傳。")) return;
+    const password = await askPassword("請輸入您目前登入的密碼以確認更換憑證:");
+    if (!password) return;
+    const fd = nginxSslManualFormData();
+    fd.append("password", password);
+    btn.disabled = true;
+    btn.textContent = "套用中...";
+    res = await apiFetch("/api/nginx-ssl/manual/apply", { method: "POST", body: fd });
+  } else {
+    const label = document.getElementById("nginx-ssl-mode-select").selectedOptions[0].textContent;
+    const payload = {
+      mode,
+      email: document.getElementById("nginx-ssl-email-input").value.trim(),
+      eab_kid: document.getElementById("nginx-ssl-eab-kid-input").value.trim(),
+      eab_hmac: document.getElementById("nginx-ssl-eab-hmac-input").value.trim(),
+      confirm_untrusted: document.getElementById("nginx-ssl-staging-confirm").checked,
+    };
+    if (mode === "zerossl" && (!payload.eab_kid || !payload.eab_hmac)) {
+      alert("請填寫 EAB Key ID 與 EAB HMAC Key");
+      return;
+    }
+    if (mode === "staging" && !payload.confirm_untrusted) {
+      alert("請先勾選「我了解,這台主機只用來測試」");
+      return;
+    }
+    if (!confirm(`確定要申請並改用「${label}」憑證嗎?\n\n申請需要 10~60 秒。Let's Encrypt 對同一網域每週的申請次數有限制,請不要頻繁切換。`)) return;
+    const password = await askPassword("請輸入您目前登入的密碼以確認更換憑證:");
+    if (!password) return;
+    payload.password = password;
+    btn.disabled = true;
+    btn.textContent = "申請中(約 10~60 秒)...";
+    res = await apiFetchJSON("/api/nginx-ssl/acme", "POST", payload);
+  }
+  btn.disabled = false;
+  onNginxSslModeChange();
+  if (!res.ok) {
+    let msg = (res.data && res.data.message) || "未知錯誤";
+    if (res.data && res.data.output) msg += "\n\ncertbot 輸出:\n" + res.data.output.slice(-1200);
+    if (res.data && res.data.validation) renderNginxSslValidation(res.data.validation);
+    alert("更換失敗: " + msg);
+    reloadAllCertStatus();
+    return;
+  }
+  closeModal("nginx-ssl-modal");
+  alert(res.data.message);
+  reloadAllCertStatus();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-  loadCertStatus();
+  reloadAllCertStatus();
+  document.getElementById("nginx-ssl-mode-select").addEventListener("change", onNginxSslModeChange);
+  document.getElementById("nginx-ssl-validate-btn").addEventListener("click", validateNginxSslManual);
+  document.getElementById("nginx-ssl-apply-btn").addEventListener("click", applyNginxSsl);
+  ["nginx-ssl-cert-file", "nginx-ssl-key-file", "nginx-ssl-chain-file"].forEach((id) =>
+    document.getElementById(id).addEventListener("change", () => { nginxSslValidated = false; }));
   loadProfileSigningStatus();
-  document.getElementById("refresh-cert-btn").addEventListener("click", loadCertStatus);
+  document.getElementById("refresh-cert-btn").addEventListener("click", reloadAllCertStatus);
   document.getElementById("profile-signing-generate-btn").addEventListener("click", generateProfileSigningCert);
   document.getElementById("profile-signing-toggle-btn").addEventListener("click", toggleProfileSigning);
 
   document.getElementById("cert-status-details").addEventListener("click", (e) => {
     if (e.target.classList.contains("cert-nginx-renew-btn")) renewNginxCert();
+    else if (e.target.classList.contains("cert-nginx-change-btn")) openNginxSslModal();
     else if (e.target.classList.contains("cert-scep-regen-btn")) openScepRegenModal();
     else if (e.target.classList.contains("cert-apns-upload-btn")) openApnsUploadModal();
     else if (e.target.classList.contains("cert-apns-delete-btn")) deleteApnsCert(e.target.dataset.topic);

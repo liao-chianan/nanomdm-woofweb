@@ -132,6 +132,57 @@
   <button id="profile-signing-toggle-btn" class="secondary" type="button">啟用簽署</button>
 </div>
 
+
+<!-- nginx HTTPS 憑證更換 Modal -->
+<div class="modal-overlay hidden" id="nginx-ssl-modal">
+  <div class="modal-box" style="width:620px;">
+    <span class="modal-close" onclick="closeModal('nginx-ssl-modal')">✕</span>
+    <h3>更換 nginx HTTPS 憑證</h3>
+    <p id="nginx-ssl-modal-current" style="color:#6b7280; font-size:12px; margin-bottom:10px;"></p>
+    <div class="field-row">
+      <label>憑證來源</label>
+      <select id="nginx-ssl-mode-select">
+        <option value="letsencrypt">Let's Encrypt(免費、自動續期)</option>
+        <option value="zerossl">ZeroSSL(免費、自動續期,需要 EAB 認證資訊)</option>
+        <option value="manual">手動上傳(例如學校的萬用字元憑證,不會自動續期)</option>
+        <option value="staging">Let's Encrypt 測試環境(裝置不信任,只適合測試)</option>
+      </select>
+    </div>
+
+    <div id="nginx-ssl-acme-fields">
+      <p style="color:#6b7280; font-size:12px; margin:0 0 8px;">
+        透過 certbot 申請,需要網域的 DNS 指向這台主機、外部可以連到 80 port。申請失敗時目前的憑證不會變動。
+      </p>
+      <div class="field-row"><label>聯絡 email(憑證到期通知用,可留空)</label><input type="email" id="nginx-ssl-email-input"></div>
+      <div id="nginx-ssl-zerossl-fields" class="hidden">
+        <p style="color:#6b7280; font-size:12px; margin:0 0 8px;">
+          請到 https://app.zerossl.com/developer 登入,在「Developer」頁面底部按「Generate」產生 EAB 認證資訊(可以重複使用)。
+        </p>
+        <div class="field-row"><label>EAB Key ID</label><input type="text" id="nginx-ssl-eab-kid-input" autocomplete="off"></div>
+        <div class="field-row"><label>EAB HMAC Key</label><input type="password" id="nginx-ssl-eab-hmac-input" autocomplete="off"></div>
+      </div>
+      <div id="nginx-ssl-staging-fields" class="hidden" style="background:#fdeaea; border:1px solid #f5c2c2; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#7a271a;">
+        ⚠️ 測試環境的憑證 iPad 不會信任,切換後所有裝置都會連不上 MDM(無法註冊、收不到指令),直到換回正式憑證為止。
+        <label style="display:block; margin-top:6px; font-weight:600;"><input type="checkbox" id="nginx-ssl-staging-confirm" style="width:auto;"> 我了解,這台主機只用來測試</label>
+      </div>
+    </div>
+
+    <div id="nginx-ssl-manual-fields" class="hidden">
+      <p style="color:#6b7280; font-size:12px; margin:0 0 8px;">
+        請上傳 PEM 格式的檔案。憑證檔請盡量使用含中繼憑證的完整憑證鏈(fullchain);如果中繼憑證是另外一個檔案,放在「中繼憑證」欄位。
+        私鑰不能有密碼保護。上傳前會先檢查憑證與私鑰是否一對、是否涵蓋本台網域、是否過期、憑證鏈是否受公開信任。
+      </p>
+      <div class="field-row"><label>憑證檔(fullchain / 網站憑證)</label><input type="file" id="nginx-ssl-cert-file"></div>
+      <div class="field-row"><label>私鑰檔</label><input type="file" id="nginx-ssl-key-file"></div>
+      <div class="field-row"><label>中繼憑證(選填,憑證檔已含完整憑證鏈時免填)</label><input type="file" id="nginx-ssl-chain-file"></div>
+      <button id="nginx-ssl-validate-btn" class="secondary" type="button" style="font-size:12px;">檢查憑證</button>
+      <div id="nginx-ssl-validate-result" style="margin-top:10px; font-size:13px;"></div>
+    </div>
+
+    <button id="nginx-ssl-apply-btn" type="button" style="margin-top:12px;">套用</button>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block extra_js %}

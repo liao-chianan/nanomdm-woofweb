@@ -95,10 +95,10 @@ def get_cert_enddate_from_pem_text(pem_text, timeout=10):
 # 各項憑證檢查
 # ---------------------------------------------------------------------------
 def check_nginx_cert(cert_path):
-    name = "nginx (Let's Encrypt)"
-    description = "提供 nanomdm/nginx reverse proxy 的 HTTPS 加密連線,裝置與管理介面都是透過這份憑證建立 TLS 連線。"
-    renewal = "通常由 certbot 設定自動續期(systemd timer 或 cron job 執行 certbot renew),可用「certbot certificates」檢查續期排程是否正常運作;若自動續期失效,手動執行「certbot renew」或「certbot certonly」重新申請。"
-    renewal_warning = "Let's Encrypt 憑證會自動更新,非必要不需要進行手動更新。"
+    name = "nginx HTTPS 憑證"
+    description = "提供 nanomdm/nginx reverse proxy 的 HTTPS 加密連線,裝置與管理介面都是透過這份憑證建立 TLS 連線。可以按「更換憑證...」切換成 Let's Encrypt / ZeroSSL / 手動上傳的憑證(例如學校的萬用字元憑證);切換時會先確認新憑證可以正常使用才生效,失敗會自動切回原本的憑證,已註冊的裝置不需要重新註冊。"
+    renewal = "Let's Encrypt / ZeroSSL 憑證由 certbot 自動續期(systemd timer 執行 certbot renew),可用「certbot certificates」檢查續期排程是否正常運作;手動上傳的憑證不會自動續期,到期前請重新上傳。"
+    renewal_warning = "Let's Encrypt / ZeroSSL 憑證會自動更新,非必要不需要進行手動更新。"
 
     expiry_date, days_left, error = get_cert_enddate_from_file(cert_path)
     status = _status_from_days_left(days_left) if error is None else "error"
