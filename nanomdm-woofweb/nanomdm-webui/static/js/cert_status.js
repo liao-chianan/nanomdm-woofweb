@@ -74,7 +74,8 @@ function renderCertDetail(item) {
   } else if (item.name === "APNs Push 憑證") {
     const uploadBtnHtml = document.querySelector(".cert-apns-upload-btn")
       ? ""
-      : `<button class="secondary cert-apns-upload-btn" type="button" style="font-size:12px;">上傳新憑證...</button> `;
+      : `<button class="secondary cert-apns-csr-btn" type="button" style="font-size:12px;">產生推播 CSR...</button> ` +
+        `<button class="secondary cert-apns-upload-btn" type="button" style="font-size:12px;">上傳新憑證...</button> `;
     const topicCount = item.topic_count || 1;
     const canDelete = topicCount > 1;
     const deviceCountHtml = item.device_count !== undefined
@@ -234,6 +235,7 @@ async function openApnsUploadModal() {
   document.getElementById("apns-topic-warning").style.display = "none";
   document.getElementById("apns-confirm-password-row").style.display = "none";
   document.getElementById("apns-confirm-password-input").value = "";
+  document.getElementById("apns-stored-key-note").style.display = "none";
   openModal("apns-upload-modal");
 
   const res = await apiFetch("/api/cert-status/apns/current-topics");
@@ -248,6 +250,8 @@ async function checkApnsTopicOnFileSelect() {
   const certFile = document.getElementById("apns-cert-file-input").files[0];
   const warningEl = document.getElementById("apns-topic-warning");
   const confirmRow = document.getElementById("apns-confirm-password-row");
+  const keyNote = document.getElementById("apns-stored-key-note");
+  keyNote.style.display = "none";
   if (!certFile) {
     warningEl.style.display = "none";
     confirmRow.style.display = "none";
@@ -265,6 +269,11 @@ async function checkApnsTopicOnFileSelect() {
     return;
   }
 
+  if (data.stored_key) {
+    keyNote.innerHTML = `✓ 找到 WebUI 保存的配對私鑰(${escapeHtml(data.stored_key.created_at)} 產生),不需要選擇私鑰檔案。`;
+    keyNote.style.display = "";
+  }
+
   if (data.topic_changed) {
     warningEl.innerHTML =
       `⚠️ <strong>偵測到這張新憑證的 topic 跟目前使用中的不一樣!</strong><br>` +
@@ -278,6 +287,114 @@ async function checkApnsTopicOnFileSelect() {
     warningEl.style.display = "none";
     confirmRow.style.display = "none";
   }
+}
+
+// 推播 CSR:在伺服器產生私鑰與 CSR,私鑰不離開伺服器
+async function openApnsCsrModal() {
+  document.getElementById("apns-csr-password-input").value = "";
+  document.getElementById("apns-csr-result").innerHTML = "";
+  openModal("apns-csr-modal");
+  loadApnsCsrList();
+}
+
+async function loadApnsCsrList() {
+  const box = document.getElementById("apns-csr-list");
+  const res = await apiFetch("/api/cert-status/apns/csr/list");
+  if (!res.ok) {
+    box.innerHTML = `<p style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    return;
+  }
+  if (!res.data.items.length) {
+    box.innerHTML = `<p style="color:#6b7280; font-size:13px;">目前沒有 WebUI 產生的私鑰。</p>`;
+    return;
+  }
+  const rows = res.data.items.map((it) => {
+    const status = it.status === "used"
+      ? `<span style="color:#1c7c3f;">使用中</span><div style="font-size:11px; color:#6b7280;">${escapeHtml(it.topic)}<br>憑證到期 ${escapeHtml(it.not_after)}</div>`
+      : `<span style="color:#b45309;">等待上傳憑證</span>`;
+    const del = it.status === "used" ? ""
+      : ` <button class="secondary danger apns-csr-delete-btn" type="button" style="font-size:12px;" data-id="${escapeHtml(it.id)}">刪除</button>`;
+    return `<tr>
+      <td>${escapeHtml(it.created_at)}<div style="font-size:11px; color:#6b7280;">${escapeHtml(it.email)}</div></td>
+      <td>${status}</td>
+      <td style="white-space:nowrap;">
+        <button class="secondary apns-csr-download-btn" type="button" style="font-size:12px;" data-id="${escapeHtml(it.id)}">下載 CSR</button>
+        <button class="secondary apns-csr-key-btn" type="button" style="font-size:12px;" data-id="${escapeHtml(it.id)}">下載私鑰備份</button>${del}
+      </td></tr>`;
+  }).join("");
+  box.innerHTML = `<table class="data-table" style="font-size:13px;"><thead><tr><th>產生時間</th><th>狀態</th><th>動作</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function generateApnsCsr() {
+  const country = document.getElementById("apns-csr-country-input").value.trim().toUpperCase();
+  const email = document.getElementById("apns-csr-email-input").value.trim();
+  const password = document.getElementById("apns-csr-password-input").value;
+  if (!/^[A-Z]{2}$/.test(country)) { alert("國碼必須是 2 個英文字母,例如 TW"); return; }
+  if (!email) { alert("請輸入管理者 email"); return; }
+  if (!password) { alert("請輸入密碼確認"); return; }
+  const btn = document.getElementById("apns-csr-generate-btn");
+  btn.disabled = true;
+  btn.textContent = "產生中...";
+  const res = await apiFetchJSON("/api/cert-status/apns/csr/generate", "POST", { country, email, password });
+  btn.disabled = false;
+  btn.textContent = "產生 CSR";
+  if (!res.ok) {
+    alert("產生失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+  document.getElementById("apns-csr-password-input").value = "";
+  document.getElementById("apns-csr-result").innerHTML = `
+    <div style="background:#e8f5ec; border:1px solid #b7dfc3; border-radius:6px; padding:10px 12px; font-size:13px; color:#1c5c33;">
+      ✓ 已產生 CSR,私鑰保存在伺服器上。
+      <button class="apns-csr-download-btn" type="button" style="font-size:12px; margin-left:6px;" data-id="${escapeHtml(res.data.id)}">下載 push.csr</button>
+      <a href="https://mdmcert.download/" target="_blank" rel="noopener" style="margin-left:6px;">前往 mdmcert.download</a>
+    </div>`;
+  downloadApnsCsr(res.data.id);
+  loadApnsCsrList();
+}
+
+function downloadApnsCsr(id) {
+  const a = document.createElement("a");
+  a.href = apiUrl(`/api/cert-status/apns/csr/${encodeURIComponent(id)}/csr`);
+  a.download = "push.csr";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function downloadApnsKeyBackup(id) {
+  const password = await askPassword(
+    "下載推播私鑰備份\n\n私鑰等同推播憑證的身分,請存放在安全的地方(例如加密的隨身碟),不要用 email 或通訊軟體傳送。\n\n請輸入您目前登入的密碼以確認:"
+  );
+  if (!password) return;
+  const fd = new FormData();
+  fd.append("password", password);
+  const resp = await fetch(apiUrl(`/api/cert-status/apns/csr/${encodeURIComponent(id)}/key-backup`), { method: "POST", body: fd });
+  if (!resp.ok) {
+    let msg = "未知錯誤";
+    try { msg = (await resp.json()).message || msg; } catch (e) {}
+    alert("下載失敗: " + msg);
+    return;
+  }
+  const blob = await resp.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `push-${id}.key`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+async function deleteApnsCsr(id) {
+  const password = await askPassword("確定要刪除這份還沒使用的 CSR 與私鑰嗎?刪除後,用這份 CSR 申請到的憑證就無法使用。\n\n請輸入您目前登入的密碼以確認:");
+  if (!password) return;
+  const res = await apiFetchJSON(`/api/cert-status/apns/csr/${encodeURIComponent(id)}/delete`, "POST", { password });
+  if (!res.ok) {
+    alert("刪除失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+  loadApnsCsrList();
 }
 
 async function deleteApnsCert(topic) {
@@ -306,8 +423,8 @@ async function confirmApnsUpload() {
   const topicWarningShown = document.getElementById("apns-topic-warning").style.display !== "none";
   const confirmPassword = document.getElementById("apns-confirm-password-input").value;
 
-  if (!certFile || !keyFile) {
-    alert("請選擇憑證檔案與私鑰檔案");
+  if (!certFile) {
+    alert("請選擇憑證檔案(.pem)");
     return;
   }
   if (!password) {
@@ -321,7 +438,7 @@ async function confirmApnsUpload() {
 
   const formData = new FormData();
   formData.append("cert", certFile);
-  formData.append("key", keyFile);
+  if (keyFile) formData.append("key", keyFile);
   formData.append("password", password);
   if (keyPassphrase) formData.append("key_passphrase", keyPassphrase);
   if (topicWarningShown) formData.append("confirm_password", confirmPassword);
@@ -744,6 +861,7 @@ document.addEventListener("DOMContentLoaded", () => {
     else if (e.target.classList.contains("cert-nginx-change-btn")) openNginxSslModal();
     else if (e.target.classList.contains("cert-scep-regen-btn")) openScepRegenModal();
     else if (e.target.classList.contains("cert-apns-upload-btn")) openApnsUploadModal();
+    else if (e.target.classList.contains("cert-apns-csr-btn")) openApnsCsrModal();
     else if (e.target.classList.contains("cert-apns-delete-btn")) deleteApnsCert(e.target.dataset.topic);
     else if (e.target.classList.contains("cert-dep-download-btn")) downloadDepPublicKey();
     else if (e.target.classList.contains("cert-dep-upload-btn")) openDepUploadModal();
@@ -753,6 +871,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("scep-regen-confirm-btn").addEventListener("click", confirmScepRegen);
   document.getElementById("apns-upload-confirm-btn").addEventListener("click", confirmApnsUpload);
+  document.getElementById("apns-csr-generate-btn").addEventListener("click", generateApnsCsr);
+  document.getElementById("apns-csr-modal").addEventListener("click", (e) => {
+    const id = e.target.dataset && e.target.dataset.id;
+    if (!id) return;
+    if (e.target.classList.contains("apns-csr-download-btn")) downloadApnsCsr(id);
+    else if (e.target.classList.contains("apns-csr-key-btn")) downloadApnsKeyBackup(id);
+    else if (e.target.classList.contains("apns-csr-delete-btn")) deleteApnsCsr(id);
+  });
   document.getElementById("dep-upload-confirm-btn").addEventListener("click", confirmDepUpload);
   document.getElementById("nanoaxm-update-confirm-btn").addEventListener("click", confirmNanoaxmUpdate);
 });

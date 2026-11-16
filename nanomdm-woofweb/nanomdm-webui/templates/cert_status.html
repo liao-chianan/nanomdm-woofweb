@@ -71,7 +71,8 @@
       如果私鑰是加密狀態(有密碼保護),系統會自動偵測並在下方欄位詢問密碼,不需要自己先手動解密。
     </p>
     <div class="field-row"><label>憑證檔案 (.pem)</label><input type="file" id="apns-cert-file-input" onchange="checkApnsTopicOnFileSelect()"></div>
-    <div class="field-row"><label>私鑰檔案</label><input type="file" id="apns-key-file-input"></div>
+    <div class="field-row"><label>私鑰檔案(使用本頁「產生推播 CSR」時不用選,會自動找到配對的私鑰)</label><input type="file" id="apns-key-file-input"></div>
+    <div id="apns-stored-key-note" style="display:none; background:#e8f5ec; border:1px solid #b7dfc3; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#1c5c33;"></div>
     <div class="field-row" id="apns-key-passphrase-row" style="display:none;">
       <label>私鑰密碼(僅私鑰為加密狀態時需要)</label>
       <input type="password" id="apns-key-passphrase-input">
@@ -83,6 +84,35 @@
       <input type="password" id="apns-confirm-password-input">
     </div>
     <button id="apns-upload-confirm-btn" type="button" style="margin-top:10px;">上傳並更新</button>
+  </div>
+</div>
+
+<!-- APNs 推播 CSR 產生 Modal -->
+<div class="modal-overlay hidden" id="apns-csr-modal">
+  <div class="modal-box" style="width:680px;">
+    <span class="modal-close" onclick="closeModal('apns-csr-modal')">✕</span>
+    <h3>產生推播憑證 CSR</h3>
+    <div style="color:#374151; font-size:13px; line-height:1.8; margin-bottom:10px;">
+      在這台伺服器上產生推播私鑰與 CSR,私鑰不會離開伺服器。取得推播憑證的步驟:
+      <ol style="margin:4px 0 0 18px; padding:0;">
+        <li>在下方產生並下載 <code>push.csr</code></li>
+        <li>到 <a href="https://mdmcert.download/" target="_blank" rel="noopener">mdmcert.download</a> 用 GitHub 或 GitLab 帳號登入,上傳 <code>push.csr</code>,下載 <code>apns_push.plist.b64.req</code>(續約請勾選 renewal)</li>
+        <li>到 <a href="https://identity.apple.com/pushcert/" target="_blank" rel="noopener">Apple Push Certificates Portal</a> 上傳該檔案:續約選 <strong>Renew</strong>,第一次申請才選 Create Certificate,再下載 <code>.pem</code></li>
+        <li>回到本頁按「上傳新憑證...」,只要選 <code>.pem</code>,私鑰會自動配對</li>
+      </ol>
+    </div>
+    <div class="grid-2" style="display:grid; grid-template-columns:120px 1fr; gap:0 12px;">
+      <div class="field-row"><label>國碼</label><input type="text" id="apns-csr-country-input" value="TW" maxlength="2"></div>
+      <div class="field-row"><label>管理者 email(寫在 CSR 裡)</label><input type="email" id="apns-csr-email-input"></div>
+    </div>
+    <div class="field-row"><label>請再次輸入您目前登入的密碼以確認</label><input type="password" id="apns-csr-password-input"></div>
+    <button id="apns-csr-generate-btn" type="button">產生 CSR</button>
+    <div id="apns-csr-result" style="margin-top:10px;"></div>
+    <h4 style="margin:16px 0 6px; font-size:14px;">WebUI 保存的推播私鑰</h4>
+    <p style="color:#6b7280; font-size:12px; margin:0 0 6px;">
+      使用中的私鑰會保留到同一個 Topic 下次續約成功才刪除;還沒使用的最多保留 3 份,超過 30 天自動清除。
+    </p>
+    <div id="apns-csr-list">載入中...</div>
   </div>
 </div>
 

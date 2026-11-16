@@ -96,6 +96,20 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 
 ### 步驟 2：產生推播私鑰與 CSR
 
+#### 方式一：在 nanomdm-woofweb 產生（推薦）
+
+1. 到 **[憑證狀態檢視]** 的「APNs Push 憑證」區塊，按「**產生推播 CSR...**」。
+2. 填入國碼（預設 TW）與管理者 email，輸入登入密碼確認後按「產生 CSR」。
+3. 瀏覽器會下載 `push.csr`，等一下要上傳到 mdmcert.download。
+
+私鑰只會存在伺服器上（WebUI 目錄下的 `.apns_csr/`，只有 root 可以讀取），不需要自己保管檔案，也不用安裝 openssl：
+
+- 上傳 Apple 的 `.pem` 時會自動找到配對的私鑰。
+- 使用中的私鑰會保留到同一個 Topic 下次續約成功才刪除；還沒使用的最多保留 3 份，超過 30 天自動清除。
+- 同一個視窗可以「下載私鑰備份」（需要密碼確認），建議另外離線保存一份。
+
+#### 方式二：自己用 openssl 產生
+
 需要 `openssl` 指令：
 
 - **macOS / Linux**：系統內建，直接開終端機執行。
@@ -116,7 +130,7 @@ openssl req -out push.csr -newkey rsa:2048 -keyout push.key -nodes -subj "/C=TW/
 
 1. 前往 [mdmcert.download](https://mdmcert.download/)，點選「**Sign in with GitHub**」或「**Sign in with GitLab**」登入。
 2. 第一次登入會進入註冊表單，填寫組織名稱、姓名、國家等資料並同意服務條款。
-3. 進入「**Sign**」頁面，上傳步驟 2 產生的 `push.csr`。若是續約既有憑證，請勾選「**This is a renewal of an existing certificate**」。
+3. 進入「**Sign**」頁面，上傳步驟 2 取得的 `push.csr`。若是續約既有憑證，請勾選「**This is a renewal of an existing certificate**」。
 4. 簽署完成後，瀏覽器會直接下載 `apns_push.plist.b64.req` 檔案（不需要再收信或解密）。
 
 ### 步驟 4：到 Apple Push Certificates Portal 申請 APNs 憑證
@@ -131,16 +145,16 @@ openssl req -out push.csr -newkey rsa:2048 -keyout push.key -nodes -subj "/C=TW/
 
 ### 步驟 5：上傳到 nanomdm-woofweb
 
-到 **[憑證狀態檢視]** 的 APNs Push 憑證區塊，上傳以下兩個檔案：
+到 **[憑證狀態檢視]** 的「APNs Push 憑證」區塊，按「**上傳新憑證...**」：
 
-- 🔑 **私鑰**：`push.key`（步驟 2 產生）
 - 📄 **憑證**：剛從 Apple 下載的 `.pem` 檔
+- 🔑 **私鑰**：步驟 2 用方式一產生的話**不用選**，會自動配對；用方式二的話選 `push.key`
 
-> ⚠️ **請務必將這個資料夾的檔案一起妥善備份**，遺失私鑰會導致該張 APNs 憑證無法使用。
+> ⚠️ **請務必妥善備份私鑰與憑證**（方式一可以在「產生推播 CSR」視窗下載私鑰備份），遺失私鑰會導致該張 APNs 憑證無法使用。
 > ⚠️ **務必在到期日之前續約**，APNs 憑證效期只有一年，一旦過期，就得重新產生全新的憑證，所有裝置都必須重新註冊。
 > ⚠️ **續約時一定要在 Apple 網站選 Renew，不要 Create**，Renew 才不會變更 Topic；一旦 Topic 改變，所有裝置都必須重新註冊。
 >
-> 續約時重跑步驟 2～5 即可（可以產生新的 `push.key`，只要上傳時和新的 `.pem` 配對使用）。
+> 續約時重跑步驟 2～5 即可（每次都可以產生新的私鑰，只要上傳時和新的 `.pem` 配對使用）。
 
 ---
 

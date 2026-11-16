@@ -35,6 +35,7 @@ import utils_mysql_tuning
 import utils_logmaint
 import compose_manager
 import utils_nginx_ssl
+import utils_apns_csr
 
 try:
     CFG = load_config()
@@ -1646,10 +1647,14 @@ def api_cert_apns_detect_topic():
         if detail.startswith("topic="):
             existing_topics.append(detail[len("topic="):])
 
+    csr_entry_id, _ = utils_apns_csr.find_key_for_cert(cert_text)
+    csr_entry = next((e for e in utils_apns_csr.list_entries() if e["id"] == csr_entry_id), None)
+
     return jsonify({
         "ok": True, "topic": topic,
         "topic_changed": bool(existing_topics) and topic not in existing_topics,
         "existing_topics": existing_topics,
+        "stored_key": {"id": csr_entry["id"], "created_at": csr_entry["created_at"]} if csr_entry else None,
     })
 
 
@@ -1698,6 +1703,71 @@ def api_cert_apns_delete():
 
 
 
+@app.route("/api/cert-status/apns/csr/list")
+@login_required
+def api_cert_apns_csr_list():
+    """WebUI 產生過的推播 CSR / 私鑰清單(不含私鑰內容)。"""
+    return jsonify({"ok": True, "items": utils_apns_csr.list_entries()})
+
+
+@app.route("/api/cert-status/apns/csr/generate", methods=["POST"])
+@login_required
+def api_cert_apns_csr_generate():
+    """在伺服器上產生推播私鑰與 CSR。私鑰只存在伺服器上,畫面只拿到 CSR。"""
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("憑證管理-產生APNs CSR", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    entry, err = utils_apns_csr.generate(data.get("country", ""), data.get("email", ""))
+    log_activity_entry("憑證管理-產生APNs CSR", entry is not None,
+                       detail=f"id={entry['id']}" if entry else err)
+    if not entry:
+        return jsonify({"ok": False, "message": err}), 400
+    return jsonify({"ok": True, "id": entry["id"], "csr_pem": entry["csr_pem"],
+                    "message": "已產生 CSR,私鑰保存在伺服器上"})
+
+
+@app.route("/api/cert-status/apns/csr/<entry_id>/csr")
+@login_required
+def api_cert_apns_csr_download(entry_id):
+    path, err = utils_apns_csr.get_file(entry_id, "csr")
+    if err:
+        return jsonify({"ok": False, "message": err}), 404
+    return send_file(path, as_attachment=True, download_name=f"push-{entry_id}.csr",
+                     mimetype="application/pkcs10")
+
+
+@app.route("/api/cert-status/apns/csr/<entry_id>/key-backup", methods=["POST"])
+@login_required
+def api_cert_apns_csr_key_backup(entry_id):
+    """下載私鑰備份,讓學校自己離線保存。需要密碼確認並記錄在操作紀錄。"""
+    if not verify_current_user_password(request.form.get("password", "")):
+        log_activity_entry("憑證管理-下載APNs私鑰備份", False, detail=f"密碼驗證失敗,id={entry_id}")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    path, err = utils_apns_csr.get_file(entry_id, "key")
+    if err:
+        return jsonify({"ok": False, "message": err}), 404
+    log_activity_entry("憑證管理-下載APNs私鑰備份", True, detail=f"id={entry_id}")
+    resp = send_file(path, as_attachment=True, download_name=f"push-{entry_id}.key",
+                     mimetype="application/x-pem-file")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/cert-status/apns/csr/<entry_id>/delete", methods=["POST"])
+@login_required
+def api_cert_apns_csr_delete(entry_id):
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("憑證管理-刪除APNs CSR", False, detail=f"密碼驗證失敗,id={entry_id}")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    ok, err = utils_apns_csr.delete_pending(entry_id)
+    log_activity_entry("憑證管理-刪除APNs CSR", ok, detail=f"id={entry_id}" + (f", {err}" if err else ""))
+    if not ok:
+        return jsonify({"ok": False, "message": err}), 400
+    return jsonify({"ok": True, "message": "已刪除這份 CSR 與私鑰"})
+
+
 @app.route("/api/cert-status/apns/upload", methods=["POST"])
 @login_required
 def api_cert_apns_upload():
@@ -1713,8 +1783,7 @@ def api_cert_apns_upload():
 
     if "cert" not in request.files or not request.files["cert"].filename:
         return jsonify({"ok": False, "message": "沒有選擇憑證檔案(.pem)"}), 400
-    if "key" not in request.files or not request.files["key"].filename:
-        return jsonify({"ok": False, "message": "沒有選擇私鑰檔案"}), 400
+    has_key_file = "key" in request.files and bool(request.files["key"].filename)
 
     cert_bytes_for_topic_check = request.files["cert"].read()
     request.files["cert"].seek(0)  # 讀取後要把檔案指標倒回開頭,後面還要再讀一次完整內容
@@ -1745,8 +1814,20 @@ def api_cert_apns_upload():
                 }), 400
 
     cert_bytes = request.files["cert"].read()
-    key_bytes = request.files["key"].read()
     key_passphrase = request.form.get("key_passphrase", "")
+    csr_entry_id = None
+    if has_key_file:
+        key_bytes = request.files["key"].read()
+    else:
+        # 沒有選私鑰:用憑證的公鑰找 WebUI 先前產生 CSR 時保存的私鑰
+        csr_entry_id, stored_key = utils_apns_csr.find_key_for_cert(cert_bytes.decode("utf-8", errors="ignore"))
+        if not csr_entry_id:
+            return jsonify({
+                "ok": False,
+                "message": "沒有選擇私鑰檔案,而且 WebUI 裡找不到和這張憑證配對的私鑰。"
+                           "如果 CSR 是自己用 openssl 產生的,請一併選擇當時的私鑰檔案(push.key)。",
+            }), 400
+        key_bytes = stored_key.encode("utf-8")
 
     # 私鑰如果是加密的(PEM裡會看到ENCRYPTED標記),先嘗試解密再繼續。
     # openssl pkey是通用指令,RSA/EC等各種金鑰類型都能處理,不用像openssl rsa那樣只能處理RSA。
@@ -1782,6 +1863,14 @@ def api_cert_apns_upload():
             }), 400
 
         key_bytes = out.encode("utf-8")
+
+    if not utils_apns_csr.key_matches_cert(key_bytes.decode("utf-8", errors="ignore"),
+                                           cert_bytes.decode("utf-8", errors="ignore")):
+        log_activity_entry("憑證管理-APNs憑證更新", False, detail="私鑰和憑證不是一對,操作已取消")
+        return jsonify({"ok": False, "message": "私鑰和憑證不是一對,請確認選擇的是產生這張憑證 CSR 時的私鑰"}), 400
+    if csr_entry_id is None:
+        # 使用者自己選了私鑰檔,但它也可能就是 WebUI 產生的那一把
+        csr_entry_id, _ = utils_apns_csr.find_key_for_cert(cert_bytes.decode("utf-8", errors="ignore"))
 
     # 上傳前先取得目前已知的topic清單,上傳後才能比對有沒有變
     env = get_env_dict()
@@ -1819,9 +1908,13 @@ def api_cert_apns_upload():
     not_after = result_data.get("not_after", "")
 
     topic_changed = bool(old_topics) and new_topic not in old_topics
+    csr_note = ""
+    if csr_entry_id:
+        replaced = utils_apns_csr.mark_used(csr_entry_id, new_topic, not_after)
+        csr_note = f", 使用 WebUI 產生的私鑰 {csr_entry_id}" + (f", 已刪除被取代的舊私鑰 {replaced}" if replaced else "")
     log_activity_entry(
         "憑證管理-APNs憑證更新", True,
-        detail=f"新topic={new_topic}, 到期={not_after}, 舊topic清單={list(old_topics)}, topic是否變更={topic_changed}",
+        detail=f"新topic={new_topic}, 到期={not_after}, 舊topic清單={list(old_topics)}, topic是否變更={topic_changed}{csr_note}",
     )
 
     restart_ok, restart_err = restart_service_and_log("docker", "nanomdm-server", "更新APNs推播憑證後重啟套用新設定")
