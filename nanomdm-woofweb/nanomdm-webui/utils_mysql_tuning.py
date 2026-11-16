@@ -1,4 +1,4 @@
-"""MySQL InnoDB buffer pool(記憶體快取)的狀態查詢與調整,給「系統環境參數」頁面的 MySQL 設定區塊使用。
+"""MySQL InnoDB buffer pool(記憶體快取)的狀態查詢與調整,給「系統參數」頁面的 MySQL 設定區塊使用。
 
 調整方式是 MySQL 8.0 內建的 SET PERSIST:
   - 執行當下就線上調整大小(不用重新啟動 MySQL),調整過程在背景進行,可以查詢進度

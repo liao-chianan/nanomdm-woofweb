@@ -30,6 +30,8 @@
 
         <nav class="nav-group nav-group-system">
           <a href="{{ url_for('account_management_page') }}" class="{{ 'active' if active == 'account_management' else '' }}">帳號管理</a>
+          <a href="{{ url_for('env_page') }}" class="{{ 'active' if active == 'env' else '' }}">系統參數</a>
+          <a href="{{ url_for('cert_status_page') }}" class="{{ 'active' if active == 'cert_status' else '' }}">憑證管理</a>
           <a href="{{ url_for('system_logs_page') }}" class="{{ 'active' if active == 'system_logs' else '' }}">系統紀錄</a>
           <a href="{{ url_for('system_status_page') }}" class="{{ 'active' if active == 'system_status' else '' }}">系統狀態</a>
           <a href="{{ url_for('version_page') }}" class="{{ 'active' if active == 'version' else '' }}">版本與更新</a>
@@ -44,8 +46,6 @@
 
     <nav class="sidebar">
       <div class="side-group side-group-mdm">
-        <a href="{{ url_for('env_page') }}" class="{{ 'active' if active == 'env' else '' }}">系統環境參數</a>
-        <a href="{{ url_for('cert_status_page') }}" class="{{ 'active' if active == 'cert_status' else '' }}">憑證狀態檢視</a>
         <a href="{{ url_for('groups_page') }}" class="{{ 'active' if active == 'groups' else '' }}">群組一覽</a>
         <a href="{{ url_for('dep_profiles_page') }}" class="{{ 'active' if active == 'dep_profiles' else '' }}">群組註冊檔</a>
         <a href="{{ url_for('profiles_page') }}" class="{{ 'active' if active == 'profiles' else '' }}">群組描述檔</a>
@@ -65,7 +65,7 @@
     </nav>
 
     {% set page_titles = {
-      'env': ('系統環境參數', 'mdm'), 'cert_status': ('憑證狀態檢視', 'mdm'), 'groups': ('群組一覽', 'mdm'),
+      'env': ('系統參數', 'system'), 'cert_status': ('憑證管理', 'system'), 'groups': ('群組一覽', 'mdm'),
       'dep_profiles': ('群組註冊檔', 'mdm'), 'profiles': ('群組描述檔', 'mdm'), 'devices': ('裝置與命令', 'mdm'),
       'device_enrollment_status': ('裝置註冊狀態', 'mdm'), 'lockscreen': ('鎖定畫面資訊', 'mdm'),
       'asm': ('ASM 軟體資訊', 'asm'), 'asm_devices': ('ASM 所有裝置', 'asm'),

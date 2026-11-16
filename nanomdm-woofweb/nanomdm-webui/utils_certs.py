@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-憑證狀態檢視:對應使用者提供的 check-cert-expiry.sh 邏輯,逐項改寫成 Python。
+憑證管理頁:對應使用者提供的 check-cert-expiry.sh 邏輯,逐項改寫成 Python。
 涵蓋:nginx (Let's Encrypt)、SCEP 根 CA、APNs Push 憑證、DEP OAuth Token、
      VPP Content Token、NanoAXM 私鑰/OAuth(健康檢查,無到期日概念)。
 """
@@ -325,7 +325,7 @@ def run_all_checks(cfg, env):
     """跑過所有憑證檢查,任何一項失敗都不會擋住其他項目,回傳結果列表。
     順序刻意安排成「每年需要手動更新、影響重大的放前面」:
     APNs -> DEP -> VPP -> SCEP -> NanoAXM -> nginx。
-    這個順序同時決定了前端「憑證狀態檢視」總覽表格跟「憑證說明與更新方法」區塊的顯示順序,
+    這個順序同時決定了前端「憑證管理」總覽表格跟「憑證說明與更新方法」區塊的顯示順序,
     因為兩者都是照這個results陣列的順序逐一渲染,只要這裡排好,兩邊就會一致。
     """
     results = []

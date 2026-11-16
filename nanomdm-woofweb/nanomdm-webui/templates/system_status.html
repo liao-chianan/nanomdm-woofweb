@@ -69,7 +69,7 @@
   </h2>
   <div id="mysql-status-container">載入中...</div>
   <div style="margin-top:12px; padding:10px 12px; background:#f8f9fb; border-radius:6px; font-size:13px; color:#374151;">
-    指令歷史會隨時間累積,資料表太大會讓背景排程查詢變慢。請到「系統環境參數」設定 nanomdm 指令歷史清理的保留天數與自動排程,避免資料庫無限制成長;
+    指令歷史會隨時間累積,資料表太大會讓背景排程查詢變慢。請到「系統參數」設定 nanomdm 指令歷史清理的保留天數與自動排程,避免資料庫無限制成長;
     MySQL 記憶體快取(buffer pool)也在同一頁調整。
     <button class="secondary" type="button" style="margin-left:6px; font-size:12px;" onclick="location.href='{{ url_for('env_page') }}#nanomdm-cleanup-panel'">前往設定指令歷史清理</button>
   </div>

@@ -26,13 +26,15 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 
 > P.S.專案安裝過程會自動透過certbot申請憑證，let's encrypt經實測有機會撞到教育網域的每周申請上限，故再提供ZeroSSL的申請管道(需先註冊ZeroSSL取得EAB資料)，另補上一個測試用的let's encrypt管道，單純是測試能否成功安裝，無法作為正式環境使用
 
+> P.S.安裝完成後，可以在 **[憑證管理]** 的「nginx HTTPS 憑證」區塊按「**更換憑證...**」，隨時把 nginx 憑證換成正式的 Let's Encrypt、ZeroSSL，或手動上傳學校的萬用字元憑證，不需要重新安裝；切換失敗會自動切回原本的憑證，已註冊的裝置也不需要重新註冊
+
 ### 2. 互動式設定
 
 安裝過程中會詢問必要參數。API KEY 與資料庫密碼會預設用亂數產生，並且自動部署 Docker 與相關服務。
 
 ### 3. 憑證處理作業
 
-安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業。**[憑證狀態檢視]** 頁面中有提示如何取得憑證並上傳：
+安裝完畢後，還需要透過網頁介面進行後續的憑證處理作業。**[憑證管理]** 頁面中有提示如何取得憑證並上傳：
 
 #### APNs Push 憑證
 
@@ -44,24 +46,27 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 
 #### DEP OAuth Token
 
-1. 先從自己的 nanomdm webui 下載公鑰
+1. 在 **[憑證管理]** 的「DEP OAuth Token」區塊按「**下載公鑰(供上傳ASM)**」
 2. 接著到 [school.apple.com 偏好設定 → 裝置管理服務](https://school.apple.com/#/main/preferences/myprofile)，選擇指定的伺服器：
-   - **編輯 → 上傳公用密鑰**：更新公鑰（新設/更換伺服器時需要）
-   - **下載權杖**：下載 `.p7m` 檔案，上傳給自己的 nanomdm 伺服器更新 Token
+   - **編輯 → 上傳公用密鑰**：上傳剛剛下載的公鑰（新設/更換伺服器時需要）
+   - **下載權杖**：下載 `.p7m` 檔案
+3. 回到 **[憑證管理]** 按「**上傳Token...**」，選擇 `.p7m` 檔案匯入
 
 #### VPP Content Token
 
-到 [school.apple.com 地點](https://school.apple.com/#/main/locations)（地點 → 選擇指定的伺服器 → 內容代號 → 下載），下載對應的 VPP Token 檔案，新增/取代 `.vpptoken` 檔案即可。
+到 [school.apple.com 地點](https://school.apple.com/#/main/locations)（地點 → 選擇指定的伺服器 → 內容代號 → 下載），下載對應的 VPP Token 檔案（`.vpptoken`），再到 **[憑證管理]** 的「VPP Content Token」區塊按「**上傳新Token...**」上傳即可。
 
 #### NanoAXM 私鑰/OAuth 憑證
 
 到 [school.apple.com 偏好設定 → API](https://school.apple.com/#/main/preferences/apiaccounts)，可以查看/建立 Client ID（用戶端 ID）與 Key ID（密鑰 ID）。
 
+建立後到 **[憑證管理]** 的「NanoAXM 私鑰/OAuth憑證」區塊按「**更新...**」，填入 Client ID、Key ID 並選擇下載的私鑰檔案（`.pem`）。
+
 > 過程會下載金鑰，**僅能下載一次**，請妥善保管（注意 Client ID 和 Key ID 不要搞混）。
 
 ### 4. 同步 ASM 裝置
 
-**[憑證狀態檢視]** 與 **[系統狀態]** 如果都正常，可以到 **[ASM 所有裝置]** 同步：
+**[憑證管理]** 與 **[系統狀態]** 如果都正常，可以到 **[ASM 所有裝置]** 同步：
 
 - 可以撈取 ASM 中所有裝置的資訊
 - 也可以把其他 MDM Server 管理的裝置改派到這台新的 nanomdm（支援 CSV 批次處理）
@@ -73,7 +78,7 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 1. 再製/編修群組註冊檔並套用
 2. 再製/編修群組描述檔
 3. 新增群組，並選定要搭配的群組註冊檔＋群組描述檔，設定此群組要綁定安裝的 App
-4. 到 **[裝置註冊狀態]** 幫裝置取名、指定群組並存檔，當裝置出現 DEP profile_uuid 與對應範本，代表裝置可以清空重新註冊
+4. 到 **[裝置註冊狀態]** 幫裝置取名、指定群組後按「**套用變更**」，當裝置出現 DEP profile_uuid 與對應範本，代表裝置可以清空重新註冊
 5. 裝置註冊後會自動派發註冊檔＋描述檔＋安裝 App，註冊成功就可以進行個別命令派送/群組命令派送
 
 ---
@@ -98,7 +103,7 @@ wget https://raw.githubusercontent.com/liao-chianan/nanomdm-woofweb/main/nanomdm
 
 #### 方式一：在 nanomdm-woofweb 產生（推薦）
 
-1. 到 **[憑證狀態檢視]** 的「APNs Push 憑證」區塊，按「**產生推播 CSR...**」。
+1. 到 **[憑證管理]** 的「APNs Push 憑證」區塊，按「**產生推播 CSR...**」。
 2. 填入國碼（預設 TW）與管理者 email，輸入登入密碼確認後按「產生 CSR」。
 3. 瀏覽器會下載 `push.csr`，等一下要上傳到 mdmcert.download。
 
@@ -145,7 +150,7 @@ openssl req -out push.csr -newkey rsa:2048 -keyout push.key -nodes -subj "/C=TW/
 
 ### 步驟 5：上傳到 nanomdm-woofweb
 
-到 **[憑證狀態檢視]** 的「APNs Push 憑證」區塊，按「**上傳新憑證...**」：
+到 **[憑證管理]** 的「APNs Push 憑證」區塊，按「**上傳新憑證...**」：
 
 - 📄 **憑證**：剛從 Apple 下載的 `.pem` 檔
 - 🔑 **私鑰**：步驟 2 用方式一產生的話**不用選**，會自動配對；用方式二的話選 `push.key`
