@@ -6363,6 +6363,18 @@ def _just_updated_by_old_updater(current):
                    for f in m.get("files", [])) and bool(managed)
 
 
+def _seed_last_good_compose_overlay(deploy_dir):
+    """用 install.sh 新安裝的主機,管理設定檔一開始就套用了,但從沒透過 compose_manager 套用過,
+    所以沒有「最後一次正常運作的版本」可以在之後套用失敗時還原。啟動時如果已經啟用、
+    而且目前的容器就是最新設定(代表這份設定正在正常運作),就存一份起來。"""
+    if os.path.isfile(compose_manager.LAST_GOOD_OVERLAY):
+        return
+    p = compose_manager.plan(deploy_dir)
+    if p.get("ok") and p.get("enabled") and not p.get("needs_apply"):
+        os.makedirs(compose_manager.STATE_DIR, exist_ok=True)
+        compose_manager._save_last_good(deploy_dir)
+
+
 def _bootstrap_managed_compose_files_loop():
     cfg = CFG["update"]
     deploy_dir = _deploy_dir()
@@ -6371,7 +6383,10 @@ def _bootstrap_managed_compose_files_loop():
             current = utils_version.get_current_version(cfg["version_file"])
             missing = [n for n in cfg.get("managed_compose_files", [])
                        if not os.path.isfile(os.path.join(deploy_dir, n))]
-            if not missing or not current:
+            if not missing:
+                _seed_last_good_compose_overlay(deploy_dir)
+                return
+            if not current:
                 return
             auto_apply = _just_updated_by_old_updater(current)
             token = _get_github_token()
