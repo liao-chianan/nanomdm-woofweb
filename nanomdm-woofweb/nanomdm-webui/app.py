@@ -8,12 +8,13 @@ import re
 import requests
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    session, jsonify, Response, stream_with_context, send_file
+    session, jsonify, Response, stream_with_context, send_file, has_request_context
 )
 from werkzeug.security import check_password_hash
 
@@ -31,6 +32,8 @@ import utils_auth
 import utils_logging
 import utils_lockscreen
 import utils_mysql_tuning
+import utils_logmaint
+import compose_manager
 
 try:
     CFG = load_config()
@@ -6151,8 +6154,11 @@ def api_version_diff():
     risk, risk_err = utils_version.analyze_update_risk(
         cfg["github_owner"], cfg["github_repo"], current, target_tag, cfg, github_token=token,
     )
+    compose_preview = None
+    if risk and risk.get("compose_files"):
+        compose_preview = _preview_compose_plan(target_tag, token)
     return jsonify({"ok": True, "current_version": current, "target_version": target_tag, "files": files,
-                    "risk": risk, "risk_error": risk_err})
+                    "risk": risk, "risk_error": risk_err, "compose_preview": compose_preview})
 
 
 UPDATE_BACKUP_DIR = "/opt/nanomdm-webui/.update_backups"
@@ -6228,20 +6234,120 @@ def api_version_apply():
                + (f", 退版風險檢查失敗={risk_err}" if risk_err else ""),
     )
 
+    compose_changed = bool(risk and risk.get("compose_files"))
+    compose_job, compose_job_error = False, None
+    if compose_changed and data.get("compose_auto_apply") and not failed_files:
+        compose_job, compose_job_error = _launch_compose_apply(
+            f"版本更新到 {target_tag} 後自動套用", allow_image_change=False)
+
     if self_restart_needed:
         _delayed_restart_self()
 
+    compose_msg = ""
+    if compose_job:
+        compose_msg = " Docker Compose 設定正在背景套用,容器會重建,服務中斷約十幾秒,進度請看「Docker Compose 設定」區塊。"
+    elif compose_job_error:
+        compose_msg = f" Docker Compose 設定沒有自動套用({compose_job_error}),請到「Docker Compose 設定」區塊手動套用。"
+    elif compose_changed:
+        compose_msg = " 這次更新包含 Docker Compose 設定,請到「Docker Compose 設定」區塊套用。"
     return jsonify({
         "ok": overall_ok and not failed_files,
         "results": results,
         "services_restarted": services_to_restart,
         "self_restarting": self_restart_needed,
         "backup_dir": this_backup_dir,
+        "compose_job_started": compose_job,
         "message": (
             f"更新完成,已套用 {len(files) - len(failed_files)}/{len(files)} 個檔案。"
             + (f" webui 服務即將自動重啟,幾秒後請重新整理頁面。" if self_restart_needed else "")
+            + compose_msg
         ),
     })
+
+
+# ---------------------------------------------------------------------------
+# Docker Compose 設定:比對與重新套用專案管理的 docker-compose.woofweb.yml(實際執行在 compose_manager.py)
+# ---------------------------------------------------------------------------
+COMPOSE_APPLY_UNIT = "woofweb-compose-apply"
+
+
+def _deploy_dir():
+    return CFG["update"]["path_map"].get("nanomdm-deployment", compose_manager.DEFAULT_DEPLOY_DIR)
+
+
+def _compose_job_running():
+    rc = subprocess.run(["systemctl", "is-active", "--quiet", f"{COMPOSE_APPLY_UNIT}.service"]).returncode
+    return rc == 0
+
+
+def _launch_compose_apply(reason, allow_image_change=False):
+    """用 systemd-run 在背景執行 compose_manager.py apply:套用過程跟 WebUI 程序分開,
+    WebUI 更新後自己重啟也不會中斷套用。回傳 (started, error)。"""
+    if _compose_job_running():
+        return False, "已經有套用作業正在執行"
+    username = session.get("username", "") if has_request_context() else ""
+    args = ["systemd-run", "--unit", COMPOSE_APPLY_UNIT, "--collect", "--quiet",
+            "--description", "nanomdm-woofweb 套用 Docker Compose 設定",
+            sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "compose_manager.py"),
+            "--deploy-dir", _deploy_dir(), "apply", "--user", username, "--reason", reason]
+    if allow_image_change:
+        args.append("--allow-image-change")
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=20)
+    except Exception as e:
+        return False, str(e)
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout).strip() or "systemd-run 失敗"
+    return True, None
+
+
+def _preview_compose_plan(target_tag, token):
+    """更新前預覽:把新版的 docker-compose.woofweb.yml 抓下來暫存,比對套用後哪些容器會重建。"""
+    cfg = CFG["update"]
+    managed = cfg.get("managed_compose_files", ["docker-compose.woofweb.yml"])[0]
+    repo_path = f"{cfg['repo_subfolder'].rstrip('/')}/nanomdm-deployment/{managed}"
+    content, err = utils_version.fetch_raw_file_content(
+        cfg["github_owner"], cfg["github_repo"], target_tag, repo_path, github_token=token)
+    if content is None:
+        return {"ok": False, "error": f"無法取得新版 {managed}: {err}"}
+    os.makedirs(compose_manager.STATE_DIR, exist_ok=True)
+    preview_path = os.path.join(compose_manager.STATE_DIR, "preview-" + managed)
+    with open(preview_path, "wb") as f:
+        f.write(content)
+    try:
+        return compose_manager.plan(_deploy_dir(), overlay_path=preview_path)
+    finally:
+        try:
+            os.remove(preview_path)
+        except OSError:
+            pass
+
+
+@app.route("/api/compose/plan")
+@login_required
+def api_compose_plan():
+    return jsonify({"ok": True, "plan": compose_manager.plan(_deploy_dir()),
+                    "status": compose_manager.read_status(), "running": _compose_job_running()})
+
+
+@app.route("/api/compose/status")
+@login_required
+def api_compose_status():
+    return jsonify({"ok": True, "status": compose_manager.read_status(), "running": _compose_job_running()})
+
+
+@app.route("/api/compose/apply", methods=["POST"])
+@login_required
+def api_compose_apply():
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統維護-套用 Docker Compose 設定", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    started, err = _launch_compose_apply("手動套用", allow_image_change=bool(data.get("allow_image_change")))
+    if not started:
+        return jsonify({"ok": False, "message": f"無法開始套用: {err}"}), 409
+    log_activity_entry("系統維護-套用 Docker Compose 設定", True, detail="已開始在背景套用")
+    return jsonify({"ok": True, "message": "已開始在背景套用"})
 
 
 def _restart_services_for_changed_files(changed_local_paths, reason):
@@ -6296,7 +6402,10 @@ def api_version_rollback():
         "ok": ok, "results": info["results"], "self_restarting": self_restart_needed,
         "message": (f"已退回 {info['from_version']}(還原 {len(info['results']) - len(failed)}/{len(info['results'])} 個檔案)。"
                     if ok else f"退版未完全成功:{err},失敗的檔案請參考操作紀錄。")
-                   + (" webui 服務即將自動重啟,幾秒後請重新整理頁面。" if self_restart_needed else ""),
+                   + (" webui 服務即將自動重啟,幾秒後請重新整理頁面。" if self_restart_needed else "")
+                   + (" 這次退版還原了 Docker Compose 設定檔,請到「Docker Compose 設定」區塊重新套用。"
+                      if any(utils_version.is_managed_compose_file(p, CFG["update"]) for p in info["changed_local_paths"])
+                      else ""),
     }), (200 if ok else 500)
 
 
@@ -6516,6 +6625,19 @@ def system_status_page():
 def api_sysstatus_system():
     try:
         return jsonify({"ok": True, "data": utils_sysstatus.get_system_status()})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
+
+@app.route("/api/sysstatus/storage-usage")
+@login_required
+def api_sysstatus_storage_usage():
+    try:
+        env = get_env_dict()
+        db_password = env.get(CFG["mysql"]["db_password_env_key"], "")
+        data = utils_logmaint.get_storage_usage(
+            CFG, db_password, cache_seconds=CFG["storage_usage"].get("cache_seconds", 60))
+        return jsonify({"ok": True, "data": data})
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
 

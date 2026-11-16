@@ -251,7 +251,6 @@ def compare_versions(owner, repo, base_tag, head_tag, cfg, timeout=20, github_to
        "status": "added"/"modified"/"removed"}
     """
     subfolder = cfg["repo_subfolder"].rstrip("/") + "/"
-    eligible_ext = tuple(cfg["eligible_extensions"])
 
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/{base_tag}...{head_tag}"
     try:
@@ -275,7 +274,7 @@ def compare_versions(owner, repo, base_tag, head_tag, cfg, timeout=20, github_to
         filename = f.get("filename", "")
         if not filename.startswith(subfolder):
             continue  # 不在我們管理的資料夾範圍內(例如README.md、LICENSE),略過
-        if not filename.lower().endswith(eligible_ext):
+        if not is_eligible_path(filename, cfg):
             continue  # 副檔名不符合(明確排除.csv/.json等資料檔案)
 
         relative_path = filename[len(subfolder):]
@@ -336,7 +335,6 @@ def fetch_tag_tree_entries(owner, repo, tag, cfg, timeout=20, github_token=None)
     門檻,理論上不會發生,但還是要讓使用者知道結果不完整,不要悄悄漏掉檔案)。
     """
     subfolder = cfg["repo_subfolder"].rstrip("/") + "/"
-    eligible_ext = tuple(cfg["eligible_extensions"])
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{urllib.parse.quote(tag, safe='')}?recursive=1"
     try:
         resp = requests.get(url, headers=_github_headers(github_token), timeout=timeout)
@@ -359,7 +357,7 @@ def fetch_tag_tree_entries(owner, repo, tag, cfg, timeout=20, github_token=None)
         if item.get("type") != "blob":
             continue  # 只要檔案,不要目錄
         path = item.get("path", "")
-        if not path.startswith(subfolder) or not path.lower().endswith(eligible_ext):
+        if not path.startswith(subfolder) or not is_eligible_path(path, cfg):
             continue
         entries.append({"path": path[len(subfolder):], "sha": item.get("sha", "")})
     return entries, bool(data.get("truncated")), None
@@ -369,7 +367,6 @@ def scan_local_eligible_files(cfg):
     """掃描本地端各個部署目錄(path_map),找出符合副檔名條件的檔案。
     回傳 {"nanomdm-webui/app.py": "/opt/nanomdm-webui/app.py", ...},key的格式跟
     GitHub那邊(去除repo_subfolder前綴之後)的相對路徑一致,方便兩邊對照。"""
-    eligible_ext = tuple(cfg["eligible_extensions"])
     found = {}
     for repo_prefix, local_root in cfg["path_map"].items():
         if not os.path.isdir(local_root):
@@ -378,7 +375,7 @@ def scan_local_eligible_files(cfg):
         for dirpath, dirnames, filenames in os.walk(local_root):
             dirnames[:] = [d for d in dirnames if d not in VERIFY_SKIP_DIR_NAMES and not d.startswith(".")]
             for filename in filenames:
-                if not filename.lower().endswith(eligible_ext):
+                if not is_eligible_path(filename, cfg):
                     continue
                 full_path = os.path.join(dirpath, filename)
                 rel = os.path.relpath(full_path, local_root).replace(os.sep, "/")
@@ -536,7 +533,7 @@ def build_verify_diff(owner, repo, tag, repo_path, cfg, timeout=20, github_token
     """
     normalized = repo_path.replace("\\", "/")
     if (not normalized or normalized.startswith("/") or ".." in normalized.split("/")
-            or not normalized.lower().endswith(tuple(cfg["eligible_extensions"]))):
+            or not is_eligible_path(normalized, cfg)):
         return None, "不合法的檔案路徑"
     local_path = map_repo_path_to_local(normalized, cfg)
     if not local_path:
@@ -656,9 +653,22 @@ def list_update_history(backup_dir):
     return history
 
 
+def is_managed_compose_file(path, cfg):
+    """專案自己管理的 docker-compose 設定檔(例如 docker-compose.woofweb.yml):
+    副檔名雖然不在 eligible_extensions 裡,但一樣透過更新機制更新,更新後由 compose_manager.py 重新套用。"""
+    return path.replace("\\", "/").rsplit("/", 1)[-1] in cfg.get("managed_compose_files", [])
+
+
+def is_eligible_path(path, cfg):
+    """這個檔案是否在更新/校驗範圍內:副檔名符合 eligible_extensions,或是專案管理的 compose 設定檔。"""
+    return path.lower().endswith(tuple(cfg["eligible_extensions"])) or is_managed_compose_file(path, cfg)
+
+
 def _is_manual_change_file(relative_path, cfg):
     """更新機制不會處理、需要管理者手動處理的檔案(例如 docker-compose.yml、資料庫結構)"""
     name = relative_path.rsplit("/", 1)[-1]
+    if is_managed_compose_file(name, cfg):
+        return False
     return any(fnmatch.fnmatch(name, pat) for pat in cfg.get("manual_change_patterns", []))
 
 
@@ -683,11 +693,16 @@ def analyze_update_risk(owner, repo, base_tag, head_tag, cfg, timeout=20, github
     except Exception:
         return None, "GitHub API回應格式無法解析"
 
-    manual_files = []
+    manual_files, compose_files = [], []
     for f in data.get("files") or []:
         filename = f.get("filename", "")
-        if filename.startswith(subfolder) and _is_manual_change_file(filename[len(subfolder):], cfg):
-            manual_files.append(filename[len(subfolder):])
+        if not filename.startswith(subfolder):
+            continue
+        relative = filename[len(subfolder):]
+        if _is_manual_change_file(relative, cfg):
+            manual_files.append(relative)
+        elif is_managed_compose_file(relative, cfg):
+            compose_files.append(relative)
 
     reasons = []
     for c in data.get("commits") or []:
@@ -702,6 +717,8 @@ def analyze_update_risk(owner, repo, base_tag, head_tag, cfg, timeout=20, github
         "requires_backup": bool(manual_files or reasons),
         "manual_files": manual_files,
         "no_rollback_reasons": reasons,
+        # 專案管理的 compose 設定檔有變動:更新後要重新套用 docker compose(會重建受影響的容器)
+        "compose_files": compose_files,
     }, None
 
 

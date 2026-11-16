@@ -17,6 +17,7 @@ import base64
 import plistlib
 import datetime
 import fcntl
+import threading
 
 # ===== 設定區：請依實際環境調整 =====
 NANOMDM_API_KEY = os.environ.get("NANOMDM_API_KEY", "")
@@ -45,6 +46,13 @@ LOCKSCREEN_RENDER_PYTHON = os.environ.get("LOCKSCREEN_RENDER_PYTHON", "/opt/nano
 LOCKSCREEN_RENDER_SCRIPT = os.environ.get("LOCKSCREEN_RENDER_SCRIPT", "/opt/nanomdm-webui/utils_lockscreen.py")
 LOCKSCREEN_SETTINGS = os.environ.get("LOCKSCREEN_SETTINGS", "/opt/nanomdm-deployment/lockscreen.json")
 LOG_PATH = "/opt/nanomdm-deployment/webhook-automation.log"
+# 日誌依大小輪替:超過 LOG_MAX_BYTES 就改名成 .1(舊的 .1 變 .2,依此類推),最多保留 LOG_BACKUP_COUNT 份,
+# 加上目前寫入中的檔案,總共不會超過約 (LOG_BACKUP_COUNT + 1) x LOG_MAX_BYTES(50MB x 4 = 200MB)
+LOG_MAX_BYTES = 50 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+# mdm.Connect 是裝置每次回應指令都會觸發的事件,這支程式不處理它,逐筆記錄只會灌爆日誌,
+# 所以改成累計次數,每隔 CONNECT_SUMMARY_SECONDS 秒寫一行彙總
+CONNECT_SUMMARY_SECONDS = 3600
 # 暫存「UDID -> 序號」對應關係的本機檔案（在 Authenticate 事件時寫入，
 # 在 TokenUpdate 事件時讀取），不需要查詢任何資料庫
 SERIAL_CACHE_FILE = "/opt/nanomdm-deployment/udid-serial-cache.json"
@@ -52,11 +60,68 @@ SERIAL_CACHE_LOCK_FILE = "/opt/nanomdm-deployment/udid-serial-cache.lock"
 # =====================================
 
 
+_log_lock = threading.Lock()
+
+
+def _copy_tail(src, dst, max_bytes):
+    """把 src 最後 max_bytes 的內容(從完整的一行開始)寫到 dst。
+    用在改版前就已經超過上限的舊日誌,避免一次把幾百 MB 的舊檔整個留成 .1。"""
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        fin.seek(-max_bytes, os.SEEK_END)
+        fin.readline()  # 丟掉被切斷的半行
+        while True:
+            chunk = fin.read(1024 * 1024)
+            if not chunk:
+                break
+            fout.write(chunk)
+    os.remove(src)
+
+
+def _rotate_log_if_needed():
+    try:
+        size = os.path.getsize(LOG_PATH)
+    except OSError:
+        return
+    if size < LOG_MAX_BYTES:
+        return
+    for i in range(LOG_BACKUP_COUNT - 1, 0, -1):
+        src = f"{LOG_PATH}.{i}"
+        if os.path.exists(src):
+            os.replace(src, f"{LOG_PATH}.{i + 1}")
+    if size > LOG_MAX_BYTES * 2:
+        _copy_tail(LOG_PATH, f"{LOG_PATH}.1", LOG_MAX_BYTES)
+    else:
+        os.replace(LOG_PATH, f"{LOG_PATH}.1")
+
+
 def log(msg):
     line = f"{datetime.datetime.now()} | {msg}\n"
-    print(line, end="")
-    with open(LOG_PATH, "a") as f:
-        f.write(line)
+    print(line, end="", flush=True)
+    with _log_lock:
+        try:
+            _rotate_log_if_needed()
+        except Exception as e:
+            print(f"日誌輪替失敗: {e}", flush=True)
+        with open(LOG_PATH, "a") as f:
+            f.write(line)
+
+
+_connect_lock = threading.Lock()
+_connect_count = 0
+_connect_since = time.time()
+
+
+def count_connect_event():
+    """累計 mdm.Connect 次數,每隔 CONNECT_SUMMARY_SECONDS 秒寫一行彙總。"""
+    global _connect_count, _connect_since
+    with _connect_lock:
+        _connect_count += 1
+        now = time.time()
+        if now - _connect_since < CONNECT_SUMMARY_SECONDS:
+            return
+        count, minutes = _connect_count, int((now - _connect_since) / 60)
+        _connect_count, _connect_since = 0, now
+    log(f"過去 {minutes} 分鐘收到 mdm.Connect(裝置回應指令)共 {count} 次")
 
 
 def load_serial_cache() -> dict:
@@ -500,7 +565,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         tally = checkin.get("token_update_tally")
         raw_payload_b64 = checkin.get("raw_payload")
 
-        log(f"收到 webhook: topic={topic}, udid={udid}, tally={tally}")
+        if topic == "mdm.Connect":
+            count_connect_event()
+        else:
+            log(f"收到 webhook: topic={topic}, udid={udid}, tally={tally}")
 
         try:
             # Authenticate 事件：解析出序號，暫存起來（此時裝置尚未 ready，不觸發自動化）

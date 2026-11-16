@@ -106,6 +106,34 @@ async function checkForUpdate() {
 }
 
 let pendingDiffRequiresBackup = false;
+let pendingDiffHasCompose = false;
+
+// 更新內容包含 docker-compose.woofweb.yml:列出套用後會重建的容器,讓使用者決定要不要更新完自動套用
+function renderComposePreview(risk, preview) {
+  if (!risk || !risk.compose_files || !risk.compose_files.length) return;
+  pendingDiffHasCompose = true;
+  const lines = [];
+  const autoInput = document.getElementById("version-compose-auto-apply");
+  autoInput.disabled = false;
+  if (preview && preview.ok) {
+    const recreate = preview.recreate_services || [];
+    lines.push(recreate.length
+      ? `更新後套用會重建這些容器(服務中斷約十幾秒):${recreate.join("、")}`
+      : "套用後不會重建任何容器。");
+    if (!preview.enabled) lines.push("第一次套用會在 .env 加上一行 COMPOSE_FILE(套用前自動備份)。");
+    if (preview.image_changes && preview.image_changes.length) {
+      lines.push("⚠️ docker-compose.yml 有尚未套用的映像檔變更,為了安全不會自動套用,更新後請到「Docker Compose 設定」確認後手動套用:");
+      preview.image_changes.forEach((c) => lines.push(`  ${c.service}:${c.current_image} → ${c.target_image}`));
+      autoInput.checked = false;
+      autoInput.disabled = true;
+    }
+  } else {
+    lines.push(`無法預覽套用結果(${(preview && preview.error) || "未知原因"}),更新後請到「Docker Compose 設定」區塊確認後再套用。`);
+    autoInput.checked = false;
+  }
+  document.getElementById("version-diff-compose-detail").textContent = lines.join("\n");
+  document.getElementById("version-diff-compose").classList.remove("hidden");
+}
 
 // 更新前的退版風險:包含需要手動處理的檔案、或commit說明標記【無法退版】時,要求先自行備份
 function renderUpdateRisk(risk, riskError) {
@@ -138,6 +166,9 @@ async function openDiffModal(targetTag) {
   document.getElementById("version-diff-risk-error").classList.add("hidden");
   document.getElementById("version-backup-confirm").checked = false;
   pendingDiffRequiresBackup = false;
+  document.getElementById("version-diff-compose").classList.add("hidden");
+  document.getElementById("version-compose-auto-apply").checked = true;
+  pendingDiffHasCompose = false;
   openModal("version-diff-modal");
 
   const res = await apiFetch(`/api/version/diff?target_tag=${encodeURIComponent(targetTag)}`);
@@ -150,6 +181,7 @@ async function openDiffModal(targetTag) {
   const data = res.data;
   document.getElementById("version-diff-current").textContent = data.current_version;
   renderUpdateRisk(data.risk, data.risk_error);
+  renderComposePreview(data.risk, data.compose_preview);
 
   const statusLabel = { added: "新增", modified: "修改", removed: "刪除" };
   const files = data.files || [];
@@ -346,6 +378,7 @@ async function confirmApplyUpdate() {
 
   const res = await apiFetchJSON("/api/version/apply", "POST", {
     password, target_tag: pendingDiffTargetTag, backup_confirmed: backupConfirmed,
+    compose_auto_apply: pendingDiffHasCompose && document.getElementById("version-compose-auto-apply").checked,
   });
 
   btn.disabled = false;
@@ -364,6 +397,7 @@ async function confirmApplyUpdate() {
   } else {
     alert(res.data.message);
     loadCurrentVersion();
+    loadComposePlan();
   }
 }
 
@@ -445,6 +479,137 @@ async function runRollback() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Docker Compose 設定
+// ---------------------------------------------------------------------------
+const COMPOSE_STATE_TEXT = {
+  running: ["套用中", "#1d4ed8"],
+  succeeded: ["套用成功", "#1c7c3f"],
+  failed: ["套用失敗(沒有做任何變更)", "#d64545"],
+  rolled_back: ["套用失敗,已自動還原", "#b45309"],
+  rollback_failed: ["套用失敗,自動還原也失敗", "#d64545"],
+};
+const COMPOSE_ACTION_TEXT = { none: "不變", recreate: "重建", create: "新建" };
+let composePlan = null;
+let composePollTimer = null;
+
+async function loadComposePlan() {
+  const container = document.getElementById("compose-plan-container");
+  const res = await apiFetch("/api/compose/plan");
+  if (!res.ok) {
+    container.innerHTML = `<p style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    return;
+  }
+  composePlan = res.data.plan;
+  renderComposePlan(res.data.running);
+  renderComposeStatus(res.data.status, res.data.running);
+  if (res.data.running) startComposePolling();
+}
+
+function renderComposePlan(running) {
+  const container = document.getElementById("compose-plan-container");
+  const p = composePlan;
+  if (!p.ok) {
+    container.innerHTML = `<p style="color:#b45309; font-size:13px;">${escapeHtml(p.error || "無法比對")}</p>`;
+    return;
+  }
+  const rows = p.services.map((svc) => {
+    const color = svc.action === "none" ? "#6b7280" : "#b45309";
+    const image = svc.image_change
+      ? `<div style="color:#d64545;">映像檔變更:${escapeHtml(svc.current_image)} → ${escapeHtml(svc.target_image)}</div>`
+      : `<span style="color:#6b7280;">${escapeHtml(svc.current_image || svc.target_image)}</span>`;
+    return `<tr>
+      <td>${escapeHtml(svc.service)}<div style="color:#9ca3af; font-size:11px;">${escapeHtml(svc.container)}</div></td>
+      <td style="font-size:12px;">${image}</td>
+      <td style="font-size:12px;">${escapeHtml(svc.logging)}</td>
+      <td style="color:${color}; font-weight:600;">${COMPOSE_ACTION_TEXT[svc.action] || svc.action}</td>
+    </tr>`;
+  }).join("");
+  const enabledText = p.enabled
+    ? `<span style="color:#1c7c3f;">已啟用</span>(.env:<code>COMPOSE_FILE=${escapeHtml(p.env_compose_file)}</code>)`
+    : `<span style="color:#b45309;">尚未啟用</span>,第一次套用會在 .env 加上 <code>COMPOSE_FILE=${escapeHtml(p.target_compose_file)}</code>`;
+  const summary = p.needs_apply
+    ? `<span style="color:#b45309; font-weight:600;">需要套用</span>:將重建 ${escapeHtml(p.recreate_services.join("、") || "無")}`
+    : `<span style="color:#1c7c3f; font-weight:600;">目前的容器已經是最新設定</span>`;
+  const missing = p.missing_env_keys && p.missing_env_keys.length
+    ? `<p style="font-size:12px; color:#b45309; margin:6px 0 0;">提醒:.env 沒有 env.example 裡的這些變數(選用的可以忽略):${escapeHtml(p.missing_env_keys.join("、"))}</p>`
+    : "";
+  container.innerHTML = `
+    <p style="font-size:13px; margin:0 0 6px;">專案管理設定:${enabledText}</p>
+    <p style="font-size:13px; margin:0 0 8px;">${summary}<span style="color:#9ca3af; font-size:12px; margin-left:8px;">(${escapeHtml(p.checked_at)} 比對)</span></p>
+    <table class="data-table" style="font-size:13px;">
+      <thead><tr><th style="width:150px;">服務</th><th>映像檔</th><th style="width:170px;">容器日誌</th><th style="width:70px;">套用後</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${missing}
+    ${p.needs_apply ? `<button id="compose-apply-btn" class="danger" type="button" style="margin-top:10px; font-size:12px;" ${running ? "disabled" : ""}>
+      ${running ? "套用中..." : "套用 docker compose"}</button>` : ""}`;
+  const btn = document.getElementById("compose-apply-btn");
+  if (btn) btn.addEventListener("click", runComposeApply);
+}
+
+function renderComposeStatus(st, running) {
+  const container = document.getElementById("compose-status-container");
+  if (!st || !st.state) {
+    container.innerHTML = "";
+    return;
+  }
+  const [label, color] = COMPOSE_STATE_TEXT[st.state] || [st.state, "#374151"];
+  const steps = (st.steps || []).map((step) =>
+    `<div style="color:${step.ok ? "#374151" : "#d64545"};">${escapeHtml(step.time.slice(11))} ${escapeHtml(step.text)}</div>`).join("");
+  container.innerHTML = `
+    <details ${running || st.state !== "succeeded" ? "open" : ""} style="background:#f8f9fb; border-radius:6px; padding:10px 12px; font-size:13px;">
+      <summary style="cursor:pointer;">
+        最近一次套用:<strong style="color:${color};">${label}</strong>
+        <span style="color:#6b7280;">${escapeHtml(st.started_at || "")}${st.user ? `,${escapeHtml(st.user)}` : ""}${st.reason ? `,${escapeHtml(st.reason)}` : ""}</span>
+        ${st.message ? `<div style="margin-top:4px;">${escapeHtml(st.message)}</div>` : ""}
+      </summary>
+      <div style="margin-top:8px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; max-height:300px; overflow-y:auto;">${steps}</div>
+    </details>`;
+}
+
+function startComposePolling() {
+  clearTimeout(composePollTimer);
+  composePollTimer = setTimeout(async () => {
+    const res = await apiFetch("/api/compose/status");
+    if (!res.ok) {
+      startComposePolling(); // WebUI 可能正在重啟,稍後再試
+      return;
+    }
+    renderComposeStatus(res.data.status, res.data.running);
+    if (res.data.running) {
+      startComposePolling();
+    } else {
+      loadComposePlan();
+    }
+  }, 3000);
+}
+
+async function runComposeApply() {
+  const p = composePlan;
+  if (!p || !p.ok) return;
+  let allowImageChange = false;
+  if (p.image_changes && p.image_changes.length) {
+    const changes = p.image_changes.map((c) => `${c.service}:${c.current_image} → ${c.target_image}`).join("\n");
+    if (!confirm(`docker-compose.yml 有尚未套用的映像檔變更,這次套用會一起換掉映像檔:\n\n${changes}\n\n確定要繼續嗎?`)) return;
+    allowImageChange = true;
+  }
+  const msg = `確定要套用 docker compose 嗎?\n\n將重建:${p.recreate_services.join("、") || "無"}\n` +
+    (p.enabled ? "" : `第一次套用會在 .env 加上 COMPOSE_FILE=${p.target_compose_file}\n`) +
+    "\n重建期間 MDM 服務會中斷約十幾秒。套用前會自動備份 .env 與 compose 設定檔,失敗時自動還原。";
+  if (!confirm(msg)) return;
+  const password = await askPassword("請輸入您目前登入的密碼以確認套用:");
+  if (!password) return;
+  const res = await apiFetchJSON("/api/compose/apply", "POST", { password, allow_image_change: allowImageChange });
+  if (!res.ok) {
+    alert("套用失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+    return;
+  }
+  renderComposePlan(true);
+  renderComposeStatus({ state: "running", started_at: "", steps: [], message: "已開始在背景套用..." }, true);
+  startComposePolling();
+}
+
 async function loadUpdateHistory(forceRefresh) {
   const tbody = document.getElementById("version-history-tbody");
   tbody.innerHTML = `<tr><td colspan="4">載入中...</td></tr>`;
@@ -524,6 +689,8 @@ document.addEventListener("DOMContentLoaded", () => {
   loadUpdateHistory();
   loadRollbackInfo();
   checkForUpdate(); // 一進頁面就自動檢測一次,不用使用者自己按按鈕
+  loadComposePlan();
+  document.getElementById("compose-refresh-btn").addEventListener("click", loadComposePlan);
 
   document.getElementById("version-manual-save-btn").addEventListener("click", saveManualVersion);
   document.getElementById("version-check-btn").addEventListener("click", checkForUpdate);

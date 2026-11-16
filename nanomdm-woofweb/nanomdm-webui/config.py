@@ -115,6 +115,12 @@ DEFAULT_CONFIG = {
         "auto_enabled": True,
         "check_interval_seconds": 86400
     },
+    # 系統狀態頁「磁碟空間」下方列出的資料用量
+    "storage_usage": {
+        "webhook_log_path": "/opt/nanomdm-deployment/webhook-automation.log",
+        "containers": ["nanomdm-server"],
+        "cache_seconds": 60
+    },
     "update": {
         "github_owner": "liao-chianan",
         "github_repo": "nanomdm-woofweb",
@@ -124,6 +130,9 @@ DEFAULT_CONFIG = {
         # 更新範圍內出現這些檔案時,代表需要管理者手動處理(更新機制不會套用),
         # 更新前會提醒先自行備份系統,而且這次更新不能退版
         "manual_change_patterns": ["docker-compose*.yml", "docker-compose*.yaml", "*.sql", ".env*", "*.env"],
+        # 專案自己管理的 docker-compose 設定檔:透過更新機制更新,更新後由 compose_manager.py 重新套用。
+        # 使用者自己的 docker-compose.yml 不在這裡,仍然需要手動處理
+        "managed_compose_files": ["docker-compose.woofweb.yml"],
         "path_map": {
             "nanomdm-webui": "/opt/nanomdm-webui",
             "nanomdm-deployment": "/opt/nanomdm-deployment"

@@ -45,6 +45,7 @@ async function loadSystemStatus() {
         </table>
         ${renderUsageBar("記憶體", d.memory.percent, `${d.memory.used_mb} / ${d.memory.total_mb} MB`)}
         ${renderUsageBar("磁碟空間 (/)", d.disk.percent, `${d.disk.used_gb} / ${d.disk.total_gb} GB`)}
+        ${renderStorageUsage()}
       </div>
       <div>
         <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">CPU 使用率(每 2 秒自動更新)</div>
@@ -52,6 +53,45 @@ async function loadSystemStatus() {
       </div>
     </div>
   `;
+}
+
+// ---------------------------------------------------------------------------
+// 磁碟空間下方:容易佔用空間的資料現況(後端快取 60 秒,這裡每 60 秒重新抓一次)
+// ---------------------------------------------------------------------------
+let storageUsage = null;
+const STORAGE_USAGE_REFRESH_MS = 60000;
+
+function formatStorageSize(bytes) {
+  if (bytes === null || bytes === undefined) return "—";
+  if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(2)} GB`;
+  return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+function renderStorageUsage() {
+  if (!storageUsage) {
+    return `<div style="font-size:12px; color:#6b7280; margin-top:-2px;">正在統計容易佔用空間的資料...</div>`;
+  }
+  const rows = storageUsage.items.map((item) => `
+    <tr>
+      <td title="${escapeHtml(item.path || "")}">${escapeHtml(item.name)}</td>
+      <td style="white-space:nowrap; font-weight:600;">${formatStorageSize(item.bytes)}</td>
+      <td style="color:#6b7280;">${escapeHtml(item.note || "")}</td>
+    </tr>`).join("");
+  return `
+    <div style="font-size:12px; color:#6b7280; margin:-2px 0 4px;">
+      容易佔用空間的資料(${escapeHtml(storageUsage.checked_at)} 統計)
+      <a href="env#nanomdm-cleanup-panel" style="margin-left:6px;">清理設定</a>
+    </div>
+    <table class="kv-table" style="font-size:12px;">
+      <tr style="color:var(--text-muted);"><td style="width:30%;">項目</td><td style="width:70px;">大小</td><td>說明</td></tr>
+      ${rows}
+    </table>`;
+}
+
+async function loadStorageUsage() {
+  const res = await apiFetch("/api/sysstatus/storage-usage");
+  if (res.ok) storageUsage = res.data.data;
+  setTimeout(loadStorageUsage, STORAGE_USAGE_REFRESH_MS);
 }
 
 // 系統狀態(CPU/記憶體使用率)每2秒自動更新:上一次查詢完成後才排下一次,不會重疊;
@@ -430,6 +470,7 @@ function restartAllServices() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  loadStorageUsage();
   refreshSystemStatusLoop();
   loadDockerStatus();
   loadSystemdStatus();

@@ -1,0 +1,25 @@
+# nanomdm-woofweb 專案管理的 Docker Compose 設定(請勿手動修改,透過「版本與更新」更新時會被覆蓋)
+#
+# 這個檔案會跟 docker-compose.yml 合併套用(.env 的 COMPOSE_FILE 指定兩個檔案),
+# 只放專案要統一管理、所有主機都一樣的設定;網域、映像檔、自訂參數等主機各自的設定,
+# 請繼續寫在 docker-compose.yml。
+# 套用方式:WebUI「版本與更新」→「Docker Compose 設定」,或在這個目錄執行 docker compose up -d。
+
+# 容器日誌上限:每個檔案 50MB,最多 3 個檔案(Docker 自己輪替,不需要重啟容器)
+x-woofweb-logging: &woofweb-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  nanoaxm:
+    logging: *woofweb-logging
+  nanodep:
+    logging: *woofweb-logging
+  nanomdm:
+    logging: *woofweb-logging
+  mysql:
+    logging: *woofweb-logging
+  scep:
+    logging: *woofweb-logging

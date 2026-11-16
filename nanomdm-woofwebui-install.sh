@@ -349,6 +349,10 @@ VPP_TOKEN_PATH=/opt/nanomdm-deployment/vpp_token.vpptoken
 # --- 學校識別資訊(選填,用於遺失模式指令的預設訊息,可之後在webui「系統環境參數」頁面修改) ---
 SCHOOL_NAME=${ORG_ABBR}
 SCHOOL_PHONE=
+
+# --- docker compose:同時套用 docker-compose.yml 與專案管理的 docker-compose.woofweb.yml(容器日誌上限等) ---
+# 手動執行 docker compose 指令時也會自動套用這兩個檔案,請不要移除
+COMPOSE_FILE=docker-compose.yml:docker-compose.woofweb.yml
 EOF
 
 chmod 600 "$ENV_FILE"
@@ -388,12 +392,12 @@ log_ok "MySQL 初始化腳本準備完成(01-schemas.sql / 02-create-users.sql)"
 # 當作webhook網址,導致裝置註冊後的自動化(改名、推送baseline)完全收不到通知。
 log_step "設定 docker-compose.yml 的 webhook 網址"
 
-COMPOSE_FILE="/opt/nanomdm-deployment/docker-compose.yml"
-if [ -f "$COMPOSE_FILE" ]; then
-    sed -i -e "s|YOUR_DOMAIN_HERE|${SERVER_DOMAIN}|g" "$COMPOSE_FILE"
+COMPOSE_YML="/opt/nanomdm-deployment/docker-compose.yml"
+if [ -f "$COMPOSE_YML" ]; then
+    sed -i -e "s|YOUR_DOMAIN_HERE|${SERVER_DOMAIN}|g" "$COMPOSE_YML"
     log_ok "已套用網域到 docker-compose.yml 的 webhook-url"
 else
-    die "找不到 $COMPOSE_FILE,無法繼續安裝"
+    die "找不到 $COMPOSE_YML,無法繼續安裝"
 fi
 
 # 重要防呆:docker官方MySQL image的docker-entrypoint-initdb.d初始化腳本(建立資料庫/帳號)
