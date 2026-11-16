@@ -6323,6 +6323,92 @@ def _preview_compose_plan(target_tag, token):
             pass
 
 
+# 從 v0.9971 以前的版本更新上來時,執行更新的是舊版更新程式:它不認得 .yml,不會下載
+# docker-compose.woofweb.yml,也沒有「更新完成後自動套用」的選項。所以新版 WebUI 啟動時自己補齊:
+#   1. 管理設定檔不存在 -> 依照目前版本號從 GitHub 下載補上
+#   2. 而且最近一次更新是「剛剛(BOOTSTRAP_AUTO_APPLY_MINUTES 分鐘內)由舊版更新程式更新到目前版本」
+#      -> 自動在背景套用 docker compose(會重建容器),讓整個更新自動完成
+BOOTSTRAP_AUTO_APPLY_MINUTES = 30
+
+
+def _latest_update_manifest():
+    try:
+        names = sorted(n for n in os.listdir(UPDATE_BACKUP_DIR)
+                       if re.match(r"^\d{8}_\d{6}_to_", n) and os.path.isdir(os.path.join(UPDATE_BACKUP_DIR, n)))
+    except OSError:
+        return None
+    for name in reversed(names):
+        path = os.path.join(UPDATE_BACKUP_DIR, name, utils_version.UPDATE_MANIFEST_NAME)
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _just_updated_by_old_updater(current):
+    """最近一次更新是不是剛剛由舊版更新程式更新到目前版本(manifest 裡沒有管理設定檔)。"""
+    m = _latest_update_manifest()
+    if not m or m.get("kind", "update") != "update" or m.get("to_version") != current or m.get("rolled_back_at"):
+        return False
+    try:
+        applied = datetime.datetime.strptime(m.get("applied_at") or "", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    if (datetime.datetime.now() - applied).total_seconds() > BOOTSTRAP_AUTO_APPLY_MINUTES * 60:
+        return False
+    managed = CFG["update"].get("managed_compose_files", [])
+    return not any(utils_version.is_managed_compose_file(f.get("repo_path", ""), CFG["update"])
+                   for f in m.get("files", [])) and bool(managed)
+
+
+def _bootstrap_managed_compose_files_loop():
+    cfg = CFG["update"]
+    deploy_dir = _deploy_dir()
+    for attempt in range(6):  # GitHub 暫時連不上時,每分鐘重試一次
+        try:
+            current = utils_version.get_current_version(cfg["version_file"])
+            missing = [n for n in cfg.get("managed_compose_files", [])
+                       if not os.path.isfile(os.path.join(deploy_dir, n))]
+            if not missing or not current:
+                return
+            auto_apply = _just_updated_by_old_updater(current)
+            token = _get_github_token()
+            errors = []
+            for name in missing:
+                repo_path = f"{cfg['repo_subfolder'].rstrip('/')}/nanomdm-deployment/{name}"
+                content, err = utils_version.fetch_raw_file_content(
+                    cfg["github_owner"], cfg["github_repo"], current, repo_path, github_token=token)
+                if content is None:
+                    errors.append(f"{name}: {err}")
+                    continue
+                target = os.path.join(deploy_dir, name)
+                with open(target + ".tmp", "wb") as f:
+                    f.write(content)
+                os.chmod(target + ".tmp", 0o644)
+                os.replace(target + ".tmp", target)
+                log_system_activity_entry("系統維護-補齊 Docker Compose 設定檔", True,
+                                          detail=f"從 GitHub {current} 下載 {name}")
+            if errors:
+                if attempt == 5:
+                    log_system_activity_entry("系統維護-補齊 Docker Compose 設定檔", False, detail="; ".join(errors))
+                time.sleep(60)
+                continue
+            if auto_apply:
+                started, err = _launch_compose_apply(f"從舊版更新到 {current} 後自動套用")
+                log_system_activity_entry("系統維護-套用 Docker Compose 設定", started,
+                                          detail="已開始在背景自動套用" if started else f"無法自動套用: {err}")
+            return
+        except Exception as e:
+            log_system_activity_entry("系統維護-補齊 Docker Compose 設定檔", False, detail=str(e))
+            return
+
+
+def start_managed_compose_bootstrap():
+    threading.Thread(target=_bootstrap_managed_compose_files_loop, daemon=True).start()
+
+
 @app.route("/api/compose/plan")
 @login_required
 def api_compose_plan():
@@ -6844,4 +6930,5 @@ if __name__ == "__main__":
     start_asm_devices_scheduler()
     start_devices_status_scheduler()
     start_nanomdm_cleanup_scheduler()
+    start_managed_compose_bootstrap()
     app.run(host="0.0.0.0", port=CFG.get("port", 5566), debug=False)
