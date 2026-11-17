@@ -6179,25 +6179,41 @@ def api_version_current():
     return jsonify({"ok": True, "current_version": current})
 
 
+_VERSION_TAG_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _verify_target_tag(requested_tag):
+    """版本校驗要比對的 GitHub 版本:預設是目前版本;最近一次更新沒有完整套用時,也可以改用那次更新的目標版本。
+    回傳 (tag, current, incomplete_update, error)。"""
+    cfg = CFG["update"]
+    current = utils_version.get_current_version(cfg["version_file"])
+    incomplete = utils_version.get_incomplete_update(UPDATE_BACKUP_DIR, current)
+    tag = (requested_tag or "").strip() or current
+    if not tag:
+        return None, current, incomplete, "目前版本未知,不知道要跟 GitHub 上哪個版本比對。請先在上方手動設定目前版本"
+    allowed = {current} | ({incomplete["to_version"]} if incomplete else set())
+    if not _VERSION_TAG_RE.match(tag) or tag not in allowed:
+        return None, current, incomplete, "只能用目前版本,或最近一次沒有完整套用的更新的目標版本來校驗"
+    return tag, current, incomplete, None
+
+
 @app.route("/api/version/verify")
 @login_required
 def api_version_verify():
     """版本校驗:比對本地端程式碼,跟GitHub上「同一個版本」(目前記錄的版本號)的內容是否一致。
     用檔案雜湊值比對(1次GitHub API呼叫,不下載檔案內容),列出不一致的檔案;
-    內容不同的檔案每個再多1次API呼叫,判斷本地端跟GitHub哪一邊比較新。"""
+    內容不同的檔案每個再多1次API呼叫,判斷本地端跟GitHub哪一邊比較新。
+    最近一次更新沒有完整套用時,會一併回傳那次更新的資訊(incomplete_update),可以帶 ?tag= 改用目標版本校驗。"""
     cfg = CFG["update"]
-    current = utils_version.get_current_version(cfg["version_file"])
-    if not current:
-        return jsonify({
-            "ok": False,
-            "message": "目前版本未知,不知道要跟 GitHub 上哪個版本比對。請先在上方手動設定目前版本",
-        }), 400
+    tag, current, incomplete, err = _verify_target_tag(request.args.get("tag"))
+    if err:
+        return jsonify({"ok": False, "message": err, "incomplete_update": incomplete}), 400
     result, err = utils_version.verify_version_files(
-        cfg["github_owner"], cfg["github_repo"], current, cfg, github_token=_get_github_token(),
+        cfg["github_owner"], cfg["github_repo"], tag, cfg, github_token=_get_github_token(),
     )
     if result is None:
-        return jsonify({"ok": False, "message": err}), 500
-    return jsonify({"ok": True, "current_version": current, **result})
+        return jsonify({"ok": False, "message": err, "incomplete_update": incomplete}), 500
+    return jsonify({"ok": True, "current_version": current, "incomplete_update": incomplete, **result})
 
 
 @app.route("/api/version/verify/diff")
@@ -6205,16 +6221,84 @@ def api_version_verify():
 def api_version_verify_diff():
     """版本校驗裡,單一檔案「GitHub同版本 vs 本地端」的逐行差異(使用者展開那個檔案時才呼叫)。"""
     cfg = CFG["update"]
-    current = utils_version.get_current_version(cfg["version_file"])
-    if not current:
-        return jsonify({"ok": False, "message": "目前版本未知"}), 400
+    tag, _, _, err = _verify_target_tag(request.args.get("tag"))
+    if err:
+        return jsonify({"ok": False, "message": err}), 400
     path = (request.args.get("path") or "").strip()
     result, err = utils_version.build_verify_diff(
-        cfg["github_owner"], cfg["github_repo"], current, path, cfg, github_token=_get_github_token(),
+        cfg["github_owner"], cfg["github_repo"], tag, path, cfg, github_token=_get_github_token(),
     )
     if result is None:
         return jsonify({"ok": False, "message": err}), 400
     return jsonify({"ok": True, **result})
+
+
+@app.route("/api/version/verify/repair", methods=["POST"])
+@login_required
+def api_version_verify_repair():
+    """版本校驗補檔:從 GitHub 下載使用者勾選的檔案(本地缺少或內容不同),覆蓋前先備份。
+    用「沒有完整套用的更新」的目標版本補檔,而且補完後再校驗一次沒有缺少/不同的檔案,才把目前版本改成那個版本。"""
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統維護-版本校驗補檔", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    cfg = CFG["update"]
+    tag, current, incomplete, err = _verify_target_tag(data.get("tag"))
+    if err:
+        return jsonify({"ok": False, "message": err}), 400
+    paths = data.get("paths")
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return jsonify({"ok": False, "message": "檔案清單格式不正確"}), 400
+
+    token = _get_github_token()
+    info, err = utils_version.repair_files(
+        cfg["github_owner"], cfg["github_repo"], tag, paths, cfg, UPDATE_BACKUP_DIR, github_token=token,
+    )
+    if info is None:
+        log_activity_entry("系統維護-版本校驗補檔", False, detail=f"版本={tag}, 錯誤={err}")
+        return jsonify({"ok": False, "message": err}), 400
+
+    failed = [r for r in info["results"] if not r["ok"]]
+    version_updated = False
+    if not failed and tag != current:
+        recheck, _ = utils_version.verify_version_files(
+            cfg["github_owner"], cfg["github_repo"], tag, cfg, github_token=token)
+        if recheck and recheck["summary"]["missing_local"] == 0 and recheck["summary"]["modified"] == 0:
+            utils_version.set_current_version(cfg["version_file"], tag)
+            version_updated = True
+
+    services_to_restart, self_restart_needed = ([], False)
+    if info["changed_local_paths"]:
+        services_to_restart, self_restart_needed = _restart_services_for_changed_files(
+            info["changed_local_paths"], f"版本校驗補檔後重啟({tag})")
+    log_activity_entry(
+        "系統維護-版本校驗補檔", not failed,
+        detail=f"版本={tag}, 補上={len(info['results']) - len(failed)}, 失敗={len(failed)}, 已相同略過={len(info['skipped'])}, "
+               f"檔案={[r['repo_path'] for r in info['results']]}, 重啟服務={services_to_restart}, 備份位置={info['backup_dir']}"
+               + (f", 目前版本從 {current} 改為 {tag}" if version_updated else ""),
+    )
+    if self_restart_needed:
+        _delayed_restart_self()
+
+    ok_count = len(info["results"]) - len(failed)
+    msg = f"已補上 {ok_count}/{len(info['results'])} 個檔案。"
+    if info["skipped"]:
+        msg += f" {len(info['skipped'])} 個檔案內容已經相同,沒有重寫。"
+    if failed:
+        msg += " 失敗的檔案:" + "、".join(f"{r['repo_path']}({r['error']})" for r in failed[:5]) + ("…" if len(failed) > 5 else "")
+    if version_updated:
+        msg += f" 檔案已跟 GitHub {tag} 一致,目前版本已改為 {tag}。"
+    elif tag != current and not failed:
+        msg += f" 還有其他跟 {tag} 不一致的檔案,目前版本維持 {current},請重新校驗確認。"
+    if self_restart_needed:
+        msg += " webui 服務即將自動重啟,幾秒後請重新整理頁面。"
+    if any(utils_version.is_managed_compose_file(p, cfg) for p in info["changed_local_paths"]):
+        msg += " 這次補上了 Docker Compose 設定檔,請到「Docker Compose 設定」區塊套用。"
+    return jsonify({
+        "ok": not failed, "message": msg, "results": info["results"], "skipped": info["skipped"],
+        "self_restarting": self_restart_needed, "version_updated": version_updated,
+        "backup_dir": info["backup_dir"],
+    }), (200 if not failed else 500)
 
 
 @app.route("/api/version/set-current", methods=["POST"])

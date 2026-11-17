@@ -257,23 +257,113 @@ function verifyFreshnessNote(f, tag) {
   return `無法判斷哪一邊比較新: ${f.freshness_error || "未知原因"}`;
 }
 
-async function runVersionVerify() {
+let verifyRequestedTag = "";   // 空字串=用目前版本校驗;否則是「沒有完整套用的更新」的目標版本
+
+async function runVersionVerify(tag) {
+  if (typeof tag === "string") verifyRequestedTag = tag;
   const btn = document.getElementById("version-verify-btn");
   const container = document.getElementById("version-verify-result");
   btn.disabled = true;
   btn.textContent = "校驗中...";
   container.innerHTML = "";
 
-  const res = await apiFetch("/api/version/verify");
+  const query = verifyRequestedTag ? `?tag=${encodeURIComponent(verifyRequestedTag)}` : "";
+  const res = await apiFetch("/api/version/verify" + query);
   btn.disabled = false;
   btn.textContent = "重新校驗";
   if (!res.ok) {
-    container.innerHTML = `<p style="color:#d64545; font-size:13px;">校驗失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    container.innerHTML = renderIncompleteUpdateBox(res.data && res.data.incomplete_update, "") +
+      `<p style="color:#d64545; font-size:13px;">校驗失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
     return;
   }
   verifyTag = res.data.tag;
   verifyFiles = (res.data.files || []).map((f) => ({ ...f, detailHtml: null }));
   renderVerifyResult(res.data);
+}
+
+// 最近一次更新沒有完整套用:目前版本還是舊版,但部分檔案已經是新版,要改用那次更新的目標版本校驗才看得出缺了什麼
+function renderIncompleteUpdateBox(inc, tag) {
+  if (!inc) return "";
+  const failed = (inc.failed || []).slice(0, 10).map((p) => `<code>${escapeHtml(p)}</code>`).join("、");
+  const more = (inc.failed || []).length > 10 ? ` 等 ${inc.failed.length} 個檔案` : "";
+  const usingTarget = tag === inc.to_version;
+  const btn = usingTarget
+    ? `<button type="button" class="secondary verify-use-tag-btn" data-tag="" style="font-size:12px; margin-top:6px;">改回用目前版本校驗</button>`
+    : `<button type="button" class="verify-use-tag-btn" data-tag="${escapeHtml(inc.to_version)}" style="font-size:12px; margin-top:6px;">改用 ${escapeHtml(inc.to_version)} 校驗</button>`;
+  return `
+    <div style="background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:10px 14px; font-size:13px; color:#92400e; margin-bottom:10px; line-height:1.7;">
+      ⚠️ ${escapeHtml(inc.applied_at)} 從 ${escapeHtml(inc.from_version || "?")} 更新到 <strong>${escapeHtml(inc.to_version)}</strong> 沒有完整套用,
+      目前版本仍記錄為舊版,但部分檔案可能已經是新版。${failed ? `<br>當時失敗的檔案:${failed}${more}` : ""}
+      <br>${usingTarget ? `目前是用 ${escapeHtml(inc.to_version)} 校驗:補上缺少/不同的檔案後,如果全部跟 ${escapeHtml(inc.to_version)} 一致,目前版本會自動改為 ${escapeHtml(inc.to_version)}。`
+        : `建議改用 ${escapeHtml(inc.to_version)} 校驗,找出還沒補上的檔案。`}
+      <br>${btn}
+    </div>`;
+}
+
+// 可以從 GitHub 補上的檔案:本地缺少的預設勾選;內容不同的預設不勾(可能是自己改過的檔案,覆蓋前會備份)
+function renderRepairBox() {
+  const candidates = verifyFiles
+    .map((f, idx) => ({ f, idx }))
+    .filter(({ f }) => f.status === "missing_local" || f.status === "modified");
+  if (candidates.length === 0) return "";
+  const rows = candidates.map(({ f, idx }) => {
+    const checked = f.status === "missing_local" || f.freshness === "github_newer";
+    const label = f.status === "missing_local" ? "➖ 本地缺少" : `❌ 內容不同${f.freshness === "local_newer" ? "(🛠️ 本地較新)" : f.freshness === "github_newer" ? "(⬇️ GitHub 較新)" : ""}`;
+    return `<label style="display:flex; gap:8px; align-items:center; font-size:12px; font-family:var(--mono); padding:2px 0;">
+      <input type="checkbox" class="verify-repair-check" data-idx="${idx}" style="width:auto;" ${checked ? "checked" : ""}>
+      <span style="min-width:190px;">${label}</span><span>${escapeHtml(f.repo_path)}</span></label>`;
+  }).join("");
+  return `
+    <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; padding:10px 14px; margin:10px 0; font-size:13px;">
+      <strong>從 GitHub ${escapeHtml(verifyTag)} 補上檔案</strong>
+      <p style="color:#6b7280; font-size:12px; margin:4px 0 6px 0;">
+        本地缺少的檔案預設勾選;內容不同的檔案只預設勾選「GitHub 較新」的,本地較新的通常是自己改過的檔案,請展開下方清單確認差異再決定。
+        覆蓋的檔案會先備份到 .update_backups,補上後會自動重啟受影響的服務。
+      </p>
+      ${rows}
+      <button type="button" id="verify-repair-btn" style="font-size:12px; margin-top:8px;">下載並補上勾選的檔案...</button>
+    </div>`;
+}
+
+async function runVerifyRepair() {
+  const selected = Array.from(document.querySelectorAll(".verify-repair-check:checked"))
+    .map((el) => verifyFiles[Number(el.dataset.idx)]);
+  if (selected.length === 0) {
+    alert("請先勾選要補上的檔案");
+    return;
+  }
+  const missing = selected.filter((f) => f.status === "missing_local").length;
+  const replace = selected.length - missing;
+  const list = selected.slice(0, 15).map((f) => "・" + f.repo_path).join("\n") + (selected.length > 15 ? `\n…共 ${selected.length} 個檔案` : "");
+  const msg = `即將從 GitHub ${verifyTag} 下載 ${selected.length} 個檔案:\n${list}\n\n` +
+    `新增本地缺少的檔案 ${missing} 個、覆蓋內容不同的檔案 ${replace} 個(覆蓋前會先備份)。` +
+    `完成後會自動重啟受影響的服務。\n\n確定要執行嗎?請輸入您目前登入的密碼:`;
+  const password = await askPassword(msg);
+  if (!password) return;
+
+  const btn = document.getElementById("verify-repair-btn");
+  btn.disabled = true;
+  btn.textContent = "補檔中...";
+  const res = await apiFetchJSON("/api/version/verify/repair", "POST", {
+    password, tag: verifyRequestedTag, paths: selected.map((f) => f.repo_path),
+  });
+  btn.disabled = false;
+  btn.textContent = "下載並補上勾選的檔案...";
+  const message = (res.data && res.data.message) || "未知錯誤";
+  if (!res.ok) {
+    alert("補檔失敗: " + message);
+    if (res.data && res.data.results) runVersionVerify();
+    return;
+  }
+  alert(message);
+  if (res.data.self_restarting) {
+    document.getElementById("version-verify-result").innerHTML =
+      `<p style="font-size:13px; color:#374151;">webui 服務正在重啟,幾秒後請重新整理頁面,再按「開始校驗」確認結果。</p>`;
+    return;
+  }
+  if (res.data.version_updated) verifyRequestedTag = "";
+  loadCurrentVersion();
+  runVersionVerify();
 }
 
 function renderVerifyResult(data) {
@@ -290,8 +380,10 @@ function renderVerifyResult(data) {
     ? `<div style="color:#b45309; font-size:13px; margin-bottom:8px;">⚠️ GitHub 回傳的檔案清單被截斷了,下面的結果可能不完整</div>`
     : "";
 
+  const incompleteBox = renderIncompleteUpdateBox(data.incomplete_update, data.tag);
+
   if (verifyFiles.length === 0) {
-    container.innerHTML = `${header}${truncatedWarn}
+    container.innerHTML = `${incompleteBox}${header}${truncatedWarn}
       <div style="background:#ecfdf5; color:#065f46; padding:10px 14px; border-radius:6px; font-size:13px;">
         ✅ 本地端程式碼跟 GitHub 上的 ${escapeHtml(data.tag)} 完全一致(${s.identical} 個檔案都相同)
       </div>`;
@@ -328,7 +420,7 @@ function renderVerifyResult(data) {
     </div>
   `).join("");
 
-  container.innerHTML = `${header}${truncatedWarn}${badges}${freshnessLegend}
+  container.innerHTML = `${incompleteBox}${header}${truncatedWarn}${badges}${freshnessLegend}${renderRepairBox()}
     <div style="max-height:420px; overflow-y:auto; background:#f8f9fb; border-radius:6px; padding:6px 12px;">${rows}</div>`;
 }
 
@@ -336,7 +428,7 @@ function renderVerifyResult(data) {
 // 其他狀態不用再跑任何請求,直接說明是什麼情況
 async function loadVerifyDetail(f, tag) {
   if (f.status === "modified") {
-    const res = await apiFetch(`/api/version/verify/diff?path=${encodeURIComponent(f.repo_path)}`);
+    const res = await apiFetch(`/api/version/verify/diff?path=${encodeURIComponent(f.repo_path)}${verifyRequestedTag ? `&tag=${encodeURIComponent(verifyRequestedTag)}` : ""}`);
     if (!res.ok) {
       return `<p style="color:#d64545; font-size:12px;">無法取得差異: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
     }
@@ -697,8 +789,17 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("version-history-refresh-btn").addEventListener("click", () => loadUpdateHistory(true));
   document.getElementById("version-apply-confirm-btn").addEventListener("click", confirmApplyUpdate);
 
-  document.getElementById("version-verify-btn").addEventListener("click", runVersionVerify);
+  document.getElementById("version-verify-btn").addEventListener("click", () => runVersionVerify());
   document.getElementById("version-verify-result").addEventListener("click", async (e) => {
+    const tagBtn = e.target.closest(".verify-use-tag-btn");
+    if (tagBtn) {
+      runVersionVerify(tagBtn.dataset.tag || "");
+      return;
+    }
+    if (e.target.closest("#verify-repair-btn")) {
+      runVerifyRepair();
+      return;
+    }
     const row = e.target.closest(".verify-file-row");
     if (!row) return;
     const f = verifyFiles[Number(row.dataset.idx)];

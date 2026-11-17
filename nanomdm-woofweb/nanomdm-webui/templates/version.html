@@ -49,6 +49,17 @@
   </div>
 </div>
 
+<div class="panel" id="verify-panel">
+  <h2>版本校驗</h2>
+  <p style="color:#6b7280; font-size:13px; margin:6px 0 12px 0;">
+    比對本地端的程式碼,跟 GitHub 上「同一個版本」(以上方的「目前版本」為準)的內容是否一致,並列出不同的地方。
+    比對的檔案類型跟「更新」功能相同。更新後出現錯誤(例如 500)時,可以用這裡檢查是否有缺漏的檔案,
+    勾選後從 GitHub 下載補上(補上前會再次確認,覆蓋的檔案會先備份)。
+  </p>
+  <button id="version-verify-btn" type="button">開始校驗</button>
+  <div id="version-verify-result" style="margin-top:14px;"></div>
+</div>
+
 <div class="panel" id="compose-panel">
   <h2>
     Docker Compose 設定
@@ -61,16 +72,6 @@
   </p>
   <div id="compose-plan-container">載入中...</div>
   <div id="compose-status-container" style="margin-top:10px;"></div>
-</div>
-
-<div class="panel">
-  <h2>版本校驗</h2>
-  <p style="color:#6b7280; font-size:13px; margin:6px 0 12px 0;">
-    比對本地端的程式碼,跟 GitHub 上「同一個版本」(以上方的「目前版本」為準)的內容是否一致,並列出不同的地方。
-    比對的檔案類型跟「更新」功能相同。
-  </p>
-  <button id="version-verify-btn" type="button">開始校驗</button>
-  <div id="version-verify-result" style="margin-top:14px;"></div>
 </div>
 
 <div class="panel">

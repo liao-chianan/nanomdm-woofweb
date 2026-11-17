@@ -521,6 +521,28 @@ def verify_version_files(owner, repo, tag, cfg, timeout=20, github_token=None):
 VERIFY_DIFF_MAX_LINES = 1500
 
 
+def resolve_safe_local_path(repo_path, cfg):
+    """檢查前端傳來的相對路徑,回傳 (正規化後的相對路徑, 本地路徑, error)。
+    拒絕「..」、絕對路徑、不在部署目錄(path_map)底下的路徑、副檔名不在比對範圍內的檔案,
+    而且用 realpath 確認實際位置沒有透過符號連結跑到部署目錄外面(檔案還不存在時檢查它的上層目錄)。"""
+    normalized = (repo_path or "").replace("\\", "/")
+    if (not normalized or normalized.startswith("/") or ".." in normalized.split("/")
+            or not is_eligible_path(normalized, cfg)):
+        return None, None, "不合法的檔案路徑"
+    local_path = map_repo_path_to_local(normalized, cfg)
+    if not local_path:
+        return None, None, "這個檔案不在部署目錄範圍內"
+    allowed_root = None
+    for repo_prefix, local_root in cfg["path_map"].items():
+        if normalized.startswith(repo_prefix.rstrip("/") + "/"):
+            allowed_root = os.path.realpath(local_root)
+            break
+    real_local = os.path.realpath(local_path)
+    if allowed_root is None or not (real_local == allowed_root or real_local.startswith(allowed_root + os.sep)):
+        return None, None, "這個檔案的實際位置不在部署目錄範圍內"
+    return normalized, local_path, None
+
+
 def build_verify_diff(owner, repo, tag, repo_path, cfg, timeout=20, github_token=None):
     """產生單一檔案「GitHub同版本 vs 本地端」的逐行差異(使用者在校驗結果裡展開那個檔案時才呼叫)。
     diff的方向:「-」開頭的行只存在GitHub、「+」開頭的行只存在本地端。
@@ -531,21 +553,9 @@ def build_verify_diff(owner, repo, tag, repo_path, cfg, timeout=20, github_token
     副檔名不在比對範圍內的檔案,而且用realpath確認實際位置沒有透過符號連結跑到部署目錄外面。
     回傳 (result_dict, error),result_dict是 {"patch": 差異文字或None, "note": 說明文字}。
     """
-    normalized = repo_path.replace("\\", "/")
-    if (not normalized or normalized.startswith("/") or ".." in normalized.split("/")
-            or not is_eligible_path(normalized, cfg)):
-        return None, "不合法的檔案路徑"
-    local_path = map_repo_path_to_local(normalized, cfg)
-    if not local_path:
-        return None, "這個檔案不在部署目錄範圍內"
-    allowed_root = None
-    for repo_prefix, local_root in cfg["path_map"].items():
-        if normalized.startswith(repo_prefix.rstrip("/") + "/"):
-            allowed_root = os.path.realpath(local_root)
-            break
-    real_local = os.path.realpath(local_path)
-    if allowed_root is None or not (real_local == allowed_root or real_local.startswith(allowed_root + os.sep)):
-        return None, "這個檔案的實際位置不在部署目錄範圍內"
+    normalized, local_path, err = resolve_safe_local_path(repo_path, cfg)
+    if err:
+        return None, err
 
     if not os.path.isfile(local_path):
         return None, "本地端沒有這個檔案"
@@ -582,6 +592,126 @@ def build_verify_diff(owner, repo, tag, repo_path, cfg, timeout=20, github_token
         diff_lines = diff_lines[:VERIFY_DIFF_MAX_LINES]
         note = f"差異內容太長,只顯示前 {VERIFY_DIFF_MAX_LINES} 行"
     return {"patch": "".join(diff_lines), "note": note}, None
+
+
+# ---------------------------------------------------------------------------
+# 版本校驗補檔:從 GitHub 下載指定版本的檔案,補上本地缺少或內容不同的檔案
+# ---------------------------------------------------------------------------
+REPAIR_MAX_FILES = 200
+
+
+def get_incomplete_update(backup_dir, current_version):
+    """最近一次透過這個頁面的更新如果沒有完整套用(有檔案下載或寫入失敗),回傳那次更新的資訊。
+    這種情況下目前版本還停在舊版,但部分檔案已經是新版,用「目前版本」校驗看不出缺了哪些新版檔案,
+    要改用那次更新的目標版本校驗。目前版本已經等於目標版本(例如已經補檔完成)就不算未完成。
+    回傳 None 或 {"folder", "from_version", "to_version", "applied_at", "failed": [repo_path, ...]}。"""
+    updates = [h for h in list_update_history(backup_dir) if h["kind"] == "update" and not h.get("rolled_back_at")]
+    if not updates:
+        return None
+    latest = updates[0]
+    manifest = _read_manifest(os.path.join(backup_dir, latest["folder_name"]))
+    if not manifest or manifest.get("complete", True):
+        return None
+    if manifest.get("to_version") == current_version:
+        return None
+    return {
+        "folder": latest["folder_name"],
+        "from_version": manifest.get("from_version"),
+        "to_version": manifest.get("to_version"),
+        "applied_at": manifest.get("applied_at") or latest["timestamp"],
+        "failed": [e["repo_path"] for e in manifest.get("files") or [] if not e.get("ok")],
+    }
+
+
+def repair_files(owner, repo, tag, repo_paths, cfg, backup_dir, github_token=None, timeout=20):
+    """從 GitHub 的 tag 版本下載 repo_paths 這些檔案,補上本地缺少或內容不同的檔案。
+
+    - 每個路徑都重新檢查一次(不信任前端):必須在部署目錄範圍內、GitHub 這個版本上要有這個檔案
+    - 本地內容已經跟 GitHub 相同的檔案略過,不重寫
+    - 下載後先比對 git blob SHA,內容不完整(例如下載中斷)就不寫入
+    - 覆蓋既有檔案前先備份到 .update_backups/{時間}_repair_{tag}/,並寫 manifest.json
+      (這個目錄名稱不會出現在更新歷程,也不會影響退版判斷)
+    - 保留原本的檔案權限,.sh 一律補上執行權限
+
+    回傳 (info, error):info = {"results": [...], "changed_local_paths": [...], "backup_dir", "skipped": [...]}
+    results 每個元素 {"repo_path", "local_path", "action": "created"/"replaced", "ok", "error"}。"""
+    if not repo_paths:
+        return None, "沒有選擇任何檔案"
+    if len(repo_paths) > REPAIR_MAX_FILES:
+        return None, f"一次最多補 {REPAIR_MAX_FILES} 個檔案"
+    entries, _, err = fetch_tag_tree_entries(owner, repo, tag, cfg, timeout=timeout, github_token=github_token)
+    if entries is None:
+        return None, err
+    sha_by_path = {e["path"]: e["sha"] for e in entries}
+
+    checked = []
+    for repo_path in dict.fromkeys(repo_paths):
+        normalized, local_path, path_err = resolve_safe_local_path(repo_path, cfg)
+        if path_err:
+            return None, f"{repo_path}: {path_err}"
+        if normalized not in sha_by_path:
+            return None, f"{normalized}: GitHub {tag} 上沒有這個檔案"
+        checked.append((normalized, local_path, sha_by_path[normalized]))
+
+    subfolder = cfg["repo_subfolder"].rstrip("/") + "/"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    this_backup_dir = os.path.join(backup_dir, f"{timestamp}_repair_{tag}")
+    os.makedirs(this_backup_dir, exist_ok=True)
+    manifest = {"kind": "repair", "tag": tag,
+                "applied_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "files": []}
+
+    results, changed, skipped = [], [], []
+    for repo_path, local_path, sha in checked:
+        existed = os.path.isfile(local_path)
+        if existed:
+            try:
+                with open(local_path, "rb") as f:
+                    if git_blob_sha1(f.read()) == sha:
+                        skipped.append(repo_path)
+                        continue
+            except OSError:
+                pass
+        result = {"repo_path": repo_path, "local_path": local_path,
+                  "action": "replaced" if existed else "created", "ok": False, "error": None}
+        entry = {"repo_path": repo_path, "local_path": local_path, "action": result["action"],
+                 "backup": None, "ok": False}
+        manifest["files"].append(entry)
+        try:
+            content, fetch_err = fetch_raw_file_content(owner, repo, tag, subfolder + repo_path,
+                                                        timeout=timeout, github_token=github_token)
+            if content is None:
+                result["error"] = fetch_err
+            elif git_blob_sha1(content) != sha:
+                result["error"] = "下載的內容跟 GitHub 記錄的不一致(可能下載不完整),沒有寫入"
+            else:
+                old_mode = None
+                if existed:
+                    old_mode = os.stat(local_path).st_mode
+                    backup_name = repo_path.replace("/", "__")
+                    shutil.copy2(local_path, os.path.join(this_backup_dir, backup_name))
+                    entry["backup"] = backup_name
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                tmp_path = local_path + ".repair_tmp"
+                with open(tmp_path, "wb") as out_f:
+                    out_f.write(content)
+                os.replace(tmp_path, local_path)
+                if old_mode is not None:
+                    os.chmod(local_path, old_mode)
+                if local_path.endswith(".sh"):
+                    os.chmod(local_path, os.stat(local_path).st_mode | 0o111)
+                result["ok"] = True
+                changed.append(local_path)
+        except Exception as e:
+            result["error"] = str(e)
+        entry["ok"] = result["ok"]
+        results.append(result)
+
+    _write_manifest(this_backup_dir, manifest)
+    if not manifest["files"]:
+        shutil.rmtree(this_backup_dir, ignore_errors=True)
+        this_backup_dir = None
+    return {"results": results, "changed_local_paths": changed, "backup_dir": this_backup_dir,
+            "skipped": skipped}, None
 
 
 UPDATE_MANIFEST_NAME = "manifest.json"
