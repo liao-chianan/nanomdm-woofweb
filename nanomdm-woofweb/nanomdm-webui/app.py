@@ -36,6 +36,7 @@ import utils_logmaint
 import compose_manager
 import utils_nginx_ssl
 import utils_apns_csr
+import utils_osupdate
 
 try:
     CFG = load_config()
@@ -6299,6 +6300,76 @@ def api_version_verify_repair():
         "self_restarting": self_restart_needed, "version_updated": version_updated,
         "backup_dir": info["backup_dir"],
     }), (200 if not failed else 500)
+
+
+# ---------------------------------------------------------------------------
+# 作業系統更新(版本與更新頁最下方):只檢查,不安裝套件;可以切換 Debian 鏡像站
+# ---------------------------------------------------------------------------
+def _os_update_logger(command):
+    """背景工作結束時寫操作紀錄。背景執行緒沒有 request context,先在這裡記下帳號與來源 IP。"""
+    username, ip = session.get("username"), request.remote_addr
+
+    def on_finish(job):
+        detail = f"耗時={job.get('seconds')} 秒, 結果={job.get('message')}"
+        result = job.get("result") or {}
+        if result.get("new_uri"):
+            detail += (f", 原本={'、'.join(result.get('old_uris') or [])}, 改為={result['new_uri']}, "
+                       f"修改檔案={result.get('files')}, 備份位置={result.get('backup_dir')}")
+        utils_logging.log_activity(
+            CFG["system_logs"]["user_activity_log"], CFG["system_logs"]["user_activity_retention_days"],
+            username, command, job.get("state") == "done", ip, detail=detail,
+        )
+    return on_finish
+
+
+@app.route("/api/os-update/status")
+@login_required
+def api_os_update_status():
+    return jsonify({"ok": True, **utils_osupdate.get_status()})
+
+
+@app.route("/api/os-update/check", methods=["POST"])
+@login_required
+def api_os_update_check():
+    """apt-get update 後模擬更新,列出可更新的套件。不會安裝或移除任何套件。"""
+    if not utils_osupdate.get_sources_info()["supported"]:
+        return jsonify({"ok": False, "message": "目前只支援 Debian"}), 400
+    started, err = utils_osupdate.start_job("check", on_finish=_os_update_logger("系統維護-檢查作業系統更新"))
+    if not started:
+        return jsonify({"ok": False, "message": err}), 409
+    return jsonify({"ok": True, "job": utils_osupdate.get_job()})
+
+
+@app.route("/api/os-update/speed-test", methods=["POST"])
+@login_required
+def api_os_update_speed_test():
+    codename = utils_osupdate.get_sources_info()["codename"]
+    if not codename:
+        return jsonify({"ok": False, "message": "無法判斷 Debian 版本代號"}), 400
+    return jsonify({"ok": True, "results": utils_osupdate.speed_test(codename)})
+
+
+@app.route("/api/os-update/mirror", methods=["POST"])
+@login_required
+def api_os_update_mirror():
+    """切換 Debian 主要套件庫的鏡像站。改之前備份,apt-get update 失敗就自動還原。"""
+    data = request.json or {}
+    mirror = utils_osupdate.find_mirror(data.get("mirror_id"))
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統維護-切換套件鏡像站", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    if not mirror:
+        return jsonify({"ok": False, "message": "請從清單中選擇鏡像站"}), 400
+    info = utils_osupdate.get_sources_info()
+    if not info["supported"]:
+        return jsonify({"ok": False, "message": info["unsupported_reason"]}), 400
+    if info["current_mirror_id"] == mirror["id"]:
+        return jsonify({"ok": False, "message": f"目前已經是 {mirror['name']}"}), 400
+    started, err = utils_osupdate.start_job(
+        "switch", on_finish=_os_update_logger("系統維護-切換套件鏡像站"), mirror=mirror)
+    if not started:
+        return jsonify({"ok": False, "message": err}), 409
+    return jsonify({"ok": True, "job": utils_osupdate.get_job()})
 
 
 @app.route("/api/version/set-current", methods=["POST"])

@@ -151,10 +151,26 @@ def get_os_info():
     }
 
 
+def get_uptime():
+    """主機開機到現在的時間,回傳 {"seconds", "text"(例如「3 天 4 小時 12 分」), "boot_time"};讀不到回傳 None。"""
+    try:
+        with open("/proc/uptime", "r") as f:
+            seconds = int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return None
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts = ([f"{days} 天"] if days else []) + ([f"{hours} 小時"] if days or hours else []) + [f"{minutes} 分"]
+    boot = datetime.datetime.now() - datetime.timedelta(seconds=seconds)
+    return {"seconds": seconds, "text": " ".join(parts), "boot_time": boot.strftime("%Y-%m-%d %H:%M")}
+
+
 def get_system_status():
     """整合系統狀態的入口函式,回傳前端要顯示的完整資料"""
     return {
         "current_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uptime": get_uptime(),
         "os_info": get_os_info(),
         "cpu_model": get_cpu_model(),
         "cpu_count": os.cpu_count(),

@@ -34,32 +34,42 @@ async function loadSystemStatus() {
     cpuHtml += renderUsageBar(label, c.percent, "");
   });
 
+  const up = d.uptime;
+  const uptimeHtml = up
+    ? `<span style="color:#6b7280; margin-left:8px;" title="開機時間 ${escapeHtml(up.boot_time)}">・已開機 ${escapeHtml(up.text)}</span>`
+    : "";
+
   container.innerHTML = `
-    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:24px;">
-      <div>
-        <table class="kv-table">
-          <tr><td class="k">目前時間</td><td>${escapeHtml(d.current_time)}</td></tr>
-          <tr><td class="k">作業系統</td><td>${escapeHtml(d.os_info.os_name)}</td></tr>
-          <tr><td class="k">核心版本</td><td style="font-family:var(--mono); font-size:12px;">${escapeHtml(d.os_info.kernel_version)}</td></tr>
-          <tr><td class="k">CPU 型號</td><td>${escapeHtml(d.cpu_model || "未知")}${d.cpu_count ? `(${d.cpu_count} 核心)` : ""}</td></tr>
+    <div style="display:flex; flex-wrap:wrap; gap:24px;">
+      <div style="flex:1 1 520px; min-width:0;">
+        <table class="kv-table kv-flush">
+          <tr><td class="k" style="width:1%; white-space:nowrap; padding-right:16px;">目前時間</td><td>${escapeHtml(d.current_time)}${uptimeHtml}</td></tr>
+          <tr><td class="k" style="white-space:nowrap; padding-right:16px;">作業系統</td><td>${escapeHtml(d.os_info.os_name)}
+            <span style="color:#6b7280; margin-left:8px; white-space:nowrap;">・核心 <span style="font-family:var(--mono); font-size:12px;">${escapeHtml(d.os_info.kernel_version)}</span></span></td></tr>
         </table>
-        ${renderUsageBar("記憶體", d.memory.percent, `${d.memory.used_mb} / ${d.memory.total_mb} MB`)}
-        ${renderUsageBar("磁碟空間 (/)", d.disk.percent, `${d.disk.used_gb} / ${d.disk.total_gb} GB`)}
-        ${renderStorageUsage()}
+        <div style="margin-top:12px;">
+          ${renderUsageBar("記憶體", d.memory.percent, `${d.memory.used_mb} / ${d.memory.total_mb} MB`)}
+          ${renderUsageBar("磁碟空間 (/)", d.disk.percent, `${d.disk.used_gb} / ${d.disk.total_gb} GB`)}
+          <button type="button" class="secondary" id="storage-usage-open-btn" style="font-size:12px;">磁碟分析</button>
+        </div>
       </div>
-      <div>
+      <div style="flex:1 1 300px; min-width:0;">
+        <table class="kv-table kv-flush" style="margin-bottom:10px;">
+          <tr><td class="k" style="width:1%; white-space:nowrap; padding-right:16px;">CPU 型號</td><td>${escapeHtml(d.cpu_model || "未知")}${d.cpu_count ? `(${d.cpu_count} 核心)` : ""}</td></tr>
+        </table>
         <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">CPU 使用率(每 2 秒自動更新)</div>
         ${cpuHtml}
       </div>
     </div>
   `;
+  lastDiskStatus = d.disk;
 }
 
 // ---------------------------------------------------------------------------
-// 磁碟空間下方:容易佔用空間的資料現況(後端快取 60 秒,這裡每 60 秒重新抓一次)
+// 磁碟分析視窗:容易佔用空間的資料現況(按「磁碟分析」才查詢,後端快取 60 秒)
 // ---------------------------------------------------------------------------
 let storageUsage = null;
-const STORAGE_USAGE_REFRESH_MS = 60000;
+let lastDiskStatus = null;   // 系統狀態最近一次的磁碟容量,用來算各項目佔磁碟的比例
 
 function formatStorageSize(bytes) {
   if (bytes === null || bytes === undefined) return "—";
@@ -67,31 +77,76 @@ function formatStorageSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-function renderStorageUsage() {
+// 容易佔用空間的資料:放在系統狀態下方、佔滿整個寬度。每一列的長條是佔磁碟總容量的比例,方便一眼看出誰最大
+function renderStorageUsage(disk) {
+  const box = (inner) => inner;
   if (!storageUsage) {
-    return `<div style="font-size:12px; color:#6b7280; margin-top:-2px;">正在統計容易佔用空間的資料...</div>`;
+    return `<div style="font-size:12px; color:#6b7280;">正在統計...</div>`;
   }
-  const rows = storageUsage.items.map((item) => `
-    <tr>
-      <td title="${escapeHtml(item.path || "")}">${escapeHtml(item.name)}</td>
-      <td style="white-space:nowrap; font-weight:600;">${formatStorageSize(item.bytes)}</td>
-      <td style="color:#6b7280;">${escapeHtml(item.note || "")}</td>
-    </tr>`).join("");
-  return `
-    <div style="font-size:12px; color:#6b7280; margin:-2px 0 4px;">
-      容易佔用空間的資料(${escapeHtml(storageUsage.checked_at)} 統計)
-      <a href="env#nanomdm-cleanup-panel" style="margin-left:6px;">清理設定</a>
+  const totalBytes = disk && disk.total_gb ? disk.total_gb * 1073741824 : 0;
+  const maxBytes = Math.max(1, ...storageUsage.items.map((i) => i.bytes || 0));
+  const rows = storageUsage.items.map((item) => {
+    const pct = totalBytes && item.bytes ? (item.bytes / totalBytes) * 100 : 0;
+    const barWidth = item.bytes ? Math.max(2, (item.bytes / maxBytes) * 100) : 0;
+    const link = item.link
+      ? ` <a href="${escapeHtml(item.link.href)}" style="white-space:nowrap;">${escapeHtml(item.link.text)} →</a>` : "";
+    return `
+      <tr>
+        <td style="vertical-align:top; padding:7px 10px 7px 0;">
+          <div style="font-weight:600;">${escapeHtml(item.name)}</div>
+          ${item.path ? `<div style="font-family:var(--mono); font-size:11px; color:#9ca3af; word-break:break-all;">${escapeHtml(item.path)}</div>` : ""}
+        </td>
+        <td style="vertical-align:top; padding:7px 10px; white-space:nowrap;">
+          <div style="font-weight:600;">${formatStorageSize(item.bytes)}</div>
+          ${pct ? `<div style="font-size:11px; color:#9ca3af;">佔磁碟 ${pct < 0.1 ? "<0.1" : pct.toFixed(1)}%</div>` : ""}
+        </td>
+        <td style="vertical-align:top; padding:9px 10px; width:22%;">
+          <div style="background:#e5e7eb; border-radius:4px; height:8px; overflow:hidden;">
+            <div style="background:#3b82f6; height:100%; width:${barWidth}%;"></div>
+          </div>
+        </td>
+        <td style="vertical-align:top; padding:7px 0 7px 10px; color:#6b7280;">${escapeHtml(item.note || "")}${link}</td>
+      </tr>`;
+  }).join("");
+  return box(`
+    <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+      <div style="font-size:13px; color:#374151;">容易佔用空間、會持續累積的資料${disk ? `(磁碟已使用 ${disk.used_gb} / ${disk.total_gb} GB)` : ""}</div>
+      <div style="font-size:12px; color:#6b7280;">
+        ${escapeHtml(storageUsage.checked_at)} 統計
+        <a href="env#nanomdm-cleanup-panel" style="margin-left:8px;">清理設定</a>
+      </div>
     </div>
-    <table class="kv-table" style="font-size:12px;">
-      <tr style="color:var(--text-muted);"><td style="width:30%;">項目</td><td style="width:70px;">大小</td><td>說明</td></tr>
-      ${rows}
-    </table>`;
+    <div style="overflow-x:auto;">
+      <table style="width:100%; border-collapse:collapse; font-size:12px;">
+        <tr style="color:#9ca3af; border-bottom:1px solid var(--border-color);">
+          <td style="padding:4px 10px 4px 0; width:24%;">項目</td><td style="padding:4px 10px; width:90px;">大小</td>
+          <td style="padding:4px 10px;">相對大小</td><td style="padding:4px 0 4px 10px;">說明</td>
+        </tr>
+        ${rows}
+      </table>
+    </div>`);
 }
 
+async function openStorageUsageModal() {
+  openModal("storage-usage-modal");
+  await loadStorageUsage();
+}
+
+// 開啟視窗或按「重新統計」時才查詢(後端結果快取 60 秒)
 async function loadStorageUsage() {
+  const content = document.getElementById("storage-usage-content");
+  const btn = document.getElementById("storage-usage-refresh-btn");
+  storageUsage = null;
+  content.innerHTML = renderStorageUsage(lastDiskStatus);
+  btn.disabled = true;
   const res = await apiFetch("/api/sysstatus/storage-usage");
-  if (res.ok) storageUsage = res.data.data;
-  setTimeout(loadStorageUsage, STORAGE_USAGE_REFRESH_MS);
+  btn.disabled = false;
+  if (!res.ok) {
+    content.innerHTML = `<p style="color:#d64545; font-size:13px;">統計失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    return;
+  }
+  storageUsage = res.data.data;
+  content.innerHTML = renderStorageUsage(lastDiskStatus);
 }
 
 // 系統狀態(CPU/記憶體使用率)每2秒自動更新:上一次查詢完成後才排下一次,不會重疊;
@@ -119,13 +174,19 @@ async function loadDockerStatus() {
   const res = await apiFetch("/api/sysstatus/docker");
   if (!res.ok) {
     tbody.innerHTML = `<tr><td colspan="7" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    setPanelSummary("docker-panel", "載入失敗", "abnormal");
     return;
   }
   tbody.innerHTML = "";
   if (res.data.data.length === 0) {
     tbody.innerHTML = `<tr><td colspan="7">沒有監控中的容器(請檢查設定檔的 sysstatus.docker_containers 清單)</td></tr>`;
+    setPanelSummary("docker-panel", "沒有監控中的容器", "warning");
     return;
   }
+  const dockerBad = res.data.data.filter((c) => c.state !== "running");
+  setPanelSummary("docker-panel",
+    dockerBad.length ? `${dockerBad.length} 個容器異常:${dockerBad.map((c) => c.name).join("、")}` : `${res.data.data.length} 個容器都在執行中`,
+    dockerBad.length ? "abnormal" : "ok");
   res.data.data.forEach((c) => {
     const tr = document.createElement("tr");
     const stateColor = c.state === "running" ? "#1c7c3f" : "#d64545";
@@ -168,9 +229,14 @@ async function loadSystemdStatus() {
   const res = await apiFetch("/api/sysstatus/systemd");
   if (!res.ok) {
     tbody.innerHTML = `<tr><td colspan="7" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    setPanelSummary("systemd-panel", "載入失敗", "abnormal");
     return;
   }
   tbody.innerHTML = "";
+  const systemdBad = res.data.data.filter((s) => s.active_state !== "active");
+  setPanelSummary("systemd-panel",
+    systemdBad.length ? `${systemdBad.length} 個服務異常:${systemdBad.map((s) => s.service).join("、")}` : `${res.data.data.length} 個服務都在執行中`,
+    systemdBad.length ? "abnormal" : "ok");
   res.data.data.forEach((s) => {
     const tr = document.createElement("tr");
     const isActive = s.active_state === "active";
@@ -220,12 +286,21 @@ async function loadMysqlStatus(exact) {
   const res = await apiFetch(url);
   if (!res.ok) {
     container.innerHTML = `<p style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    setPanelSummary("mysql-status-panel", "載入失敗", "abnormal");
     return;
   }
   if (res.data.data.length === 0) {
     container.innerHTML = `<p style="color:#9ca3af;">沒有查到任何資料庫</p>`;
+    setPanelSummary("mysql-status-panel", "沒有查到任何資料庫", "abnormal");
     return;
   }
+  const dbErrors = res.data.errors || [];
+  const tableCount = res.data.data.reduce((n, db) => n + db.tables.length, 0);
+  const totalMb = res.data.data.reduce((n, db) => n + db.tables.reduce((m, t) => m + t.size_mb, 0), 0);
+  setPanelSummary("mysql-status-panel",
+    dbErrors.length ? `${dbErrors.length} 個資料庫查詢失敗`
+      : `${res.data.data.length} 個資料庫、${tableCount} 個資料表,共 ${totalMb.toFixed(1)} MB`,
+    dbErrors.length ? "abnormal" : "ok");
   const rowsLabel = exact ? "精確筆數" : "估計筆數";
   let html = "";
   if (exact) {
@@ -319,9 +394,21 @@ async function loadStaticFilesStatus() {
   const res = await apiFetch("/api/sysstatus/static-files");
   if (!res.ok) {
     container.innerHTML = `<p style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    setPanelSummary("static-files-panel", "載入失敗", "abnormal");
     return;
   }
   const d = res.data.data;
+  const allItems = [].concat(d.scripts, d.csv_files, d.json_files.enroll_profiles, d.json_files.fixed,
+    d.mobileconfig_files, [d.env_file]).filter(Boolean);
+  const missing = allItems.filter((item) => !item.exists);
+  const extraCount = (d.unaccounted_files || []).length;
+  if (missing.length) {
+    setPanelSummary("static-files-panel", `${missing.length} 個檔案不存在`, "abnormal");
+  } else {
+    setPanelSummary("static-files-panel",
+      `${allItems.length} 個檔案都存在` + (extraCount ? `,另有 ${extraCount} 個未列入清單的檔案` : ""),
+      extraCount ? "warning" : "ok");
+  }
 
   let html = "";
   html += renderFileTable("1. Script 檔案", d.scripts);
@@ -470,8 +557,20 @@ function restartAllServices() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  loadStorageUsage();
+  initCollapsiblePanels();
   refreshSystemStatusLoop();
+  // 系統狀態每 2 秒重畫一次,按鈕也會跟著重建,所以用事件委派
+  document.getElementById("system-status-container").addEventListener("click", (e) => {
+    if (e.target.closest("#storage-usage-open-btn")) openStorageUsageModal();
+  });
+  document.getElementById("storage-usage-refresh-btn").addEventListener("click", loadStorageUsage);
+  // 視窗裡的「資料庫狀態 →」連結:先關閉視窗再捲動到下方的資料庫狀態
+  document.getElementById("storage-usage-content").addEventListener("click", (e) => {
+    const a = e.target.closest("a[href^='#']");
+    if (!a) return;
+    closeModal("storage-usage-modal");
+    setPanelExpanded(a.getAttribute("href").slice(1), true);
+  });
   loadDockerStatus();
   loadSystemdStatus();
   loadMysqlStatus(false);

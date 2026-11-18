@@ -590,6 +590,7 @@ async function loadComposePlan() {
   const res = await apiFetch("/api/compose/plan");
   if (!res.ok) {
     container.innerHTML = `<p style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    setPanelSummary("compose-panel", "比對失敗", "warning");
     return;
   }
   composePlan = res.data.plan;
@@ -603,8 +604,14 @@ function renderComposePlan(running) {
   const p = composePlan;
   if (!p.ok) {
     container.innerHTML = `<p style="color:#b45309; font-size:13px;">${escapeHtml(p.error || "無法比對")}</p>`;
+    setPanelSummary("compose-panel", p.error || "無法比對", "warning");
     return;
   }
+  // 摺疊時標題右側只顯示比對結果與比對時間
+  const checkedAt = p.checked_at ? `(${p.checked_at} 比對)` : "";
+  if (running) setPanelSummary("compose-panel", `套用中...${checkedAt}`, "warning");
+  else if (p.needs_apply) setPanelSummary("compose-panel", `需要套用,將重建 ${p.recreate_services.join("、") || "無"}${checkedAt}`, "warning");
+  else setPanelSummary("compose-panel", `目前的容器已經是最新設定${checkedAt}`, "ok");
   const rows = p.services.map((svc) => {
     const color = svc.action === "none" ? "#6b7280" : "#b45309";
     const image = svc.image_change
@@ -709,6 +716,7 @@ async function loadUpdateHistory(forceRefresh) {
   const res = await apiFetch("/api/version/history" + (forceRefresh === true ? "?refresh=1" : ""));
   if (!res.ok) {
     tbody.innerHTML = `<tr><td colspan="4" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    setPanelSummary("history-panel", "載入失敗", "warning");
     return;
   }
 
@@ -723,10 +731,12 @@ async function loadUpdateHistory(forceRefresh) {
       .map((h) => `<tr><td style="font-family:var(--mono); font-size:13px;">${escapeHtml(h.target_version)}</td>
         <td></td><td></td><td style="font-size:12px; color:#6b7280;">${escapeHtml(h.timestamp)} ${h.kind === "rollback" ? "退版" : "更新"}${h.rolled_back_at ? "(已退版)" : ""}</td></tr>`)
       .join("");
+    setPanelSummary("history-panel", "無法取得 GitHub 修改紀錄", "warning");
     return;
   }
   if (commits.length === 0) {
     tbody.innerHTML = `<tr><td colspan="4" style="color:#9ca3af;">GitHub 上沒有任何修改紀錄</td></tr>`;
+    setPanelSummary("history-panel", "沒有修改紀錄", "ok");
     return;
   }
 
@@ -740,6 +750,13 @@ async function loadUpdateHistory(forceRefresh) {
 
   // commits由新到舊排列:目前版本那一筆(含)以下都已經套用,上面的是還沒套用的
   const currentIndex = commits.findIndex((c) => c.tag && c.tag === data.current_version);
+  if (currentIndex > 0) {
+    setPanelSummary("history-panel", `目前 ${data.current_version},有 ${currentIndex} 個修改尚未套用`, "warning");
+  } else if (currentIndex === 0) {
+    setPanelSummary("history-panel", `目前 ${data.current_version},已是最新`, "ok");
+  } else {
+    setPanelSummary("history-panel", `最近 ${commits.length} 筆修改`, "ok");
+  }
 
   tbody.innerHTML = commits
     .map((c, i) => {
@@ -776,8 +793,250 @@ async function loadUpdateHistory(forceRefresh) {
     .join("");
 }
 
+// ---------------------------------------------------------------------------
+// 作業系統更新:檢查可更新的套件、是否需要重新開機,切換 Debian 鏡像站(只檢查,不安裝)
+// ---------------------------------------------------------------------------
+let osUpdateStatus = null;
+let osUpdatePollTimer = null;
+let osMirrorSpeed = {};          // 鏡像站 id → 測速結果
+let osMirrorSelected = "";
+
+function osBadge(text, color, bg) {
+  return `<span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:4px; margin-right:4px; color:${color}; background:${bg};">${escapeHtml(text)}</span>`;
+}
+
+function renderOsReboot(reboot) {
+  const el = document.getElementById("os-update-reboot");
+  if (!reboot || !reboot.required) {
+    el.innerHTML = `<p style="font-size:13px; color:#047857; margin:0 0 10px 0;">✓ 不需要重新開機(目前核心 <span style="font-family:var(--mono);">${escapeHtml((reboot && reboot.running_kernel) || "")}</span>)</p>`;
+    return;
+  }
+  el.innerHTML = `
+    <div style="background:#fff7ed; border:1px solid #fed7aa; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#9a3412;">
+      <div style="font-weight:700; margin-bottom:4px;">⚠️ 需要重新開機才會生效</div>
+      ${reboot.reasons.map((r) => `<div>・${escapeHtml(r)}</div>`).join("")}
+      <div style="margin-top:4px; color:#6b7280;">請挑選不影響使用的時間,自行在主機或 PVE 上重新開機。</div>
+    </div>`;
+}
+
+function renderOsJob(job) {
+  const el = document.getElementById("os-update-job");
+  const btn = document.getElementById("os-update-check-btn");
+  const running = job && job.state === "running";
+  btn.disabled = running;
+  document.querySelectorAll("#os-update-mirror button").forEach((b) => { b.disabled = running; });
+  if (!job || job.state === "idle") { el.innerHTML = ""; return; }
+  const title = job.kind === "switch" ? `切換鏡像站到 ${job.mirror}` : "檢查更新";
+  if (running) {
+    el.innerHTML = `<div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#1e3a8a;">
+      ⏳ ${escapeHtml(title)}:${escapeHtml(job.message || "")}(${escapeHtml(job.started_at || "")} 開始)</div>`;
+  } else if (job.state === "failed") {
+    el.innerHTML = `<div style="background:#fef2f2; border:1px solid #fecaca; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#991b1b;">
+      ✕ ${escapeHtml(title)}失敗:${escapeHtml(job.message || "")}</div>`;
+  } else if (job.kind === "switch") {
+    el.innerHTML = `<div style="background:#ecfdf5; border:1px solid #a7f3d0; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#065f46;">
+      ✓ 已切換到 ${escapeHtml(job.mirror)},套件清單已更新(${escapeHtml(job.finished_at || "")},耗時 ${job.seconds} 秒)</div>`;
+  } else {
+    el.innerHTML = "";
+  }
+}
+
+function renderOsResult(st) {
+  const el = document.getElementById("os-update-result");
+  if (!st.sources.supported) {
+    el.innerHTML = `<p style="color:#b45309; font-size:13px;">${escapeHtml(st.sources.unsupported_reason)}(目前系統:${escapeHtml(st.sources.os_name)})</p>`;
+    return;
+  }
+  const lc = st.last_check;
+  const listsAt = st.lists_updated_at ? `套件清單最後更新:${escapeHtml(st.lists_updated_at)}` : "";
+  if (!lc) {
+    el.innerHTML = `<p style="color:#6b7280; font-size:13px;">還沒有檢查過,請按右上角「檢查更新」。${listsAt ? "(" + listsAt + ")" : ""}</p>`;
+    return;
+  }
+  const sm = lc.summary;
+  const head = `<p style="font-size:12px; color:#6b7280; margin:0 0 8px 0;">上次檢查:${escapeHtml(lc.checked_at)}${listsAt ? " ・" + listsAt : ""}</p>`;
+  if (sm.total === 0 && sm.removals === 0) {
+    el.innerHTML = head + `<p style="font-size:14px; color:#047857; font-weight:600;">✓ 所有套件都是最新版本</p>`;
+    return;
+  }
+  const parts = [`<strong>${sm.total} 個套件可以更新</strong>`];
+  if (sm.security) parts.push(osBadge(`安全性更新 ${sm.security}`, "#991b1b", "#fee2e2"));
+  if (sm.kernel) parts.push(osBadge(`核心 ${sm.kernel}`, "#9a3412", "#ffedd5"));
+  if (sm.docker) parts.push(osBadge(`Docker ${sm.docker}`, "#1e40af", "#dbeafe"));
+  if (sm.new_install) parts.push(osBadge(`新安裝 ${sm.new_install}`, "#374151", "#f3f4f6"));
+
+  const notes = [];
+  if (sm.kernel) notes.push("包含核心更新,安裝後需要重新開機才會生效。");
+  if (sm.docker) notes.push("包含 Docker 相關套件,安裝時 Docker 會重新啟動,所有容器(含 MDM 服務)會中斷約 1 分鐘。");
+  if (sm.new_install) notes.push("有些更新需要安裝新套件(通常是新版核心),<code>apt-get upgrade</code> 會先保留不更新,要用 <code>apt-get full-upgrade</code> 才會一起安裝。");
+  if (sm.removals) notes.push(`<span style="color:#991b1b; font-weight:600;">完整更新(full-upgrade)會移除 ${sm.removals} 個套件:${lc.removals.map((r) => escapeHtml(r.name)).join("、")},請先確認不影響服務。</span>`);
+  if (lc.warnings && lc.warnings.length) notes.push(`<span style="color:#b45309;">apt 警告:${lc.warnings.map(escapeHtml).join(";")}</span>`);
+
+  const rows = lc.packages.map((p) => {
+    const tags = [];
+    if (p.security) tags.push(osBadge("安全性", "#991b1b", "#fee2e2"));
+    if (p.kernel) tags.push(osBadge("核心", "#9a3412", "#ffedd5"));
+    if (p.docker) tags.push(osBadge("Docker", "#1e40af", "#dbeafe"));
+    if (p.new_install) tags.push(osBadge("新安裝", "#374151", "#f3f4f6"));
+    return `<tr>
+      <td style="font-family:var(--mono); font-size:12px;">${escapeHtml(p.name)}</td>
+      <td style="font-family:var(--mono); font-size:12px; color:#6b7280;">${escapeHtml(p.old_version || "—")}</td>
+      <td style="font-family:var(--mono); font-size:12px;">${escapeHtml(p.new_version)}</td>
+      <td style="font-size:12px; color:#6b7280;">${escapeHtml(p.origin)}</td>
+      <td>${tags.join("")}</td>
+    </tr>`;
+  }).join("");
+
+  el.innerHTML = head
+    + `<p style="font-size:14px; margin:0 0 8px 0;">${parts.join(" ")}</p>`
+    + (notes.length ? `<ul style="font-size:13px; color:#374151; margin:0 0 10px 0; padding-left:20px; line-height:1.7;">${notes.map((n) => `<li>${n}</li>`).join("")}</ul>` : "")
+    + `<div style="max-height:360px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px;">
+         <table class="data-table" style="margin:0;">
+           <thead><tr><th>套件</th><th>目前版本</th><th>新版本</th><th>來源</th><th>類型</th></tr></thead>
+           <tbody>${rows}</tbody>
+         </table>
+       </div>`;
+}
+
+function renderOsMirror(st) {
+  const el = document.getElementById("os-update-mirror");
+  const src = st.sources;
+  if (!src.supported) {
+    el.innerHTML = `<p style="color:#9ca3af; font-size:13px;">${escapeHtml(src.unsupported_reason)}</p>`;
+    return;
+  }
+  if (!src.uris.length) {
+    el.innerHTML = `<p style="color:#b45309; font-size:13px;">在 /etc/apt 裡找不到 Debian 主要套件庫的設定,無法切換鏡像站。</p>`;
+    return;
+  }
+  const currentId = src.current_mirror_id;
+  if (!osMirrorSelected) osMirrorSelected = currentId;
+  const currentText = currentId
+    ? escapeHtml(st.mirrors.find((m) => m.id === currentId).name)
+    : `<span style="color:#b45309;">不在下方清單中</span>`;
+  const rows = st.mirrors.map((m) => {
+    const sp = osMirrorSpeed[m.id];
+    let speed = `<span style="color:#9ca3af;">—</span>`;
+    if (sp === "testing") speed = `<span style="color:#9ca3af;">測速中...</span>`;
+    else if (sp && sp.ok) speed = `<span style="color:${sp.ms < 300 ? "#047857" : sp.ms < 1000 ? "#b45309" : "#d64545"};">${sp.ms} ms</span>`;
+    else if (sp) speed = `<span style="color:#d64545;">${escapeHtml(sp.error)}</span>`;
+    const isCurrent = m.id === currentId;
+    return `<tr${isCurrent ? ' style="background:#ecfdf5;"' : ""}>
+      <td style="width:1%;"><input type="radio" name="os-mirror" value="${escapeHtml(m.id)}" style="width:auto;"${m.id === osMirrorSelected ? " checked" : ""}></td>
+      <td>${escapeHtml(m.name)}${isCurrent ? " " + osBadge("目前使用", "#065f46", "#d1fae5") : ""}
+        ${m.note ? `<div style="font-size:12px; color:#6b7280;">${escapeHtml(m.note)}</div>` : ""}</td>
+      <td style="font-family:var(--mono); font-size:12px;">${escapeHtml(m.url)}</td>
+      <td style="white-space:nowrap; font-size:12px;">${speed}</td>
+    </tr>`;
+  }).join("");
+  el.innerHTML = `
+    <p style="font-size:13px; margin:0 0 8px 0;">目前使用:${currentText}
+      <span style="font-family:var(--mono); font-size:12px; color:#6b7280; margin-left:6px;">${src.uris.map(escapeHtml).join("、")}</span>
+      <span style="font-size:12px; color:#9ca3af; margin-left:6px;">(設定檔:${src.files.map(escapeHtml).join("、")})</span></p>
+    <table class="data-table" id="os-mirror-table">
+      <thead><tr><th></th><th>鏡像站</th><th>網址</th><th>回應時間</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <button type="button" class="secondary" id="os-mirror-speed-btn">測速</button>
+      <button type="button" id="os-mirror-apply-btn">切換到選取的鏡像站</button>
+    </div>`;
+  renderOsJob(st.job);
+}
+
+// 摺疊時標題右側的摘要:只顯示目前有沒有可用的更新
+function renderOsSummary(st) {
+  const el = document.getElementById("os-update-summary");
+  const muted = (t) => `<span style="color:#6b7280;">・${t}</span>`;
+  const job = st.job || {};
+  const lc = st.last_check;
+  let html;
+  if (!st.sources.supported) html = muted(escapeHtml(st.sources.unsupported_reason));
+  else if (job.state === "running") html = muted(job.kind === "switch" ? "切換鏡像站中..." : "檢查中...");
+  else if (!lc) html = muted("還沒檢查過");
+  else if (lc.summary.total === 0 && lc.summary.removals === 0) html = `<span style="color:#047857;">・所有套件都是最新版本</span>`;
+  else {
+    const sm = lc.summary;
+    html = `<span style="color:#b45309; font-weight:600; margin-right:6px;">・${sm.total} 個套件可以更新</span>`;
+    if (sm.security) html += osBadge(`安全性更新 ${sm.security}`, "#991b1b", "#fee2e2");
+    if (sm.kernel) html += osBadge(`核心 ${sm.kernel}`, "#9a3412", "#ffedd5");
+    if (sm.docker) html += osBadge(`Docker ${sm.docker}`, "#1e40af", "#dbeafe");
+    if (sm.new_install) html += osBadge(`新安裝 ${sm.new_install}`, "#374151", "#f3f4f6");
+  }
+  if (st.reboot && st.reboot.required) html += osBadge("需要重新開機", "#9a3412", "#ffedd5");
+  el.innerHTML = html;
+}
+
+async function loadOsUpdateStatus() {
+  const res = await apiFetch("/api/os-update/status");
+  if (!res.ok) {
+    document.getElementById("os-update-result").innerHTML =
+      `<p style="color:#d64545; font-size:13px;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
+    return;
+  }
+  const prevState = osUpdateStatus && osUpdateStatus.job && osUpdateStatus.job.state;
+  osUpdateStatus = res.data;
+  // 切換鏡像站完成後,選取的項目改回目前使用的鏡像站
+  if (prevState === "running" && res.data.job.state !== "running") osMirrorSelected = res.data.sources.current_mirror_id;
+  renderOsReboot(res.data.reboot);
+  renderOsResult(res.data);
+  renderOsMirror(res.data);
+  renderOsJob(res.data.job);
+  renderOsSummary(res.data);
+  clearTimeout(osUpdatePollTimer);
+  if (res.data.job.state === "running") osUpdatePollTimer = setTimeout(loadOsUpdateStatus, 2000);
+}
+
+async function startOsUpdateCheck() {
+  const res = await apiFetchJSON("/api/os-update/check", "POST", {});
+  if (!res.ok) {
+    alert((res.data && res.data.message) || "無法開始檢查");
+    return;
+  }
+  loadOsUpdateStatus();
+}
+
+async function runOsMirrorSpeedTest() {
+  if (!osUpdateStatus) return;
+  osUpdateStatus.mirrors.forEach((m) => { osMirrorSpeed[m.id] = "testing"; });
+  renderOsMirror(osUpdateStatus);
+  const res = await apiFetchJSON("/api/os-update/speed-test", "POST", {});
+  osMirrorSpeed = {};
+  if (res.ok) res.data.results.forEach((r) => { osMirrorSpeed[r.id] = r; });
+  else alert((res.data && res.data.message) || "測速失敗");
+  renderOsMirror(osUpdateStatus);
+}
+
+async function applyOsMirror() {
+  if (!osUpdateStatus) return;
+  const mirror = osUpdateStatus.mirrors.find((m) => m.id === osMirrorSelected);
+  if (!mirror) { alert("請先選擇一個鏡像站"); return; }
+  if (mirror.id === osUpdateStatus.sources.current_mirror_id) { alert(`目前已經是 ${mirror.name}`); return; }
+  const password = await askPassword(
+    `要把 Debian 套件鏡像站切換成「${mirror.name}」(${mirror.url})嗎?\n`
+    + `會修改:${osUpdateStatus.sources.files.join("、")}(修改前自動備份)。\n`
+    + "切換後會重新下載套件清單,新的鏡像站無法使用時自動還原。只改下載來源,不會安裝任何套件。\n\n請輸入您目前登入的密碼以確認:");
+  if (!password) return;
+  const res = await apiFetchJSON("/api/os-update/mirror", "POST", { password, mirror_id: mirror.id });
+  if (!res.ok) {
+    alert((res.data && res.data.message) || "切換失敗");
+    return;
+  }
+  loadOsUpdateStatus();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   loadCurrentVersion();
+  initCollapsiblePanels();
+  loadOsUpdateStatus();
+  document.getElementById("os-update-check-btn").addEventListener("click", startOsUpdateCheck);
+  document.getElementById("os-update-mirror").addEventListener("click", (e) => {
+    if (e.target.closest("#os-mirror-speed-btn")) runOsMirrorSpeedTest();
+    else if (e.target.closest("#os-mirror-apply-btn")) applyOsMirror();
+  });
+  document.getElementById("os-update-mirror").addEventListener("change", (e) => {
+    if (e.target.name === "os-mirror") osMirrorSelected = e.target.value;
+  });
   loadUpdateHistory();
   loadRollbackInfo();
   checkForUpdate(); // 一進頁面就自動檢測一次,不用使用者自己按按鈕

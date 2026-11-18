@@ -60,11 +60,12 @@
   <div id="version-verify-result" style="margin-top:14px;"></div>
 </div>
 
-<div class="panel" id="compose-panel">
-  <h2>
-    Docker Compose 設定
+<div class="panel collapsible-panel" id="compose-panel">
+  <h2 class="collapse-toggle">
+    <span class="collapse-icon">▶</span>Docker Compose 設定<span class="collapse-summary"></span>
     <button id="compose-refresh-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新比對</button>
   </h2>
+  <div class="collapse-body hidden">
   <p style="color:#6b7280; font-size:13px; margin:6px 0 10px;">
     專案統一管理的容器設定(例如容器日誌大小上限)放在 <code>docker-compose.woofweb.yml</code>,會隨「版本與更新」一起更新,
     跟您自己的 <code>docker-compose.yml</code> 合併套用;網域、映像檔、自訂參數等設定不會被改動。
@@ -72,13 +73,15 @@
   </p>
   <div id="compose-plan-container">載入中...</div>
   <div id="compose-status-container" style="margin-top:10px;"></div>
+  </div>
 </div>
 
-<div class="panel">
-  <h2>
-    更新歷程記錄
+<div class="panel collapsible-panel" id="history-panel">
+  <h2 class="collapse-toggle">
+    <span class="collapse-icon">▶</span>更新歷程記錄<span class="collapse-summary"></span>
     <button id="version-history-refresh-btn" class="secondary" type="button" style="float:right; font-size:12px;">重新整理</button>
   </h2>
+  <div class="collapse-body hidden">
   <p style="color:#6b7280; font-size:13px; margin:6px 0;">
     GitHub 上最近 50 筆修改(包含沒有建立 Release 的版本),並標出這台主機目前的版本、還沒套用的修改,
     作者與協作者,以及過去透過這個頁面更新的時間。純粹顯示用,不能從這裡切換回舊版本。
@@ -92,6 +95,32 @@
       <tr><td colspan="4">載入中...</td></tr>
     </tbody>
   </table>
+  </div>
+</div>
+
+<div class="panel collapsible-panel" id="os-update-panel">
+  <h2 class="collapse-toggle">
+    <span class="collapse-icon">▶</span>作業系統更新<span class="collapse-summary" id="os-update-summary"></span>
+    <button id="os-update-check-btn" type="button" style="float:right; font-size:12px;">檢查更新</button>
+  </h2>
+  <div class="collapse-body hidden">
+  <p style="color:#6b7280; font-size:13px; margin:6px 0 12px 0;">
+    檢查這台主機的 Debian 套件有哪些可以更新,以及是否需要重新開機。這裡<strong>只檢查、不會安裝</strong>任何套件
+    (先更新套件清單,再模擬更新計算結果)。要安裝時請 SSH 進主機執行 <code>apt-get upgrade</code>,
+    建議先在 PVE 做快照,並避開上課時間:Docker 相關套件更新時,所有容器(含 MDM 服務)會重新啟動。
+  </p>
+  <div id="os-update-reboot"></div>
+  <div id="os-update-job"></div>
+  <div id="os-update-result"><p style="color:#9ca3af; font-size:13px;">載入中...</p></div>
+
+  <h3 style="margin:22px 0 6px 0; font-size:15px;">套件鏡像站</h3>
+  <p style="color:#6b7280; font-size:13px; margin:0 0 10px 0;">
+    選擇下載 Debian 套件的鏡像站,可以先按「測速」比較哪一個比較快。只會修改 Debian 主要套件庫的網址,
+    security.debian.org(安全性更新)與 Docker 等其他套件庫不會改動。修改前會先備份原本的設定,
+    新的鏡像站無法使用時會自動還原。
+  </p>
+  <div id="os-update-mirror">載入中...</div>
+  </div>
 </div>
 
 <div class="modal-overlay hidden" id="version-diff-modal">

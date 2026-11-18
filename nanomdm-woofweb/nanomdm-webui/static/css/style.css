@@ -561,6 +561,7 @@ table.data-table input[type="text"] { width: 100%; padding: 5px 8px; font-size: 
 table.kv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.kv-table td { padding: 8px 10px; border-bottom: 1px solid #edf0f4; vertical-align: top; }
 table.kv-table td.k { color: var(--text-muted); width: 38%; }
+table.kv-table.kv-flush td.k { padding-left: 0; }
 
 /* ---- 設定清單(左邊說明、右邊數值+單位) ---- */
 .settings-list { border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; }
@@ -706,3 +707,12 @@ input.hs-folder-name:hover, input.hs-folder-name:focus { background: rgba(255, 2
 .hs-tray { display: flex; flex-wrap: wrap; gap: 4px; min-height: 180px; max-height: 450px; align-content: flex-start; overflow-y: auto; }
 .hs-tray .hs-tile { width: 68px; }
 .hs-tray .hs-tile:hover { background: rgba(0, 0, 0, .05); }
+
+/* 可摺疊的區塊(系統狀態頁):點標題展開/摺疊,標題右側顯示摘要 */
+.collapsible-panel .collapse-toggle { cursor: pointer; user-select: none; }
+.collapsible-panel .collapse-icon { display: inline-block; width: 18px; font-size: 12px; color: #6b7280; transition: transform 0.15s; }
+.collapsible-panel.expanded .collapse-icon { transform: rotate(90deg); }
+.collapsible-panel .collapse-summary { margin-left: 10px; font-size: 12px; font-weight: normal; color: #1c7c3f; }
+.collapsible-panel .collapse-summary.abnormal { color: #d64545; font-weight: 600; }
+.collapsible-panel .collapse-summary.warning { color: #b45309; }
+.collapsible-panel .collapse-body { margin-top: 10px; }

@@ -296,6 +296,44 @@ function initAsmStatusPopover() {
   });
 }
 
+// ---- 可摺疊的區塊(系統狀態、版本與更新頁共用):預設摺疊,點標題展開;狀態異常時自動展開,標題右側顯示摘要 ----
+function setPanelExpanded(panelId, expanded) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  panel.classList.toggle("expanded", expanded);
+  const body = panel.querySelector(".collapse-body");
+  if (!body) return;
+  body.classList.toggle("hidden", !expanded);
+}
+
+// level: "ok" / "warning"(只提示,不自動展開) / "abnormal"(自動展開)
+function setPanelSummary(panelId, text, level) {
+  const el = document.querySelector(`#${panelId} .collapse-summary`);
+  if (!el) return;
+  el.textContent = text ? `・${text}` : "";
+  el.classList.toggle("abnormal", level === "abnormal");
+  el.classList.toggle("warning", level === "warning");
+  if (level === "abnormal") setPanelExpanded(panelId, true);
+}
+
+function initCollapsiblePanels() {
+  document.querySelectorAll(".collapsible-panel .collapse-toggle").forEach((h) => {
+    h.addEventListener("click", (e) => {
+      if (e.target.closest("button, a")) return;   // 標題上的「重新整理」等按鈕不觸發展開/摺疊
+      const panel = h.closest(".collapsible-panel");
+      setPanelExpanded(panel.id, !panel.classList.contains("expanded"));
+    });
+  });
+  // 從其他地方連到某個區塊(例如磁碟分析的「資料庫狀態 →」)時,自動展開那個區塊
+  const openFromHash = () => {
+    const id = location.hash.slice(1);
+    const panel = id && document.getElementById(id);
+    if (panel && panel.classList.contains("collapsible-panel")) setPanelExpanded(id, true);
+  };
+  window.addEventListener("hashchange", openFromHash);
+  openFromHash();
+}
+
 // ---- Modal 共用 ----
 function openModal(id) {
   document.getElementById(id).classList.remove("hidden");

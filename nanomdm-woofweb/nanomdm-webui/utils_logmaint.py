@@ -146,6 +146,34 @@ def _container_log_limit_text(container):
     return f"上限 {max_size} x {(opts or {}).get('max-file', '1')} 個檔案"
 
 
+def _mysql_table_files(data_dir):
+    """MySQL 資料目錄底下每張表的 .ibd 檔案(每個資料庫一個子目錄,另外加上系統資料表 mysql.ibd)。
+    回傳 [(「資料庫.資料表」, 位元組)],大的在前。用檔案大小統計,包含刪除資料後還沒釋放回磁碟的空間,
+    跟磁碟實際被佔用的大小一致(資料庫狀態裡顯示的是資料+索引大小,不含這部分)。"""
+    tables = []
+    try:
+        names = os.listdir(data_dir)
+    except OSError:
+        return tables
+    for name in names:
+        path = os.path.join(data_dir, name)
+        if name == "mysql.ibd" and os.path.isfile(path):
+            tables.append(("mysql(系統資料表)", os.path.getsize(path)))
+        elif os.path.isdir(path) and not name.startswith("#"):
+            for fname in os.listdir(path):
+                if fname.endswith(".ibd"):
+                    try:
+                        tables.append((f"{name}.{fname[:-4]}", os.path.getsize(os.path.join(path, fname))))
+                    except OSError:
+                        pass
+    tables.sort(key=lambda t: t[1], reverse=True)
+    return tables
+
+
+def _format_mb(n):
+    return f"{n / 1048576:.0f}MB" if n >= 1048576 else f"{n / 1024:.0f}KB"
+
+
 _storage_cache = {"at": 0, "data": None}
 
 
@@ -172,6 +200,18 @@ def get_storage_usage(cfg, db_password, cache_seconds=60):
                       "bytes": sum(os.path.getsize(p) for p in files), "note": note})
     else:
         items.append({"name": "MySQL binlog", "path": "", "bytes": None, "note": "找不到 MySQL 資料目錄"})
+
+    # MySQL 資料表(各資料表的 .ibd 檔案)
+    db_link = {"href": "#mysql-status-panel", "text": "資料庫狀態"}
+    if data_dir:
+        tables = _mysql_table_files(data_dir)
+        top = "、".join(f"{name} {_format_mb(size)}" for name, size in tables[:3])
+        items.append({"name": "MySQL 資料表", "path": os.path.join(data_dir, "*", "*.ibd"),
+                      "bytes": sum(size for _, size in tables),
+                      "note": f"{len(tables)} 個資料表,最大:{top}。含已刪除資料還沒釋放的空間" if tables else "找不到資料表檔案",
+                      "link": db_link})
+    else:
+        items.append({"name": "MySQL 資料表", "path": "", "bytes": None, "note": "找不到 MySQL 資料目錄", "link": db_link})
 
     # systemd journal
     journal_dirs = [d for d in ("/var/log/journal", "/run/log/journal") if os.path.isdir(d)]
