@@ -815,7 +815,8 @@ function renderOsReboot(reboot) {
     <div style="background:#fff7ed; border:1px solid #fed7aa; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#9a3412;">
       <div style="font-weight:700; margin-bottom:4px;">⚠️ 需要重新開機才會生效</div>
       ${reboot.reasons.map((r) => `<div>・${escapeHtml(r)}</div>`).join("")}
-      <div style="margin-top:4px; color:#6b7280;">請挑選不影響使用的時間,自行在主機或 PVE 上重新開機。</div>
+      <div style="margin-top:6px; color:#6b7280;">重新開機時所有服務(含 MDM)會中斷約 1~3 分鐘,請挑選不影響使用的時間。</div>
+      <button type="button" class="danger" id="os-reboot-btn" style="margin-top:8px; font-size:12px;">重新開機…</button>
     </div>`;
 }
 
@@ -868,8 +869,8 @@ function renderOsResult(st) {
   const notes = [];
   if (sm.kernel) notes.push("包含核心更新,安裝後需要重新開機才會生效。");
   if (sm.docker) notes.push("包含 Docker 相關套件,安裝時 Docker 會重新啟動,所有容器(含 MDM 服務)會中斷約 1 分鐘。");
-  if (sm.new_install) notes.push("有些更新需要安裝新套件(通常是新版核心),<code>apt-get upgrade</code> 會先保留不更新,要用 <code>apt-get full-upgrade</code> 才會一起安裝。");
-  if (sm.removals) notes.push(`<span style="color:#991b1b; font-weight:600;">完整更新(full-upgrade)會移除 ${sm.removals} 個套件:${lc.removals.map((r) => escapeHtml(r.name)).join("、")},請先確認不影響服務。</span>`);
+  if (sm.new_install) notes.push("有些更新需要安裝新套件(通常是新版核心),「一般更新」會一起安裝。");
+  if (sm.removals) notes.push(`<span style="color:#991b1b; font-weight:600;">完整更新(full-upgrade)會移除 ${sm.removals} 個套件:${lc.removals.map((r) => escapeHtml(r.name)).join("、")}。「一般更新」不會移除任何套件。</span>`);
   if (lc.warnings && lc.warnings.length) notes.push(`<span style="color:#b45309;">apt 警告:${lc.warnings.map(escapeHtml).join(";")}</span>`);
 
   const rows = lc.packages.map((p) => {
@@ -895,7 +896,8 @@ function renderOsResult(st) {
            <thead><tr><th>套件</th><th>目前版本</th><th>新版本</th><th>來源</th><th>類型</th></tr></thead>
            <tbody>${rows}</tbody>
          </table>
-       </div>`;
+       </div>
+       <button type="button" class="danger" id="os-upgrade-open-btn" style="margin-top:10px;">安裝更新…</button>`;
 }
 
 function renderOsMirror(st) {
@@ -952,6 +954,10 @@ function renderOsSummary(st) {
   const lc = st.last_check;
   let html;
   if (!st.sources.supported) html = muted(escapeHtml(st.sources.unsupported_reason));
+  else if (st.upgrade_running) {
+    const pg = st.upgrade_latest.progress;
+    html = `<span style="color:#1e40af; font-weight:600;">・安裝更新中(${pg.configured}/${pg.total})</span>`;
+  }
   else if (job.state === "running") html = muted(job.kind === "switch" ? "切換鏡像站中..." : "檢查中...");
   else if (!lc) html = muted("還沒檢查過");
   else if (lc.summary.total === 0 && lc.summary.removals === 0) html = `<span style="color:#047857;">・所有套件都是最新版本</span>`;
@@ -964,12 +970,213 @@ function renderOsSummary(st) {
     if (sm.new_install) html += osBadge(`新安裝 ${sm.new_install}`, "#374151", "#f3f4f6");
   }
   if (st.reboot && st.reboot.required) html += osBadge("需要重新開機", "#9a3412", "#ffedd5");
+  const latest = st.upgrade_latest;
+  if (latest && (latest.state === "failed" || latest.state === "interrupted" || latest.dpkg_audit)) {
+    html += osBadge("上次安裝更新沒有正常完成", "#991b1b", "#fee2e2");
+    setPanelExpanded("os-update-panel", true);
+  }
   el.innerHTML = html;
+}
+
+// ---- 安裝更新(在主機背景用 systemd-run 執行 apt-get,WebUI 重啟也不會中斷) ----
+let osUpgradePlan = null;
+let osUpgradePlanSeq = 0;
+
+function updateOsButtons(st) {
+  const busy = st.upgrade_running || (st.job && st.job.state === "running");
+  ["os-update-check-btn", "os-upgrade-open-btn", "os-reboot-btn", "os-mirror-apply-btn", "os-mirror-speed-btn"].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = busy;
+  });
+}
+
+const UPGRADE_STATE_TEXT = {
+  running: ["安裝中", "#1e40af"],
+  succeeded: ["完成", "#047857"],
+  failed: ["失敗", "#d64545"],
+  interrupted: ["中斷", "#d64545"],
+};
+
+function renderUpgradeRun(st) {
+  const el = document.getElementById("os-upgrade-run");
+  const r = st.upgrade_latest;
+  if (!r) { el.innerHTML = ""; return; }
+  const pg = r.progress;
+  const logHtml = `<pre id="os-upgrade-log-tail" style="max-height:260px; overflow:auto; background:#111827; color:#e5e7eb; font-size:11px; padding:8px 10px; border-radius:6px; margin:8px 0 0; white-space:pre-wrap;">${escapeHtml(r.log_tail || "(還沒有輸出)")}</pre>`;
+  if (r.state === "running") {
+    const pct = pg.total ? Math.round(((pg.unpacked + pg.configured) / (pg.total * 2)) * 100) : 0;
+    el.innerHTML = `
+      <div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#1e3a8a;">
+        <div style="font-weight:700;">⏳ 正在安裝更新(${escapeHtml(r.mode_name || "")}${r.exclude_docker ? ",不更新 Docker" : ""})・${escapeHtml(r.started_at)} 開始</div>
+        <div style="margin:8px 0 4px;">解壓縮 ${pg.unpacked}/${pg.total}・設定完成 ${pg.configured}/${pg.total}</div>
+        <div style="background:#dbeafe; border-radius:4px; height:8px; overflow:hidden;"><div style="background:#2563eb; height:8px; width:${pct}%;"></div></div>
+        <div style="margin-top:6px; color:#6b7280;">安裝在主機背景執行,關閉或重新整理這個網頁都不會中斷。${r.docker ? "更新 Docker 時所有容器會重新啟動,MDM 服務會短暫中斷。" : ""}</div>
+        <div id="os-upgrade-conn-note" style="color:#b45309;"></div>
+        ${logHtml}
+      </div>`;
+    const pre = document.getElementById("os-upgrade-log-tail");
+    pre.scrollTop = pre.scrollHeight;
+    return;
+  }
+  const [label, color] = UPGRADE_STATE_TEXT[r.state] || [r.state, "#374151"];
+  const ok = r.state === "succeeded" && !r.dpkg_audit;
+  const notes = [];
+  if (r.state === "failed") notes.push(r.start_error ? `無法啟動:${escapeHtml(r.start_error)}` : `apt-get 結束代碼 ${r.rc},請查看下方紀錄找出原因。`);
+  if (r.state === "interrupted") notes.push("沒有找到結束紀錄,可能是安裝途中主機被重新開機或程序被強制結束。");
+  if (r.dpkg_audit) notes.push(`dpkg 狀態異常,請 SSH 進主機執行 <code>dpkg --configure -a</code> 修復:${escapeHtml(r.dpkg_audit)}`);
+  if (ok && r.kernel) notes.push("這次安裝了新核心,需要重新開機才會生效。");
+  el.innerHTML = `
+    <details ${ok ? "" : "open"} style="background:${ok ? "#f8f9fb" : "#fef2f2"}; border:1px solid ${ok ? "var(--border-color)" : "#fecaca"}; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px;">
+      <summary style="cursor:pointer;">最近一次安裝更新:<strong style="color:${color};">${label}</strong>
+        <span style="color:#6b7280;">${escapeHtml(r.started_at)} ~ ${escapeHtml(r.finished_at || "?")}・${escapeHtml(r.mode_name || "")}・${r.package_count} 個套件${r.username ? "・" + escapeHtml(r.username) : ""}</span></summary>
+      ${notes.length ? `<ul style="margin:8px 0 0; padding-left:20px; color:${ok ? "#374151" : "#991b1b"};">${notes.map((n) => `<li>${n}</li>`).join("")}</ul>` : ""}
+      ${logHtml}
+    </details>`;
+}
+
+function renderUpgradeHistory(runs) {
+  const el = document.getElementById("os-upgrade-history");
+  if (!runs.length) { el.innerHTML = ""; return; }
+  const rows = runs.map((r) => {
+    const [label, color] = UPGRADE_STATE_TEXT[r.state] || [r.state, "#374151"];
+    return `<tr>
+      <td style="font-size:12px; white-space:nowrap;">${escapeHtml(r.started_at)}</td>
+      <td style="font-size:12px;">${escapeHtml(r.mode_name || "")}${r.exclude_docker ? "<br><span style=\"color:#6b7280;\">不更新 Docker</span>" : ""}</td>
+      <td style="font-size:12px;">${escapeHtml(r.username || "")}</td>
+      <td style="font-size:12px;">${r.package_count}</td>
+      <td style="font-size:12px; color:${color}; font-weight:600;">${label}${r.dpkg_audit ? "(dpkg 異常)" : ""}</td>
+      <td><button type="button" class="secondary os-upgrade-log-btn" data-id="${escapeHtml(r.id)}" style="font-size:11px;">紀錄</button></td>
+    </tr>`;
+  }).join("");
+  el.innerHTML = `
+    <details style="margin:4px 0 10px;">
+      <summary style="cursor:pointer; font-size:13px; color:#374151;">安裝更新紀錄(最近 ${runs.length} 次)</summary>
+      <table class="data-table" style="margin-top:6px;">
+        <thead><tr><th>開始時間</th><th>模式</th><th>帳號</th><th>套件數</th><th>結果</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>`;
+}
+
+async function showUpgradeLog(runId) {
+  document.getElementById("os-upgrade-log-title").textContent = runId;
+  document.getElementById("os-upgrade-log-content").textContent = "載入中...";
+  openModal("os-upgrade-log-modal");
+  const res = await apiFetch(`/api/os-update/upgrade/${encodeURIComponent(runId)}/log`);
+  document.getElementById("os-upgrade-log-content").textContent =
+    res.ok ? (res.data.log || "(沒有輸出)") : `載入失敗:${(res.data && res.data.message) || "未知錯誤"}`;
+}
+
+function openUpgradeModal() {
+  document.querySelector('input[name="os-upgrade-mode"][value="upgrade"]').checked = true;
+  document.getElementById("os-upgrade-exclude-docker").checked = false;
+  document.getElementById("os-upgrade-backup-confirm").checked = false;
+  document.getElementById("os-upgrade-password").value = "";
+  openModal("os-upgrade-modal");
+  loadUpgradePlan();
+}
+
+function upgradeOptions() {
+  return {
+    mode: document.querySelector('input[name="os-upgrade-mode"]:checked').value,
+    exclude_docker: document.getElementById("os-upgrade-exclude-docker").checked,
+  };
+}
+
+function refreshUpgradeConfirmBtn() {
+  const btn = document.getElementById("os-upgrade-confirm-btn");
+  btn.disabled = !(osUpgradePlan && osUpgradePlan.can_apply && document.getElementById("os-upgrade-backup-confirm").checked);
+}
+
+async function loadUpgradePlan() {
+  const el = document.getElementById("os-upgrade-plan");
+  const seq = ++osUpgradePlanSeq;
+  osUpgradePlan = null;
+  refreshUpgradeConfirmBtn();
+  el.innerHTML = `<p style="color:#9ca3af; font-size:13px;">正在模擬安裝、執行安裝前檢查...</p>`;
+  const res = await apiFetchJSON("/api/os-update/plan", "POST", upgradeOptions());
+  if (seq !== osUpgradePlanSeq) return;   // 使用者在等待時又改了選項
+  if (!res.ok) {
+    el.innerHTML = `<p style="color:#d64545; font-size:13px;">${escapeHtml((res.data && res.data.message) || "模擬失敗")}</p>`;
+    return;
+  }
+  const p = res.data.plan;
+  osUpgradePlan = p;
+  const icon = { ok: ["✓", "#047857"], warn: ["!", "#b45309"], fail: ["✕", "#d64545"] };
+  const checks = p.checks.map((c) => {
+    const [i, color] = icon[c.level] || ["?", "#374151"];
+    return `<div style="color:${c.level === "ok" ? "#374151" : color};"><span style="color:${color}; font-weight:700; display:inline-block; width:16px;">${i}</span>${escapeHtml(c.name)}:${escapeHtml(c.message)}</div>`;
+  }).join("");
+  const sm = p.summary;
+  const notes = [];
+  if (sm.kernel) notes.push(`<li>包含核心更新,安裝後需要<strong>重新開機</strong>才會生效(不會自動重開)。</li>`);
+  if (sm.docker) notes.push(`<li style="color:#991b1b;">包含 ${sm.docker} 個 Docker 套件:安裝時 Docker 會重新啟動,<strong>所有容器(含 MDM 服務)會中斷約 1 分鐘</strong>。不想這次更新可以勾選上方「這次不更新 Docker 套件」。</li>`);
+  if (p.exclude_docker && p.docker_excluded.length) notes.push(`<li>這次不更新:${p.docker_excluded.map(escapeHtml).join("、")}</li>`);
+  if (sm.removals) notes.push(`<li style="color:#991b1b; font-weight:600;">會移除 ${sm.removals} 個套件:${p.removals.map((r) => escapeHtml(r.name)).join("、")},請確認不影響服務。</li>`);
+  if (sm.kept_back) notes.push(`<li>有 ${sm.kept_back} 個套件這次不會更新(${p.kept_back.map(escapeHtml).join("、")}),需要「完整更新」才能更新。</li>`);
+  const pkgRows = p.packages.map((x) => `<div style="font-family:var(--mono); font-size:11px;">${escapeHtml(x.name)} <span style="color:#6b7280;">${escapeHtml(x.old_version || "(新安裝)")} → ${escapeHtml(x.new_version)}</span></div>`).join("");
+  el.innerHTML = `
+    <div style="background:#f8f9fb; border-radius:6px; padding:10px 12px; font-size:12px; line-height:1.8; margin-bottom:10px;">
+      <div style="font-weight:700; margin-bottom:2px;">安裝前檢查</div>${checks}
+    </div>
+    ${sm.total ? `<p style="font-size:14px; font-weight:600; margin:0 0 6px;">將安裝 ${sm.total} 個套件${sm.removals ? `、移除 ${sm.removals} 個套件` : ",不會移除任何套件"}</p>
+      <details style="margin-bottom:6px;"><summary style="cursor:pointer; font-size:12px; color:#6b7280;">套件清單</summary>
+        <div style="max-height:180px; overflow-y:auto; margin-top:4px;">${pkgRows}</div></details>`
+      : `<p style="font-size:14px; color:#047857; margin:0 0 6px;">這個模式下沒有需要安裝的更新</p>`}
+    ${notes.length ? `<ul style="font-size:13px; margin:0 0 6px; padding-left:20px; line-height:1.7;">${notes.join("")}</ul>` : ""}`;
+  refreshUpgradeConfirmBtn();
+}
+
+async function confirmUpgrade() {
+  if (!osUpgradePlan || !osUpgradePlan.can_apply) return;
+  const password = document.getElementById("os-upgrade-password").value;
+  if (!password) { alert("請輸入您目前登入的密碼"); return; }
+  const btn = document.getElementById("os-upgrade-confirm-btn");
+  btn.disabled = true;
+  const res = await apiFetchJSON("/api/os-update/upgrade", "POST", {
+    ...upgradeOptions(), password, plan_hash: osUpgradePlan.plan_hash,
+    backup_confirmed: document.getElementById("os-upgrade-backup-confirm").checked,
+  });
+  if (!res.ok) {
+    alert((res.data && res.data.message) || "無法開始安裝");
+    refreshUpgradeConfirmBtn();
+    return;
+  }
+  closeModal("os-upgrade-modal");
+  setPanelExpanded("os-update-panel", true);
+  loadOsUpdateStatus();
+}
+
+async function rebootHost() {
+  const st = osUpdateStatus;
+  const reasons = st && st.reboot && st.reboot.reasons.length ? `原因:${st.reboot.reasons.join(";")}\n` : "";
+  const password = await askPassword(
+    `確定要重新開機這台主機嗎?\n${reasons}`
+    + "主機會在 10 秒後重新開機,所有服務(含 MDM、資料庫)會中斷約 1~3 分鐘,開機後會自動啟動。\n"
+    + "建議先在 PVE 做好快照,並確認沒有人正在使用。\n\n請輸入您目前登入的密碼以確認:");
+  if (!password) return;
+  const res = await apiFetchJSON("/api/os-update/reboot", "POST", { password });
+  if (!res.ok) {
+    alert((res.data && res.data.message) || "無法重新開機");
+    return;
+  }
+  document.getElementById("os-update-reboot").innerHTML = `
+    <div style="background:#fff7ed; border:1px solid #fed7aa; border-radius:6px; padding:10px 12px; margin-bottom:10px; font-size:13px; color:#9a3412;">
+      主機將在 ${res.data.delay} 秒後重新開機。開機約需 1~3 分鐘,之後請重新整理這個頁面。</div>`;
+  clearTimeout(osUpdatePollTimer);
 }
 
 async function loadOsUpdateStatus() {
   const res = await apiFetch("/api/os-update/status");
   if (!res.ok) {
+    clearTimeout(osUpdatePollTimer);
+    if (osUpdateStatus && osUpdateStatus.upgrade_running) {
+      // 安裝 Docker / nginx 等套件時,網頁可能短暫連不上,繼續重試
+      const note = document.getElementById("os-upgrade-conn-note");
+      if (note) note.textContent = "暫時無法連線到 WebUI(可能是相關服務正在重新啟動),安裝仍在主機背景進行,持續重試中…";
+      osUpdatePollTimer = setTimeout(loadOsUpdateStatus, 4000);
+      return;
+    }
     document.getElementById("os-update-result").innerHTML =
       `<p style="color:#d64545; font-size:13px;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</p>`;
     return;
@@ -982,9 +1189,14 @@ async function loadOsUpdateStatus() {
   renderOsResult(res.data);
   renderOsMirror(res.data);
   renderOsJob(res.data.job);
+  renderUpgradeRun(res.data);
+  renderUpgradeHistory(res.data.upgrade_runs || []);
   renderOsSummary(res.data);
+  updateOsButtons(res.data);
   clearTimeout(osUpdatePollTimer);
-  if (res.data.job.state === "running") osUpdatePollTimer = setTimeout(loadOsUpdateStatus, 2000);
+  if (res.data.job.state === "running" || res.data.upgrade_running) {
+    osUpdatePollTimer = setTimeout(loadOsUpdateStatus, res.data.upgrade_running ? 3000 : 2000);
+  }
 }
 
 async function startOsUpdateCheck() {
@@ -1037,6 +1249,18 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("os-update-mirror").addEventListener("change", (e) => {
     if (e.target.name === "os-mirror") osMirrorSelected = e.target.value;
   });
+  document.getElementById("os-update-panel").addEventListener("click", (e) => {
+    if (e.target.closest("#os-upgrade-open-btn")) openUpgradeModal();
+    else if (e.target.closest("#os-reboot-btn")) rebootHost();
+    else {
+      const logBtn = e.target.closest(".os-upgrade-log-btn");
+      if (logBtn) showUpgradeLog(logBtn.dataset.id);
+    }
+  });
+  document.querySelectorAll('input[name="os-upgrade-mode"]').forEach((r) => r.addEventListener("change", loadUpgradePlan));
+  document.getElementById("os-upgrade-exclude-docker").addEventListener("change", loadUpgradePlan);
+  document.getElementById("os-upgrade-backup-confirm").addEventListener("change", refreshUpgradeConfirmBtn);
+  document.getElementById("os-upgrade-confirm-btn").addEventListener("click", confirmUpgrade);
   loadUpdateHistory();
   loadRollbackInfo();
   checkForUpdate(); // 一進頁面就自動檢測一次,不用使用者自己按按鈕

@@ -6322,10 +6322,76 @@ def _os_update_logger(command):
     return on_finish
 
 
+def _os_upgrade_result_logger(username, ip, command, success, detail):
+    """安裝更新是在背景的 systemd 服務裡跑的,結束後第一次查詢狀態時才寫結果紀錄,帳號與 IP 用開始安裝時記下的。"""
+    utils_logging.log_activity(
+        CFG["system_logs"]["user_activity_log"], CFG["system_logs"]["user_activity_retention_days"],
+        username, command, success, ip, detail=detail,
+    )
+
+
 @app.route("/api/os-update/status")
 @login_required
 def api_os_update_status():
-    return jsonify({"ok": True, **utils_osupdate.get_status()})
+    return jsonify({"ok": True, **utils_osupdate.get_status(log_fn=_os_upgrade_result_logger)})
+
+
+@app.route("/api/os-update/plan", methods=["POST"])
+@login_required
+def api_os_update_plan():
+    """模擬安裝,列出會安裝/移除的套件與安裝前檢查結果。不會改動系統。"""
+    data = request.json or {}
+    plan, err = utils_osupdate.build_upgrade_plan(data.get("mode", "upgrade"), bool(data.get("exclude_docker")))
+    if err:
+        return jsonify({"ok": False, "message": err}), 400
+    return jsonify({"ok": True, "plan": plan})
+
+
+@app.route("/api/os-update/upgrade", methods=["POST"])
+@login_required
+def api_os_update_upgrade():
+    """安裝更新:在背景用 systemd-run 執行 apt-get,WebUI 重啟也不會中斷。"""
+    data = request.json or {}
+    mode = data.get("mode", "upgrade")
+    exclude_docker = bool(data.get("exclude_docker"))
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統維護-安裝作業系統更新", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    if not data.get("backup_confirmed"):
+        return jsonify({"ok": False, "message": "請先確認已經備份系統(例如 PVE 快照)"}), 400
+    run_id, err = utils_osupdate.start_upgrade(
+        mode, exclude_docker, data.get("plan_hash", ""), session.get("username"), request.remote_addr)
+    if err:
+        log_activity_entry("系統維護-安裝作業系統更新", False, detail=f"模式={mode}, 錯誤={err}")
+        return jsonify({"ok": False, "message": err}), 400
+    log_activity_entry("系統維護-安裝作業系統更新", True,
+                       detail=f"已開始, 模式={mode}, 不更新 Docker={'是' if exclude_docker else '否'}, 編號={run_id}")
+    return jsonify({"ok": True, "run_id": run_id})
+
+
+@app.route("/api/os-update/upgrade/<run_id>/log")
+@login_required
+def api_os_update_upgrade_log(run_id):
+    text = utils_osupdate.read_upgrade_log(run_id, tail_bytes=2 * 1024 * 1024)
+    if text is None:
+        return jsonify({"ok": False, "message": "找不到這次安裝的紀錄"}), 404
+    return jsonify({"ok": True, "log": text})
+
+
+@app.route("/api/os-update/reboot", methods=["POST"])
+@login_required
+def api_os_update_reboot():
+    data = request.json or {}
+    if not verify_current_user_password(data.get("password", "")):
+        log_activity_entry("系統維護-重新開機", False, detail="密碼驗證失敗,操作已取消")
+        return jsonify({"ok": False, "message": "密碼不正確,操作已取消"}), 403
+    err = utils_osupdate.start_reboot()
+    if err:
+        log_activity_entry("系統維護-重新開機", False, detail=err)
+        return jsonify({"ok": False, "message": err}), 400
+    log_activity_entry("系統維護-重新開機", True,
+                       detail=f"{utils_osupdate.REBOOT_DELAY_SECONDS} 秒後重新開機, 原因={'、'.join(utils_osupdate.get_reboot_info()['reasons']) or '使用者手動'}")
+    return jsonify({"ok": True, "delay": utils_osupdate.REBOOT_DELAY_SECONDS})
 
 
 @app.route("/api/os-update/check", methods=["POST"])

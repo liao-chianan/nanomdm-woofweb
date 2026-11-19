@@ -105,13 +105,15 @@
   </h2>
   <div class="collapse-body hidden">
   <p style="color:#6b7280; font-size:13px; margin:6px 0 12px 0;">
-    檢查這台主機的 Debian 套件有哪些可以更新,以及是否需要重新開機。這裡<strong>只檢查、不會安裝</strong>任何套件
-    (先更新套件清單,再模擬更新計算結果)。要安裝時請 SSH 進主機執行 <code>apt-get upgrade</code>,
-    建議先在 PVE 做快照,並避開上課時間:Docker 相關套件更新時,所有容器(含 MDM 服務)會重新啟動。
+    檢查這台主機的 Debian 套件有哪些可以更新,以及是否需要重新開機。「檢查更新」只會更新套件清單並模擬計算,不會安裝任何套件。
+    「安裝更新」會在主機背景執行,關閉網頁也不會中斷;安裝前請先在 PVE 做快照,並避開上課時間:
+    Docker 相關套件更新時,所有容器(含 MDM 服務)會重新啟動。安裝完不會自動重新開機。
   </p>
   <div id="os-update-reboot"></div>
   <div id="os-update-job"></div>
+  <div id="os-upgrade-run"></div>
   <div id="os-update-result"><p style="color:#9ca3af; font-size:13px;">載入中...</p></div>
+  <div id="os-upgrade-history" style="margin-top:10px;"></div>
 
   <h3 style="margin:22px 0 6px 0; font-size:15px;">套件鏡像站</h3>
   <p style="color:#6b7280; font-size:13px; margin:0 0 10px 0;">
@@ -147,6 +149,38 @@
     <p style="font-size:13px; color:#b42318; font-weight:600;">⚠️ 相關服務會自動重啟,執行過程中網頁介面可能會短暫無法連線。</p>
     <div class="field-row"><label>請輸入您目前登入的密碼以確認</label><input type="password" id="version-apply-password-input"></div>
     <button id="version-apply-confirm-btn" type="button" style="margin-top:10px;">確認執行</button>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="os-upgrade-modal">
+  <div class="modal-box" style="width:720px;">
+    <span class="modal-close" onclick="closeModal('os-upgrade-modal')">✕</span>
+    <h3>安裝作業系統更新</h3>
+    <div style="font-size:13px; margin-bottom:10px; line-height:1.9;">
+      <label style="display:block;"><input type="radio" name="os-upgrade-mode" value="upgrade" style="width:auto;" checked>
+        <strong>一般更新(建議)</strong>:更新已安裝的套件,需要時會安裝新的相依套件(例如新版核心),<strong>不會移除任何套件</strong></label>
+      <label style="display:block;"><input type="radio" name="os-upgrade-mode" value="full-upgrade" style="width:auto;">
+        <strong>完整更新(full-upgrade)</strong>:為了解決相依性,<span style="color:#991b1b;">可能會移除套件</span>,下方會列出會移除哪些</label>
+      <label style="display:block; margin-top:4px;"><input type="checkbox" id="os-upgrade-exclude-docker" style="width:auto;">
+        這次不更新 Docker 套件(避免容器重新啟動,之後再找時間更新)</label>
+    </div>
+    <div id="os-upgrade-plan"></div>
+    <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:13px; color:#991b1b;">
+      <div>・安裝在主機背景執行,不會跳出任何問題;設定檔有新版本時一律保留目前的設定。</div>
+      <div>・安裝途中請不要重新開機或關閉主機,否則可能需要 SSH 進主機修復。</div>
+      <div>・安裝完成後不會自動重新開機,需要時請用「重新開機」按鈕。</div>
+      <label style="display:block; margin-top:8px; font-weight:600;"><input type="checkbox" id="os-upgrade-backup-confirm" style="width:auto;"> 我已在 PVE 做好快照(或其他系統備份)</label>
+    </div>
+    <div class="field-row"><label>請輸入您目前登入的密碼以確認</label><input type="password" id="os-upgrade-password" autocomplete="current-password"></div>
+    <button id="os-upgrade-confirm-btn" class="danger" type="button" style="margin-top:10px;" disabled>開始安裝</button>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="os-upgrade-log-modal">
+  <div class="modal-box" style="width:860px;">
+    <span class="modal-close" onclick="closeModal('os-upgrade-log-modal')">✕</span>
+    <h3>安裝更新紀錄 <span id="os-upgrade-log-title" style="font-family:var(--mono); font-size:13px; color:#6b7280;"></span></h3>
+    <pre id="os-upgrade-log-content" style="max-height:520px; overflow:auto; background:#111827; color:#e5e7eb; font-size:11px; padding:10px; border-radius:6px; white-space:pre-wrap;"></pre>
   </div>
 </div>
 
