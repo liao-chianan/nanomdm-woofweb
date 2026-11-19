@@ -6,9 +6,13 @@
 
 ## 使用前提
 
-1. 作業系統：Debian，硬體為 x86/x64（測試平台為 Proxmox VE 虛擬機搭配 Debian 12）
-2. 操作環境需要具備一個**對外的域名**與網際網路連線，**80 與 443 port 需要對外開放**
-3. 具備Apple ASM/ABM 的管理帳號
+1. 作業系統：Debian，硬體為 x86/x64（測試平台為 Proxmox VE 虛擬機搭配 Debian 12 / 13）
+2. 硬體需求：建議  CPU 4核心 / RAM 8GB / 磁碟 64GB 以上 (以300台ipad為基準，磁碟建議用SSD)
+3. 具備一個**對外的域名**DNS ，指向這台主機的 **固定對外 IP**
+4. 網際網路連線，**80 與 443 port 需要對外開放**（80 port 也用於自動申請、續約 SSL 憑證）
+5. 具備**Apple ASM/ABM 的管理帳號**，具備新增 MDM 伺服器的權限（例如「管理者」角色）
+6. 一個學校**專用的 Apple ID**，用來申請 APNs 推播憑證。每年續約必須使用**同一個 Apple ID**，建議使用公務帳號
+7. GitHub 或 GitLab 帳號（透過 mdmcert.download 免費申請推播憑證時需要；有付費或開通 Apple Developer 帳號則不需要）
 
 ---
 
