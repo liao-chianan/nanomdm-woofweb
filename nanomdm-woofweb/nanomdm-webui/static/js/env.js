@@ -340,6 +340,8 @@ async function previewCleanup() {
     data.enrollment_queue_count !== null ? data.enrollment_queue_count : "未知";
   document.getElementById("cleanup-preview-pending-count").textContent =
     data.pending_queue_count !== null && data.pending_queue_count !== undefined ? data.pending_queue_count : "未知";
+  document.getElementById("cleanup-preview-kept-count").textContent =
+    data.kept_unfinished_count !== null && data.kept_unfinished_count !== undefined ? data.kept_unfinished_count : "未知";
 
   const breakdownEl = document.getElementById("cleanup-preview-breakdown");
   if (data.by_request_type && data.by_request_type.length > 0) {
@@ -360,7 +362,7 @@ async function executeCleanup() {
   const retentionDays = parseInt(document.getElementById("cleanup-retention-days-input").value, 10);
   const previewCount = document.getElementById("cleanup-preview-commands-count").textContent;
 
-  if (!confirm(`確定要清除這 ${previewCount} 筆指令紀錄嗎?此操作無法復原,超過保留天數仍未回應的指令也會一併清除。`)) {
+  if (!confirm(`確定要清除這 ${previewCount} 筆指令紀錄嗎?此操作無法復原,長時間沒連線的裝置還沒完成的指令也會一併清除。`)) {
     return;
   }
 
@@ -480,6 +482,91 @@ function refreshBrandingLogoPreview() {
   const favicon = document.querySelector('link[rel="icon"]');
   if (favicon) favicon.href = apiUrl("/favicon.ico") + bust; // 分頁圖示也跟著換
 }
+
+// ---- 電子書下載IP範圍限制 ----
+function addEbookIpRuleRow(value) {
+  const container = document.getElementById("ebook-ip-rules-container");
+  const row = document.createElement("div");
+  row.className = "ebook-ip-rule-row";
+  row.style.cssText = "display:flex; gap:8px; align-items:center; margin-bottom:6px;";
+  row.innerHTML = `
+    <input type="text" class="ebook-ip-rule-input" value="${escapeHtml(value || "")}" placeholder="例如 192.168.0.0/16" style="flex:1; font-family:var(--mono);">
+    <button class="danger ebook-remove-ip-rule-btn" type="button" style="font-size:12px;">移除</button>
+  `;
+  container.appendChild(row);
+}
+
+async function loadEbookSettings() {
+  const container = document.getElementById("ebook-ip-rules-container");
+  container.innerHTML = "載入中...";
+  const res = await apiFetch("/api/ebooks");
+  if (!res.ok || !res.data.ok) {
+    container.innerHTML = `<p style="color:#d64545;">載入失敗</p>`;
+    return;
+  }
+  const d = res.data;
+  document.getElementById("ebook-your-ip-display").textContent = d.your_ip;
+  document.getElementById("ebook-domain-display").textContent = d.domain || "(無法判斷網域,請在 .env 設定 SERVER_DOMAIN)";
+  document.getElementById("ebook-max-size-input").value = d.settings.max_size_mb;
+  container.innerHTML = "";
+  if (d.settings.ip_allowlist.length === 0) addEbookIpRuleRow("");
+  else d.settings.ip_allowlist.forEach((r) => addEbookIpRuleRow(r));
+
+  const statusEl = document.getElementById("ebook-nginx-status");
+  const btn = document.getElementById("ebook-nginx-install-btn");
+  if (d.nginx.installed) {
+    statusEl.innerHTML = `<span style="color:#1c7c3f;">✅ 已加入</span>`;
+    btn.classList.add("hidden");
+  } else if (d.nginx.error) {
+    statusEl.innerHTML = `<span style="color:#b42318;">❌ 無法檢查:${escapeHtml(d.nginx.error)}</span>`;
+    btn.classList.add("hidden");
+  } else {
+    statusEl.innerHTML = `<span style="color:#b45309;">⚠️ 還沒加入,iPad 目前下載不到電子書</span>`;
+    btn.classList.remove("hidden");
+  }
+}
+
+async function saveEbookSettings() {
+  const rules = Array.from(document.querySelectorAll(".ebook-ip-rule-input")).map((el) => el.value.trim()).filter((v) => v);
+  const maxSize = parseInt(document.getElementById("ebook-max-size-input").value, 10);
+  if (!maxSize || maxSize < 1 || maxSize > 2048) {
+    alert("檔案大小上限必須是 1~2048 之間的整數(MB)");
+    return;
+  }
+  if (rules.length === 0 && !confirm("IP 範圍清單是空的,代表不限制:只要知道網址,任何來源都可以下載電子書。確定要儲存嗎?")) return;
+  const btn = document.getElementById("ebook-settings-save-btn");
+  btn.disabled = true;
+  const res = await apiFetchJSON("/api/ebooks/settings", "POST", { max_size_mb: maxSize, ip_allowlist: rules });
+  btn.disabled = false;
+  if (res.ok && res.data.ok) {
+    alert(res.data.message + (res.data.settings.ip_allowlist.length === 0 ? "(目前為不限制 IP)" : ""));
+    loadEbookSettings();
+  } else {
+    alert("儲存失敗: " + ((res.data && res.data.message) || "未知錯誤"));
+  }
+}
+
+async function installEbookNginx() {
+  if (!confirm("即將修改 nginx 站台設定,加入電子書下載與上傳路徑。會先備份,測試通過才重新載入,失敗會自動還原。確定要加入嗎?")) return;
+  const btn = document.getElementById("ebook-nginx-install-btn");
+  btn.disabled = true;
+  btn.textContent = "處理中...";
+  const res = await apiFetchJSON("/api/ebooks/nginx/install", "POST", {});
+  btn.disabled = false;
+  btn.textContent = "加入 nginx 設定";
+  alert((res.ok && res.data.ok ? "" : "失敗: ") + ((res.data && res.data.message) || "未知錯誤"));
+  loadEbookSettings();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadEbookSettings();
+  document.getElementById("ebook-add-ip-rule-btn").addEventListener("click", () => addEbookIpRuleRow(""));
+  document.getElementById("ebook-settings-save-btn").addEventListener("click", saveEbookSettings);
+  document.getElementById("ebook-nginx-install-btn").addEventListener("click", installEbookNginx);
+  document.getElementById("ebook-ip-rules-container").addEventListener("click", (e) => {
+    if (e.target.classList.contains("ebook-remove-ip-rule-btn")) e.target.closest(".ebook-ip-rule-row").remove();
+  });
+});
 
 document.addEventListener("DOMContentLoaded", () => {
   loadEnvFields();

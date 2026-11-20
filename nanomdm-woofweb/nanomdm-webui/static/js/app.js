@@ -5,8 +5,33 @@ function renderFieldHelp(field) {
     : "";
 }
 
+// field.show_when = {field, value}:只有同一區塊裡另一個欄位等於指定值時才顯示(由 applyShowWhen 切換)
 function renderField(field, value) {
+  const html = renderFieldInner(field, value);
+  if (!field.show_when) return html;
+  return `<div class="show-when" data-show-field="${escapeHtml(field.show_when.field)}" data-show-value="${escapeHtml(field.show_when.value)}">${html}</div>`;
+}
+
+function applyShowWhen(container) {
+  container.querySelectorAll(".show-when").forEach((div) => {
+    const scope = div.parentElement;
+    const ctrl = scope.querySelector(`[data-field="${div.dataset.showField}"]`);
+    div.classList.toggle("hidden", !!ctrl && ctrl.value !== div.dataset.showValue);
+  });
+}
+
+function renderFieldInner(field, value) {
   const val = value !== undefined && value !== null ? value : field.default;
+  if (field.type === "url_lines") {
+    const text = Array.isArray(val) ? val.join("\n") : (val || "");
+    return `
+      <div class="field-row" style="align-items:flex-start;">
+        <label>${escapeHtml(field.label)}</label>
+        <textarea data-field="${escapeHtml(field.name)}" rows="6" spellcheck="false" placeholder="https://www.example.com" style="width:100%; font-family:monospace; font-size:12px;">${escapeHtml(text)}</textarea>
+      </div>
+      ${renderFieldHelp(field)}
+    `;
+  }
   if (field.type === "checkbox") {
     return `
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; padding:4px 0;">
@@ -62,9 +87,12 @@ function renderField(field, value) {
     `;
   }
   if (field.type === "select") {
-    const options = field.options.map((opt) =>
-      `<option value="${escapeHtml(opt)}" ${opt === val ? "selected" : ""}>${escapeHtml(opt)}</option>`
-    ).join("");
+    // options 可以是字串,或 {value, label}(存檔用 value、畫面顯示 label)
+    const options = field.options.map((opt) => {
+      const v = typeof opt === "object" ? opt.value : opt;
+      const l = typeof opt === "object" ? opt.label : opt;
+      return `<option value="${escapeHtml(v)}" ${v === val ? "selected" : ""}>${escapeHtml(l)}</option>`;
+    }).join("");
     return `
       <div class="field-row">
         <label>${escapeHtml(field.label)}</label>
@@ -102,6 +130,7 @@ function readFieldValue(container, field) {
   }
   const el = container.querySelector(`[data-field="${field.name}"]`);
   if (!el) return field.default;
+  if (field.type === "url_lines") return el.value.split("\n").map((l) => l.trim()).filter((l) => l);
   if (field.type === "checkbox") return el.checked;
   return el.value;
 }

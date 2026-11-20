@@ -1767,23 +1767,46 @@ def get_pending_status_query_types(mysql_cfg, db_password):
     return pending
 
 
-def _cleanup_where_clause(retention_days):
-    """清理條件:建立時間超過保留天數的指令一律清除,包含還沒收到裝置回應的。
-
-    超過保留天數還沒回應,代表裝置長時間沒有連線(離線、清除重置、不再使用等),
-    由管理者自行確認裝置狀況、需要時重新派送;不再為了等這些裝置而無限期保留紀錄,
-    避免資料表一直變大。背景排程的狀態查詢(DeviceInformation等)本來就會定期重送,
-    刪掉舊的不影響之後的查詢。
-    """
+def _cleanup_cutoff(retention_days):
     retention_days = int(retention_days)  # 防止SQL injection,確定是整數才拼進SQL
-    return f"created_at < (NOW() - INTERVAL {retention_days} DAY)"
+    return f"(NOW() - INTERVAL {retention_days} DAY)"
+
+
+# 佇列裡「還沒完成」的指令:沒有回應,或回應是 NotNow(裝置之後還會再處理、再回報一次)
+_UNFINISHED_QUEUE_SQL = "q.active = 1 AND (r.status IS NULL OR r.status = 'NotNow')"
+
+
+def _cleanup_where_clause(retention_days):
+    """清理條件(套用在 commands 資料表上):建立時間超過保留天數,而且
+    沒有任何「近期有連線的裝置」還在等這個指令完成。
+
+    - 所有裝置都已回應(Acknowledged/Error/CommandFormatError)的指令,超過保留天數就清除。
+    - 還沒完成的指令(沒有回應或回應 NotNow),只有在排了這個指令的裝置都已經超過保留天數沒連線
+      (enrollments.last_seen_at 也早於保留期限)時才清除,例如離線、清除重置、報廢的裝置,
+      避免資料表一直變大。這類裝置之後上線不會再收到這些指令,需要時請重新派送。
+    - 只要有一台近期有連線的裝置還沒完成,就保留。NanoMDM 沒有記錄「指令已送達裝置」,
+      裝置可能已經拿到指令、只是還沒回報;這時候刪掉指令,裝置回報時 NanoMDM 寫入
+      command_results 會觸發外鍵錯誤(Error 1452)回 500,裝置會一直重送同一個回報,
+      之後的指令全部卡住。
+    """
+    cutoff = _cleanup_cutoff(retention_days)
+    return (
+        f"commands.created_at < {cutoff} AND NOT EXISTS ("
+        "SELECT 1 FROM enrollment_queue q "
+        "JOIN enrollments e ON e.id = q.id "
+        "LEFT JOIN command_results r ON r.id = q.id AND r.command_uuid = q.command_uuid "
+        f"WHERE q.command_uuid = commands.command_uuid AND {_UNFINISHED_QUEUE_SQL} "
+        f"AND e.last_seen_at >= {cutoff})"
+    )
 
 
 def preview_command_cleanup(mysql_cfg, db_password, retention_days):
     """預覽清理效果,只查COUNT,不會真的刪除任何資料。
     回傳dict: {ok, commands_count, command_results_count, enrollment_queue_count,
                pending_queue_count, by_request_type: [(request_type, count), ...], error}
-    pending_queue_count是會被清除的佇列紀錄中,「還沒收到裝置回應」的筆數(裝置之後上線也不會再收到)。
+    pending_queue_count是會被清除的佇列紀錄中,「還沒完成」的筆數(都是超過保留天數沒連線的裝置,
+    裝置之後上線也不會再收到)。
+    kept_unfinished_count是超過保留天數、但因為近期有連線的裝置還沒完成而保留下來的指令數。
     command_results_count/enrollment_queue_count是「會被cascade一併刪除」的估計筆數,
     不是這兩個表本身有獨立的刪除條件。
     """
@@ -1820,12 +1843,18 @@ def preview_command_cleanup(mysql_cfg, db_password, retention_days):
     enrollment_queue_count = int(out3.strip() or 0) if rc3 == 0 else None
 
     rc5, out5, _ = run_query(
-        f"SELECT COUNT(*) FROM enrollment_queue eq "
-        f"LEFT JOIN command_results cr ON cr.command_uuid = eq.command_uuid AND cr.id = eq.id "
-        f"WHERE cr.id IS NULL AND eq.active = 1 AND eq.command_uuid IN "
+        f"SELECT COUNT(*) FROM enrollment_queue q "
+        f"LEFT JOIN command_results r ON r.command_uuid = q.command_uuid AND r.id = q.id "
+        f"WHERE {_UNFINISHED_QUEUE_SQL} AND q.command_uuid IN "
         f"(SELECT command_uuid FROM commands WHERE {where_clause});"
     )
     pending_queue_count = int(out5.strip() or 0) if rc5 == 0 else None
+
+    rc6, out6, _ = run_query(
+        f"SELECT COUNT(*) FROM commands WHERE commands.created_at < {_cleanup_cutoff(retention_days)} "
+        f"AND NOT ({where_clause});"
+    )
+    kept_unfinished_count = int(out6.strip() or 0) if rc6 == 0 else None
 
     rc4, out4, err4 = run_query(
         f"SELECT request_type, COUNT(*) FROM commands WHERE {where_clause} "
@@ -1846,12 +1875,13 @@ def preview_command_cleanup(mysql_cfg, db_password, retention_days):
         "command_results_count": command_results_count,
         "enrollment_queue_count": enrollment_queue_count,
         "pending_queue_count": pending_queue_count,
+        "kept_unfinished_count": kept_unfinished_count,
         "by_request_type": by_request_type,
     }
 
 
 def execute_command_cleanup(mysql_cfg, db_password, retention_days):
-    """實際執行清理:刪除commands裡超過保留天數的紀錄,command_results/enrollment_queue
+    """實際執行清理:刪除commands裡符合 _cleanup_where_clause 的紀錄(跟預覽同一個條件),command_results/enrollment_queue
     會透過資料庫本身的ON DELETE CASCADE自動一併清除,不需要另外下刪除指令。
     回傳dict: {ok, deleted_count, error}
     """

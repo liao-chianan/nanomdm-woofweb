@@ -18,7 +18,8 @@
         <th>群組名稱</th>
         <th>描述</th>
         <th>裝置數量</th>
-        <th>綁定的軟體數量</th>
+        <th>綁定軟體</th>
+        <th>電子書</th>
         <th>註冊檔</th>
         <th>描述檔</th>
         <th>群組命令</th>
@@ -28,9 +29,73 @@
       </tr>
     </thead>
     <tbody id="groups-tbody">
-      <tr><td colspan="10">載入中...</td></tr>
+      <tr><td colspan="11">載入中...</td></tr>
     </tbody>
   </table>
+</div>
+
+<div class="panel" id="ebook-library-panel">
+  <h2>電子書</h2>
+  <p style="color:#6b7280; font-size:13px; margin:6px 0 12px;">
+    上傳 PDF 或 EPUB 電子書,再到上方群組的「電子書」數字勾選要派送的群組,iPad 會把書放進「書籍」App。
+    檔名由系統產生(隨機長字串),請填寫書名方便辨識;檔案大小上限與下載 IP 範圍請到「系統參數 → 電子書下載IP範圍限制」設定。
+  </p>
+  <p style="color:#6b7280; font-size:12px; margin:0 0 12px;">
+    檔案存放位置:<code>{{ ebook_files_dir }}</code>(清單:<code>{{ ebook_list_path }}</code>)。
+    刪除電子書會一併刪除伺服器上的檔案;已用空間可在「系統狀態 → 磁碟分析」查看。請不要直接在這個資料夾新增或刪除檔案,一律透過這個頁面管理。
+  </p>
+  <div id="ebook-library-notice"></div>
+  <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px;">
+    <div class="field-row" style="margin:0; flex:0 0 auto;">
+      <label>電子書檔案(PDF / EPUB)</label>
+      <input type="file" id="ebook-upload-file" accept=".pdf,.epub,application/pdf,application/epub+zip" style="font-size:12px;">
+    </div>
+    <div class="field-row" style="margin:0; flex:1; min-width:220px;">
+      <label>書名</label>
+      <input type="text" id="ebook-upload-title" maxlength="100" placeholder="例如:三年級自然科學習單">
+    </div>
+    <button id="ebook-upload-btn" type="button">上傳</button>
+  </div>
+  <div id="ebook-upload-progress" class="hidden" style="font-size:12px; color:#2c4f96; margin-bottom:10px;"></div>
+  <table class="data-table">
+    <thead>
+      <tr><th>書名</th><th>格式</th><th>大小</th><th>上傳時間</th><th>綁定群組</th><th>修改書名</th><th>刪除</th></tr>
+    </thead>
+    <tbody id="ebook-library-tbody"><tr><td colspan="7">載入中...</td></tr></tbody>
+  </table>
+</div>
+
+<!-- 群組電子書 Modal -->
+<div class="modal-overlay hidden" id="group-ebooks-modal">
+  <div class="modal-box" style="width:640px; max-width:calc(100vw - 32px);">
+    <span class="modal-close" onclick="closeGroupEbooksModal()">✕</span>
+    <h3>群組電子書 - <span id="group-ebooks-modal-title"></span></h3>
+    <div id="group-ebooks-notice"></div>
+    <p style="color:#9ca3af; font-size:12px; margin:0 0 6px;">
+      勾選 = 這個群組綁定的電子書。儲存後,群組裡每一台已註冊的 iPad 會收到新勾選的電子書(放進「書籍」App);
+      之後新註冊或清除重新註冊到這個群組的 iPad 也會自動派送。取消勾選時會詢問是否一併從 iPad 移除。
+      <span id="group-ebooks-change-count" style="color:#b45309; margin-left:4px;"></span>
+    </p>
+    <div id="group-ebooks-list" style="max-height:420px; overflow-y:auto; border:1px solid var(--border-color); border-radius:6px; padding:0 10px;">載入中...</div>
+    <div id="group-ebooks-progress" style="margin-top:10px; max-height:220px; overflow-y:auto;"></div>
+    <div class="modal-actions">
+      <button class="secondary" type="button" onclick="closeGroupEbooksModal()">取消</button>
+      <button id="group-ebooks-save-btn" type="button" disabled>儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 取消勾選電子書:詢問是否從裝置移除 -->
+<div class="modal-overlay hidden" id="group-ebooks-remove-modal">
+  <div class="modal-box" style="width:520px; max-width:calc(100vw - 32px);">
+    <h3>取消勾選的電子書</h3>
+    <div id="group-ebooks-remove-text" style="font-size:13px; line-height:1.7; white-space:pre-line;"></div>
+    <div class="modal-actions" style="flex-wrap:wrap;">
+      <button class="secondary" type="button" id="group-ebooks-remove-cancel-btn">返回</button>
+      <button class="secondary" type="button" id="group-ebooks-remove-keep-btn">只取消綁定,保留 iPad 上的書</button>
+      <button class="danger" type="button" id="group-ebooks-remove-yes-btn">一併從 iPad 移除</button>
+    </div>
+  </div>
 </div>
 
 <!-- 新增/編輯群組 Modal -->
@@ -220,4 +285,5 @@
   window.COMMAND_DEFS = {{ command_defs | tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/groups.js') }}?v={{ static_version }}"></script>
+<script src="{{ url_for('static', filename='js/groups_ebooks.js') }}?v={{ static_version }}"></script>
 {% endblock %}

@@ -240,6 +240,11 @@ function renderPayloadsSection(payloadsData, filename) {
     container.appendChild(wrapper);
   });
 
+  applyShowWhen(container);
+  container.addEventListener("change", (e) => {
+    if (e.target.matches("select[data-field]")) applyShowWhen(container);
+  });
+
   container.querySelectorAll(".payload-toggle").forEach((cb) => {
     cb.addEventListener("change", () => {
       const fieldsDiv = container.querySelector(`.payload-fields[data-payload-key="${cb.dataset.payloadKey}"]`);

@@ -490,6 +490,7 @@ async function confirmApplyUpdate() {
     alert(res.data.message);
     loadCurrentVersion();
     loadComposePlan();
+    loadPostUpdateTasks();
   }
 }
 
@@ -1236,6 +1237,47 @@ async function applyOsMirror() {
   }
   loadOsUpdateStatus();
 }
+
+// ---- 更新後待處理事項(例如電子書的 nginx 設定):由管理者按按鈕執行,不在背景自動處理 ----
+let postUpdateTasks = [];
+
+async function loadPostUpdateTasks() {
+  const box = document.getElementById("post-update-tasks");
+  const res = await apiFetch("/api/version/post-update-tasks");
+  postUpdateTasks = res.ok && res.data.ok ? res.data.tasks : [];
+  if (!postUpdateTasks.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = `<div style="font-weight:600; color:#b45309; margin-bottom:6px;">⚠️ 更新後待處理事項</div>` +
+    postUpdateTasks.map((t, i) => `
+      <div style="font-size:13px; padding:6px 0; ${i ? "border-top:1px solid #f5d0a9;" : ""}">
+        <div style="font-weight:600;">${escapeHtml(t.title)}</div>
+        <div style="color:#6b7280; font-size:12px; margin:2px 0 6px;">${escapeHtml(t.description)}</div>
+        ${t.error ? `<div style="color:#b42318; font-size:12px; margin-bottom:6px;">無法自動處理:${escapeHtml(t.error)}</div>` : ""}
+        ${t.can_apply ? `<button type="button" class="post-update-task-btn" data-index="${i}" style="font-size:12px;">${escapeHtml(t.button)}</button>` : ""}
+      </div>`).join("");
+  box.classList.remove("hidden");
+}
+
+async function runPostUpdateTask(index, btn) {
+  const t = postUpdateTasks[index];
+  if (!t || !confirm(`確定要執行「${t.title}」嗎?\n\n${t.description}`)) return;
+  btn.disabled = true;
+  btn.textContent = "處理中...";
+  const res = await apiFetchJSON(t.action, "POST", {});
+  alert((res.ok && res.data.ok ? "" : "失敗: ") + ((res.data && res.data.message) || "未知錯誤"));
+  loadPostUpdateTasks();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadPostUpdateTasks();
+  document.getElementById("post-update-tasks").addEventListener("click", (e) => {
+    const btn = e.target.closest(".post-update-task-btn");
+    if (btn) runPostUpdateTask(parseInt(btn.dataset.index, 10), btn);
+  });
+});
 
 document.addEventListener("DOMContentLoaded", () => {
   loadCurrentVersion();

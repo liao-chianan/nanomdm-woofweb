@@ -50,6 +50,38 @@ server {
     
     
 
+    # BEGIN nanomdm-webui ebooks (managed by nanomdm-webui)
+    # iPad 下載電子書:先交給 WebUI 檢查來源 IP,通過後由下面的 internal 位置送出檔案
+    location ^~ /ebooks/ {
+        proxy_pass http://127.0.0.1:5566/ebook-download/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    # 只接受 WebUI 回傳的 X-Accel-Redirect,外部直接連這個路徑會得到 404;只提供下載,不執行任何東西
+    location ^~ /_woofweb_ebook_files/ {
+        internal;
+        alias /opt/nanomdm-deployment/ebooks/files/;
+        autoindex off;
+        types { application/pdf pdf; application/epub+zip epub; }
+        default_type application/octet-stream;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    }
+    # 上傳電子書:檔案大小上限由 WebUI 的「電子書下載IP範圍限制」設定控制,nginx 這裡不另外限制
+    location = /miniweb/api/ebooks/upload {
+        client_max_body_size 0;
+        proxy_pass http://127.0.0.1:5566/api/ebooks/upload;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /miniweb;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+    # END nanomdm-webui ebooks
+
     listen 443 ssl; # managed by Certbot
     ssl_certificate /etc/letsencrypt/live/<你的站台domain name>/fullchain.pem; # managed by Certbot
     ssl_certificate_key /etc/letsencrypt/live/<你的站台domain name>/privkey.pem; # managed by Certbot

@@ -4,7 +4,7 @@ NanoMDM Webhook 自動化伺服器
 1. 接收 NanoMDM 的 mdm.Authenticate 事件，解析序號並暫存（UDID -> 序號）
 2. 接收 mdm.TokenUpdate 事件（代表裝置剛完成註冊），從暫存取出序號
 3. 用序號查 devices.csv 取得裝置名稱與群組
-4. 依序送出：改名指令 -> CA信任 -> baseline profile -> 群組描述檔 -> 鎖定畫面資訊 -> 群組專屬 App 安裝
+4. 依序送出：改名指令 -> CA信任 -> baseline profile -> 群組描述檔 -> 鎖定畫面資訊 -> 群組專屬 App 安裝 -> 群組電子書
 """
 import http.server
 import json
@@ -45,6 +45,30 @@ SCEP_CA_PATH = os.environ.get("SCEP_CA_PATH", "/opt/nanomdm-deployment/scep-depo
 LOCKSCREEN_RENDER_PYTHON = os.environ.get("LOCKSCREEN_RENDER_PYTHON", "/opt/nanomdm-webui/venv/bin/python3")
 LOCKSCREEN_RENDER_SCRIPT = os.environ.get("LOCKSCREEN_RENDER_SCRIPT", "/opt/nanomdm-webui/utils_lockscreen.py")
 LOCKSCREEN_SETTINGS = os.environ.get("LOCKSCREEN_SETTINGS", "/opt/nanomdm-deployment/lockscreen.json")
+# 電子書:清單與檔案由 webui 的 utils_ebooks.py 管理(兩邊路徑要一致);iPad 用
+# https://<SERVER_DOMAIN>/ebooks/<檔名> 下載,nginx 轉給 webui 檢查來源 IP 後送出檔案
+EBOOKS_JSON = os.environ.get("EBOOKS_JSON", "/opt/nanomdm-deployment/ebooks/ebooks.json")
+EBOOK_FILES_DIR = os.environ.get("EBOOK_FILES_DIR", "/opt/nanomdm-deployment/ebooks/files")
+SERVER_DOMAIN = os.environ.get("SERVER_DOMAIN", "").strip()
+
+
+def _server_domain():
+    """.env 沒有 SERVER_DOMAIN 時,跟 webui 一樣改用 nginx 站台設定(有 ssl_certificate 的那份)的 server_name"""
+    if SERVER_DOMAIN:
+        return SERVER_DOMAIN
+    import glob
+    import re
+    for path in sorted(glob.glob("/etc/nginx/sites-enabled/*")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if re.search(r"^\s*ssl_certificate\s", text, re.M):
+            m = re.search(r"^\s*server_name\s+([^;\s]+)", text, re.M)
+            if m:
+                return m.group(1)
+    return ""
 LOG_PATH = "/opt/nanomdm-deployment/webhook-automation.log"
 # 日誌依大小輪替:超過 LOG_MAX_BYTES 就改名成 .1(舊的 .1 變 .2,依此類推),最多保留 LOG_BACKUP_COUNT 份,
 # 加上目前寫入中的檔案,總共不會超過約 (LOG_BACKUP_COUNT + 1) x LOG_MAX_BYTES(50MB x 4 = 200MB)
@@ -253,6 +277,52 @@ def load_group_mobileconfig(group: str):
     except Exception as e:
         log(f"讀取群組 {group} 的描述檔失敗: {e}")
         return None
+
+
+def build_group_ebook_plists(group: str) -> list:
+    """群組綁定的電子書 -> InstallMedia 指令。參數格式要跟 webui utils_ebooks.install_media_params 一致。"""
+    if not group:
+        return []
+    try:
+        with open(GROUPS_JSON, encoding="utf-8") as f:
+            group_data = json.load(f).get(group)
+        ids = (group_data.get("ebooks") or []) if isinstance(group_data, dict) else []
+        if not ids:
+            return []
+        domain = _server_domain()
+        if not domain:
+            log(f"群組 {group} 綁定 {len(ids)} 本電子書,但判斷不出伺服器網域(.env 的 SERVER_DOMAIN 或 nginx 的 server_name),略過")
+            return []
+        with open(EBOOKS_JSON, encoding="utf-8") as f:
+            books = {b.get("id"): b for b in json.load(f).get("books", [])}
+    except Exception as e:
+        log(f"讀取群組 {group} 的電子書設定失敗: {e}")
+        return []
+
+    plists = []
+    for book_id in ids:
+        book = books.get(book_id)
+        if not book or book.get("kind") not in ("pdf", "epub"):
+            log(f"群組 {group} 綁定的電子書 {book_id} 已不在清單裡,略過")
+            continue
+        name = f"{book_id}.{book['kind']}"
+        if not os.path.exists(os.path.join(EBOOK_FILES_DIR, name)):
+            log(f"電子書檔案 {name} 不存在,略過")
+            continue
+        payload = {
+            "Command": {
+                "RequestType": "InstallMedia",
+                "MediaType": "Book",
+                "MediaURL": f"https://{domain}/ebooks/{name}",
+                "PersistentID": f"woofweb.ebook.{book_id}",
+                "Kind": book["kind"],
+                "Version": "1",
+                "Title": book.get("title") or name,
+            },
+            "CommandUUID": str(uuid.uuid4()).upper(),
+        }
+        plists.append((book.get("title") or name, plistlib.dumps(payload).decode("utf-8")))
+    return plists
 
 
 def enqueue_command(udid: str, plist_content: str):
@@ -542,6 +612,14 @@ def process_enrollment(udid: str):
         time.sleep(1)
         enqueue_command(udid, build_install_app_plist(adam_id))
         time.sleep(2)
+
+    # 5. 群組電子書(放進「書籍」App)
+    ebook_plists = build_group_ebook_plists(group)
+    if ebook_plists:
+        log(f"群組 {group} 派送 {len(ebook_plists)} 本電子書: {[t for t, _ in ebook_plists]}")
+    for _, ebook_plist in ebook_plists:
+        enqueue_command(udid, ebook_plist)
+        time.sleep(1)
 
     log(f"裝置 {serial} ({device_name}) 自動化流程完成")
 

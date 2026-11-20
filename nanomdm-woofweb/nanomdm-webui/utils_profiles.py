@@ -11,6 +11,7 @@ import plistlib
 import re
 import tempfile
 import uuid
+from urllib.parse import urlsplit
 
 import utils
 import utils_signing
@@ -170,6 +171,41 @@ PAYLOAD_SCHEMA = {
                     {"bundle_id": "com.apple.MobileStore", "label": "iTunes Store"},
                     {"bundle_id": "com.apple.Photo-Booth", "label": "Photo Booth"},
                 ],
+            },
+        ],
+    },
+    "webfilter": {
+        "label": "網頁內容過濾 (需裝置為 Supervised 狀態)",
+        "payload_type": "com.apple.webcontent-filter",
+        "singular": True,
+        "help": "限制 Safari 與使用系統網頁引擎的 App(例如 iOS 版 Chrome)可以開哪些網站。"
+                "YouTube 這類自己連網路的 App 不受影響,要用「取用限制」隱藏 App。"
+                "一台裝置同時只能有一份網頁內容過濾設定,請不要讓同一台裝置所在的多份描述檔都勾選這個項目。",
+        "fields": [
+            {
+                "name": "Mode", "label": "過濾模式", "type": "select", "default": "denylist",
+                "options": [
+                    {"value": "denylist", "label": "限制成人內容 + 黑名單"},
+                    {"value": "allowlist", "label": "僅允許白名單"},
+                ],
+            },
+            {
+                "name": "DenyListURLs", "label": "封鎖網址(一行一個)", "type": "url_lines", "default": [],
+                "show_when": {"field": "Mode", "value": "denylist"},
+                "help": "例如 https://www.youtube.com。沒有寫 http:// 或 https:// 的會自動補上 https://。"
+                        "不支援萬用字元:*.youtube.com 會自動改成 youtube.com,其他位置有 * 的行會被略過。"
+                        "建議設定後實際到裝置上測試,確認子網域(例如 m.youtube.com)也有擋到。",
+            },
+            {
+                "name": "PermittedURLs", "label": "一律允許網址(一行一個,選填)", "type": "url_lines", "default": [],
+                "show_when": {"field": "Mode", "value": "denylist"},
+                "help": "被成人內容過濾誤擋、但教學需要的網站可以填在這裡。",
+            },
+            {
+                "name": "AllowListURLs", "label": "允許網址(一行一個)", "type": "url_lines", "default": [],
+                "show_when": {"field": "Mode", "value": "allowlist"},
+                "help": "只有這些網站可以開啟,會顯示成 Safari 的書籤。很多網站還會連到其他網域"
+                        "(例如 Google 登入、圖片或影片的 CDN),漏填的話網頁可能顯示不完整,需要實際測試後補上。",
             },
         ],
     },
@@ -490,6 +526,33 @@ def _restore_bytes_from_json(obj):
     return obj
 
 
+def _schema_key_for(payload, type_to_key):
+    """找出 payload 對應的編輯器項目。網頁內容過濾只認得內建過濾器(BuiltIn),
+    第三方過濾 App(Plugin)的設定編輯器不認得,原樣保留不動。"""
+    key = type_to_key.get(payload.get("PayloadType"))
+    if key == "webfilter" and payload.get("FilterType", "BuiltIn") != "BuiltIn":
+        return None
+    return key
+
+
+def _read_webfilter_fields(payload):
+    """新舊鍵名都要認得:iOS 14 以前叫 WhitelistedBookmarks / BlacklistedURLs"""
+    if "AllowListBookmarks" in payload or "WhitelistedBookmarks" in payload:
+        bookmarks = payload.get("AllowListBookmarks") or payload.get("WhitelistedBookmarks") or []
+        return {
+            "Mode": "allowlist",
+            "AllowListURLs": [str(b.get("URL", "")) for b in bookmarks if b.get("URL")],
+            "DenyListURLs": [],
+            "PermittedURLs": [],
+        }
+    return {
+        "Mode": "denylist",
+        "AllowListURLs": [],
+        "DenyListURLs": list(payload.get("DenyListURLs") or payload.get("BlacklistedURLs") or []),
+        "PermittedURLs": list(payload.get("PermittedURLs") or []),
+    }
+
+
 def read_mobileconfig_as_form(dir_path, filename):
     """讀取既有的 .mobileconfig,盡量對應回 PAYLOAD_SCHEMA 的表單結構。
     無法辨識的 payload 類型會原樣保留在 unmanaged_payloads,存檔時會照樣寫回去,
@@ -511,13 +574,16 @@ def read_mobileconfig_as_form(dir_path, filename):
     type_to_key = {v["payload_type"]: k for k, v in PAYLOAD_SCHEMA.items()}
 
     for payload in parsed.get("PayloadContent", []):
-        ptype = payload.get("PayloadType")
-        schema_key = type_to_key.get(ptype)
+        schema_key = _schema_key_for(payload, type_to_key)
         if not schema_key:
             unmanaged_payloads.append(_sanitize_bytes_for_json(payload))
             continue
 
         schema = PAYLOAD_SCHEMA[schema_key]
+        if schema_key == "webfilter":
+            payloads_form[schema_key] = {"enabled": True, "fields": _read_webfilter_fields(payload),
+                                         "uuid": payload.get("PayloadUUID")}
+            continue
         fields_out = {}
         # SCEP 的實際設定值(URL/Challenge/Subject等)巢狀在 PayloadContent 子字典裡,
         # 其他 payload 類型(WiFi/MDM/Restrictions等)是直接攤平在 payload 本身,結構不同要分開處理
@@ -687,6 +753,88 @@ def _build_restrictions_payload(fields, payload_uuid, identifier_prefix):
     return payload
 
 
+_URL_SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def normalize_filter_urls(lines):
+    """一行一個網址:去掉空白行與重複,沒寫 http(s):// 的補上 https://。
+    內建網頁過濾不支援萬用字元:開頭是 *. 的改成網域本身,其他位置有 * 的整行略過。
+    回傳 (urls, problems),problems = {"invalid": [...], "wildcard_stripped": [...], "wildcard_skipped": [...]},
+    內容是使用者原本輸入的那一行。"""
+    urls = []
+    problems = {"invalid": [], "wildcard_stripped": [], "wildcard_skipped": []}
+    for raw in lines or []:
+        original = str(raw).strip()
+        line = original
+        if not line:
+            continue
+        scheme_match = _URL_SCHEME_RE.match(line)
+        scheme = scheme_match.group(0) if scheme_match else "https://"
+        rest = line[len(scheme_match.group(0)):] if scheme_match else line
+        if rest.startswith("*."):
+            rest = rest[2:]
+            problems["wildcard_stripped"].append(original)
+        if "*" in rest:
+            if problems["wildcard_stripped"] and problems["wildcard_stripped"][-1] == original:
+                problems["wildcard_stripped"].pop()
+            problems["wildcard_skipped"].append(original)
+            continue
+        line = scheme + rest
+        try:
+            host = urlsplit(line).hostname
+        except ValueError:
+            host = None
+        if re.search(r"\s", line) or not host or "." not in host:
+            if problems["wildcard_stripped"] and problems["wildcard_stripped"][-1] == original:
+                problems["wildcard_stripped"].pop()
+            problems["invalid"].append(original)
+            continue
+        if line not in urls:
+            urls.append(line)
+    return urls, problems
+
+
+def _build_webfilter_payload(fields, payload_uuid, identifier_prefix):
+    payload = {
+        "PayloadType": "com.apple.webcontent-filter",
+        "PayloadIdentifier": f"{identifier_prefix}.webfilter",
+        "PayloadUUID": payload_uuid,
+        "PayloadVersion": 1,
+        "PayloadDisplayName": "網頁內容過濾",
+        "PayloadDescription": "限制可以開啟的網站",
+        "FilterType": "BuiltIn",
+    }
+    if fields.get("Mode") == "allowlist":
+        urls = normalize_filter_urls(fields.get("AllowListURLs"))[0]
+        payload["AllowListBookmarks"] = [{"URL": u, "Title": urlsplit(u).hostname} for u in urls]
+    else:
+        payload["AutoFilterEnabled"] = True
+        deny = normalize_filter_urls(fields.get("DenyListURLs"))[0]
+        permitted = normalize_filter_urls(fields.get("PermittedURLs"))[0]
+        if deny:
+            payload["DenyListURLs"] = deny
+        if permitted:
+            payload["PermittedURLs"] = permitted
+    return payload
+
+
+def _webfilter_warnings(fields):
+    warnings = []
+    names = ("AllowListURLs",) if fields.get("Mode") == "allowlist" else ("DenyListURLs", "PermittedURLs")
+    for name in names:
+        problems = normalize_filter_urls(fields.get(name))[1]
+        if problems["wildcard_stripped"]:
+            warnings.append(f"網頁內容過濾不支援萬用字元,已改成網域本身: {', '.join(problems['wildcard_stripped'][:5])}")
+        if problems["wildcard_skipped"]:
+            warnings.append(f"網頁內容過濾不支援萬用字元,這些行已略過: {', '.join(problems['wildcard_skipped'][:5])}")
+        if problems["invalid"]:
+            warnings.append(f"網頁內容過濾有看起來不是網址的行,已略過: {', '.join(problems['invalid'][:5])}")
+    if fields.get("Mode") == "allowlist" and not normalize_filter_urls(fields.get("AllowListURLs"))[0]:
+        warnings.append("網頁內容過濾選了「僅允許白名單」但沒有填任何網址,裝置上的網站會全部打不開。")
+    warnings.append("網頁內容過濾需要裝置為 Supervised 狀態才會生效。")
+    return warnings
+
+
 def _normalize_home_screen_item(item, allow_folder):
     """只保留 Apple 文件定義的欄位。資料夾不能再包資料夾,第一版也不開放放進 Dock。"""
     item_type = (item or {}).get("Type")
@@ -736,6 +884,7 @@ _BUILDERS = {
     "webclip": _build_webclip_payload,
     "shareddevice": _build_shareddevice_payload,
     "restrictions": _build_restrictions_payload,
+    "webfilter": _build_webfilter_payload,
     "homescreen": _build_homescreen_payload,
 }
 
@@ -770,7 +919,7 @@ def build_mobileconfig(top_level, payloads, unmanaged_payloads=None, existing_uu
             warnings.append("MDM payload 勾選了「使用 SCEP 身份憑證」,但這份描述檔沒有包含 SCEP payload,IdentityCertificateUUID 不會被設定。")
         payload_contents.append(_build_mdm_payload(mdm_fields, get_uuid("mdm"), identifier_prefix, scep_uuid))
 
-    for key in ("shareddevice", "restrictions", "homescreen"):
+    for key in ("shareddevice", "restrictions", "webfilter", "homescreen"):
         if payloads.get(key, {}).get("enabled"):
             builder = _BUILDERS[key]
             payload_contents.append(builder(payloads[key]["fields"], get_uuid(key), identifier_prefix))
@@ -783,6 +932,8 @@ def build_mobileconfig(top_level, payloads, unmanaged_payloads=None, existing_uu
                 conflicts = sorted(blocked.intersection(bundle_ids))
                 if conflicts:
                     warnings.append(f"主畫面排列裡有已被隱藏的 App: {', '.join(conflicts)}。請重新開啟「主畫面排列」確認。")
+            if key == "webfilter":
+                warnings.extend(_webfilter_warnings(payloads[key]["fields"]))
             if key == "shareddevice":
                 warnings.append("共用裝置資訊 (SharedDeviceConfiguration) 需要裝置為 Supervised 狀態才能安裝成功,非 Supervised 裝置安裝這份描述檔可能會被判定為無效。")
 
@@ -926,7 +1077,7 @@ def get_existing_uuids(dir_path, filename):
     type_to_key = {v["payload_type"]: k for k, v in PAYLOAD_SCHEMA.items()}
     result = {"_top": parsed.get("PayloadUUID")}
     for payload in parsed.get("PayloadContent", []):
-        key = type_to_key.get(payload.get("PayloadType"))
+        key = _schema_key_for(payload, type_to_key)
         if not key:
             continue
         schema = PAYLOAD_SCHEMA[key]

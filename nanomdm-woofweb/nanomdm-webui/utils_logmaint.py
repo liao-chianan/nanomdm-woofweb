@@ -238,6 +238,14 @@ def get_storage_usage(cfg, db_password, cache_seconds=60):
                       "bytes": sum(os.path.getsize(p) for p in files) if files else 0,
                       "note": f"{len(files)} 個檔案,超過 50MB 自動輪替,最多保留 3 份舊檔"})
 
+    # 電子書(群組派送到「書籍」App 的 PDF / EPUB,由管理者上傳,不會自動清除)
+    import utils_ebooks
+    book_count = len(utils_ebooks.list_books())
+    items.append({"name": "電子書", "path": utils_ebooks.EBOOK_FILES_DIR,
+                  "bytes": _dir_disk_bytes([utils_ebooks.EBOOK_ROOT]) if os.path.isdir(utils_ebooks.EBOOK_ROOT) else 0,
+                  "note": f"{book_count} 本,管理者上傳的檔案,不會自動清除;刪除請到群組一覽的電子書區塊",
+                  "link": {"href": "groups#ebook-library-panel", "text": "電子書管理"}})
+
     data = {"items": items, "checked_at": datetime.datetime.now().strftime("%H:%M:%S")}
     _storage_cache.update({"at": now, "data": data})
     return data

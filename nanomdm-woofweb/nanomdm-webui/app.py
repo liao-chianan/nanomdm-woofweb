@@ -37,6 +37,7 @@ import compose_manager
 import utils_nginx_ssl
 import utils_apns_csr
 import utils_osupdate
+import utils_ebooks
 
 try:
     CFG = load_config()
@@ -114,6 +115,9 @@ def check_ip_allowlist():
     白名單是空清單時不做任何限制(預設行為,避免部署時因為忘記設定而把自己鎖在外面)。
     """
     if request.path.startswith("/static/"):
+        return None
+    # iPad 下載電子書(nginx /ebooks/ 轉過來)另外用「電子書下載IP範圍限制」檢查,不套用管理介面的白名單
+    if request.path.startswith(utils_ebooks.DOWNLOAD_ROUTE_PREFIX):
         return None
     state = config.reload_auth_state()
     rules = state.get("ip_allowlist", [])
@@ -4623,7 +4627,8 @@ def api_dep_profiles_apply():
 @app.route("/groups")
 @login_required
 def groups_page():
-    return render_template("groups.html", active="groups", command_defs=COMMAND_DEFS)
+    return render_template("groups.html", active="groups", command_defs=COMMAND_DEFS,
+                           ebook_files_dir=utils_ebooks.EBOOK_FILES_DIR, ebook_list_path=utils_ebooks.EBOOKS_JSON)
 
 
 @app.route("/api/groups")
@@ -4648,6 +4653,7 @@ def api_groups():
             "description": info.get("description", ""),
             "device_count": device_count_by_group.get(name, 0),
             "app_count": len(info.get("apps", [])),
+            "ebook_count": len(info.get("ebooks") or []),
             "enroll_json": info.get("enroll_json"),
             "mobileconfig": info.get("mobileconfig"),
             # 系統預設檔案受保護、不能刪除,刪除群組時詢問「要不要一併刪除檔案」要據此提示使用者
@@ -4790,6 +4796,7 @@ def api_groups_duplicate():
     groups[new_group_name] = {
         "description": new_description or source_info.get("description", ""),
         "apps": list(source_info.get("apps", [])),
+        "ebooks": list(source_info.get("ebooks") or []),
         "enroll_json": None,
         "mobileconfig": None,
     }
@@ -5237,6 +5244,249 @@ def api_group_app_manager_apply_stream(group_name):
                 "index": idx, "total": total, "serial_number": serial, "device_name": dev.get("device_name", ""),
                 "ok": ok, "failures": failures, "warnings": warnings,
             })
+
+        yield sse({"done": True, "total": total, "success_count": success})
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# 電子書(PDF / EPUB 派送到「書籍」App)
+# ---------------------------------------------------------------------------
+def get_server_domain():
+    """iPad 下載電子書用的網域:.env 的 SERVER_DOMAIN,沒有的話用 nginx 站台設定的 server_name"""
+    domain = (get_env_dict().get("SERVER_DOMAIN") or "").strip()
+    if not domain:
+        try:
+            domain = utils_nginx_ssl.find_site_conf().get("domain") or ""
+        except Exception:
+            domain = ""
+    if not domain or not _HOSTNAME_RE.match(domain):
+        raise ValueError("無法判斷本台伺服器的網域,請在 .env 加上 SERVER_DOMAIN=你的伺服器網域")
+    return domain
+
+
+def ebook_dispatch_problem():
+    """派送前的檢查:nginx 下載設定與網域都要有,不然 iPad 拿到的是下載不到的網址。回傳問題說明或 None"""
+    status = utils_ebooks.nginx_status()
+    if not status["installed"]:
+        return "nginx 還沒有加入電子書下載設定,iPad 會下載不到。請先到「系統參數 → 電子書下載IP範圍限制」按「加入 nginx 設定」。"
+    try:
+        get_server_domain()
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+def _ebook_rows():
+    groups = utils.load_groups(CFG["paths"]["groups_json"])
+    rows = []
+    for b in utils_ebooks.list_books():
+        rows.append({**b, "groups": sorted(n for n, info in groups.items() if b["id"] in (info.get("ebooks") or []))})
+    rows.sort(key=lambda r: r["uploaded_at"], reverse=True)
+    return rows
+
+
+@app.route(utils_ebooks.DOWNLOAD_ROUTE_PREFIX + "<name>")
+def ebook_download(name):
+    """iPad 下載電子書。不需要登入(iPad 下載時不會帶登入資訊),改用「電子書下載IP範圍限制」檢查來源 IP。
+    檔案本身由 nginx 的 internal 位置送出(X-Accel-Redirect),這裡不讀檔案內容。"""
+    if not utils_ebooks.is_download_allowed(request.remote_addr):
+        return Response("存取被拒絕:這個 IP 不在電子書下載允許範圍內。", status=403, mimetype="text/plain")
+    book = utils_ebooks.resolve_public_file(name)
+    if not book:
+        return Response("找不到檔案", status=404, mimetype="text/plain")
+    resp = Response(status=200, mimetype=utils_ebooks.MIME_TYPES[book["kind"]])
+    resp.headers["X-Accel-Redirect"] = utils_ebooks.INTERNAL_PREFIX + utils_ebooks.file_name(book)
+    resp.headers["Cache-Control"] = "private, no-store"
+    return resp
+
+
+@app.route("/api/ebooks")
+@login_required
+def api_ebooks_list():
+    settings = utils_ebooks.get_settings()
+    try:
+        domain = get_server_domain()
+    except ValueError:
+        domain = None
+    return jsonify({
+        "ok": True, "books": _ebook_rows(), "settings": settings,
+        "nginx": utils_ebooks.nginx_status(), "domain": domain, "your_ip": request.remote_addr,
+    })
+
+
+@app.route("/api/ebooks/upload", methods=["POST"])
+@login_required
+def api_ebooks_upload():
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "message": "沒有選擇檔案"}), 400
+    try:
+        book = utils_ebooks.save_upload(f.stream, f.filename, request.form.get("title"))
+    except utils_ebooks.EbookError as e:
+        log_activity_entry("電子書-上傳", False, detail=f"檔名={f.filename}, {e}")
+        return jsonify({"ok": False, "message": str(e)}), 400
+    log_activity_entry("電子書-上傳", True, detail=f"書名={book['title']}, 格式={book['kind']}, 大小={book['size']}, 原檔名={book['original_filename']}")
+    return jsonify({"ok": True, "message": f"已上傳「{book['title']}」", "book": book})
+
+
+@app.route("/api/ebooks/<book_id>/rename", methods=["POST"])
+@login_required
+def api_ebooks_rename(book_id):
+    try:
+        old = utils_ebooks.get_book(book_id)
+        book = utils_ebooks.rename_book(book_id, (request.json or {}).get("title"))
+    except utils_ebooks.EbookError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    log_activity_entry("電子書-修改書名", True, detail=f"{old['title'] if old else book_id} → {book['title']}")
+    return jsonify({"ok": True, "message": "已修改書名。已經派送到 iPad 的書不會改名,之後新派送的才會用新書名。"})
+
+
+@app.route("/api/ebooks/<book_id>/delete", methods=["POST"])
+@login_required
+def api_ebooks_delete(book_id):
+    try:
+        book = utils_ebooks.delete_book(book_id, utils.load_groups(CFG["paths"]["groups_json"]))
+    except utils_ebooks.EbookError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    log_activity_entry("電子書-刪除", True, detail=f"書名={book['title']}, 已刪除伺服器上的檔案")
+    return jsonify({"ok": True, "message": f"已刪除「{book['title']}」與伺服器上的檔案"})
+
+
+@app.route("/api/ebooks/settings", methods=["POST"])
+@login_required
+def api_ebooks_settings_save():
+    data = request.json or {}
+    try:
+        saved = utils_ebooks.save_settings(data.get("max_size_mb"), data.get("ip_allowlist") or [])
+    except utils_ebooks.EbookError as e:
+        return jsonify({"ok": False, "message": str(e)}), 400
+    log_activity_entry("電子書-下載限制設定", True,
+                       detail=f"大小上限={saved['max_size_mb']}MB, IP範圍={','.join(saved['ip_allowlist']) or '不限制'}")
+    return jsonify({"ok": True, "message": "已儲存電子書設定", "settings": saved})
+
+
+@app.route("/api/ebooks/nginx/install", methods=["POST"])
+@login_required
+def api_ebooks_nginx_install():
+    try:
+        changed, message = utils_ebooks.install_nginx_snippet(CFG.get("port", 5566))
+    except Exception as e:
+        log_activity_entry("電子書-加入nginx設定", False, detail=str(e))
+        return jsonify({"ok": False, "message": str(e)}), 500
+    log_activity_entry("電子書-加入nginx設定", True, detail=message)
+    return jsonify({"ok": True, "changed": changed, "message": message})
+
+
+@app.route("/api/groups/<group_name>/ebook-manager")
+@login_required
+def api_group_ebook_manager(group_name):
+    groups = utils.load_groups(CFG["paths"]["groups_json"])
+    if group_name not in groups:
+        return jsonify({"ok": False, "message": "找不到這個群組"}), 404
+    bound = set(groups[group_name].get("ebooks") or [])
+    devices, dev_err = get_group_enrolled_devices(group_name)
+    books = [{**b, "bound": b["id"] in bound} for b in _ebook_rows()]
+    return jsonify({
+        "ok": True, "group": group_name, "books": books,
+        "device_count": None if dev_err else len(devices),
+        "dispatch_problem": ebook_dispatch_problem(),
+    })
+
+
+@app.route("/api/groups/<group_name>/ebook-manager/apply-stream")
+@login_required
+def api_group_ebook_manager_apply_stream(group_name):
+    """套用群組電子書的勾選變更,逐台顯示進度:
+      1. 更新 groups.json 的群組綁定(之後新註冊的裝置也會自動派送)
+      2. 群組裡每一台已註冊的裝置:新勾選的 → InstallMedia;
+         取消勾選的 → remove_from_devices=1 時送 RemoveMedia,否則只取消綁定、裝置上的書保留"""
+    install_ids = [x for x in (request.args.get("install") or "").split(",") if x.strip()]
+    remove_ids = [x for x in (request.args.get("remove") or "").split(",") if x.strip()]
+    remove_from_devices = request.args.get("remove_from_devices") == "1"
+
+    def sse(obj):
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+    def generate():
+        if not install_ids and not remove_ids:
+            yield sse({"error": "沒有需要變更的電子書", "done": True})
+            return
+        books = {b["id"]: b for b in utils_ebooks.list_books()}
+        groups = utils.load_groups(CFG["paths"]["groups_json"])
+        if group_name not in groups:
+            yield sse({"error": "找不到這個群組", "done": True})
+            return
+        current = list(groups[group_name].get("ebooks") or [])
+        for x in install_ids:
+            if x not in books:
+                yield sse({"error": "有電子書已經不存在,請重新開啟視窗", "done": True})
+                return
+        if install_ids:
+            problem = ebook_dispatch_problem()
+            if problem:
+                yield sse({"error": problem, "done": True})
+                return
+        title_of = lambda x: books[x]["title"] if x in books else x
+
+        # 1. 群組綁定
+        for x in install_ids:
+            if x not in current:
+                current.append(x)
+        groups[group_name]["ebooks"] = [x for x in current if x not in set(remove_ids)]
+        utils.save_groups(CFG["paths"]["groups_json"], groups)
+        log_activity_entry(
+            "群組電子書-變更綁定", True,
+            detail=f"群組={group_name}, 加入={','.join(title_of(x) for x in install_ids) or '-'}, "
+                   f"移除={','.join(title_of(x) for x in remove_ids) or '-'}"
+                   + (", 裝置上的書一併移除" if remove_ids and remove_from_devices else ""),
+        )
+        yield sse({"message": "已更新群組綁定的電子書。", "done": False})
+
+        device_removes = [x for x in remove_ids if remove_from_devices and x in books]
+        if not install_ids and not device_removes:
+            yield sse({"done": True, "total": 0, "success_count": 0, "message": "已取消綁定,裝置上的電子書保留不動。"})
+            return
+
+        # 2. 逐台處理
+        devices, dev_err = get_group_enrolled_devices(group_name)
+        if dev_err:
+            yield sse({"error": f"群組綁定已更新,但查詢裝置清單失敗,沒有對裝置派送: {dev_err}", "done": True})
+            return
+        total = len(devices)
+        if total == 0:
+            yield sse({"done": True, "total": 0, "success_count": 0, "message": "群組裡目前沒有已註冊的裝置,之後新註冊的裝置會自動派送綁定的電子書。" if install_ids else "群組裡目前沒有已註冊的裝置,已取消綁定。"})
+            return
+        base_url, api_user, api_key = get_nanomdm_conn()
+        if not base_url or not api_key:
+            yield sse({"error": "群組綁定已更新,但 .env 內缺少 NANOMDM 設定,沒有對裝置派送", "done": True})
+            return
+        domain = get_server_domain() if install_ids else None
+        yield sse({"message": f"開始處理群組裡 {total} 台已註冊的裝置...", "done": False})
+
+        success = 0
+        for idx, dev in enumerate(devices, start=1):
+            serial, eid = dev["serial_number"], dev["enrollment_id"]
+            failures = []
+            jobs = [("InstallMedia", x, utils_ebooks.install_media_params(books[x], domain)) for x in install_ids]
+            jobs += [("RemoveMedia", x, utils_ebooks.remove_media_params(books[x])) for x in device_removes]
+            for request_type, x, params in jobs:
+                try:
+                    code, result = utils.send_mdm_command(base_url, api_user, api_key, eid, request_type, params)
+                    if code >= 400:
+                        raise RuntimeError(f"指令送出失敗({result})")
+                except Exception as e:
+                    failures.append(f"{'派送' if request_type == 'InstallMedia' else '移除'} {title_of(x)}: {e}")
+            ok = not failures
+            success += 1 if ok else 0
+            log_activity_entry(
+                "群組電子書-套用到裝置", ok,
+                detail="; ".join(failures) or f"派送 {len(install_ids)} 本、移除 {len(device_removes)} 本",
+                serial=serial, device_name=dev.get("device_name", ""), group=group_name,
+            )
+            yield sse({"index": idx, "total": total, "serial_number": serial, "device_name": dev.get("device_name", ""),
+                       "ok": ok, "failures": failures, "warnings": []})
 
         yield sse({"done": True, "total": total, "success_count": success})
 
@@ -6170,6 +6420,28 @@ def _get_github_token():
     """
     env = get_env_dict()
     return env.get("GITHUB_TOKEN", "") or None
+
+
+@app.route("/api/version/post-update-tasks")
+@login_required
+def api_version_post_update_tasks():
+    """更新後需要管理者確認、執行一次的系統設定調整(不在背景自動執行)。
+    目前只有電子書的 nginx 下載設定;已經處理過的不會出現。"""
+    tasks = []
+    st = utils_ebooks.nginx_status()
+    if not st["installed"]:
+        tasks.append({
+            "id": "ebook_nginx",
+            "title": "加入 nginx 電子書下載設定",
+            "description": "電子書功能需要在 nginx 加入 /ebooks/ 下載路徑與上傳路徑設定,iPad 才能下載群組派送的電子書。"
+                           "按下按鈕會先備份 nginx 設定,測試通過才重新載入,失敗會自動還原。"
+                           "也可以之後到「系統參數 → 電子書下載IP範圍限制」再處理。",
+            "can_apply": not st["error"],
+            "error": st["error"],
+            "action": "/api/ebooks/nginx/install",
+            "button": "加入 nginx 設定",
+        })
+    return jsonify({"ok": True, "tasks": tasks})
 
 
 @app.route("/api/version/current")

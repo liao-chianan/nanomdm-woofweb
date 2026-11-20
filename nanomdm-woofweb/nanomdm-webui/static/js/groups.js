@@ -22,10 +22,10 @@ function buildGroupOptionsHtml(currentGroup) {
 // ---------------------------------------------------------------------------
 async function loadGroups() {
   const tbody = document.getElementById("groups-tbody");
-  tbody.innerHTML = `<tr><td colspan="10">載入中...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="11">載入中...</td></tr>`;
   const res = await apiFetch("/api/groups");
   if (!res.ok) {
-    tbody.innerHTML = `<tr><td colspan="10" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" style="color:#d64545;">載入失敗: ${escapeHtml((res.data && res.data.message) || "未知錯誤")}</td></tr>`;
     return;
   }
 
@@ -34,7 +34,7 @@ async function loadGroups() {
 
   tbody.innerHTML = "";
   if (res.data.rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10">尚無群組,請按右上角「新增群組」建立第一個群組</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11">尚無群組,請按右上角「新增群組」建立第一個群組</td></tr>`;
     return;
   }
   res.data.rows.forEach((row) => {
@@ -50,6 +50,7 @@ async function loadGroups() {
       <td>${escapeHtml(row.description)}</td>
       <td><span class="serial-link" data-action="devices" data-group="${escapeHtml(row.group_name)}">${row.device_count}</span></td>
       <td><span class="serial-link" data-action="apps" data-group="${escapeHtml(row.group_name)}">${row.app_count}</span></td>
+      <td><span class="serial-link" data-action="ebooks" data-group="${escapeHtml(row.group_name)}">${row.ebook_count || 0}</span></td>
       <td>${enrollLink}</td>
       <td>${mobileconfigLink}</td>
       <td><button class="secondary" data-action="group-command" data-group="${escapeHtml(row.group_name)}" type="button" ${row.device_count === 0 ? "disabled" : ""}>群組命令</button></td>
@@ -1079,6 +1080,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const group = el.dataset.group;
     if (action === "devices") openGroupDevicesModal(group);
     else if (action === "apps") openGroupAppsModal(group);
+    else if (action === "ebooks") openGroupEbooksModal(group);
     else if (action === "group-command") openGroupCommandModal(group);
     else if (action === "edit") openGroupEditModal(group, el.dataset.description);
     else if (action === "duplicate-group") openDuplicateGroupModal(group);
