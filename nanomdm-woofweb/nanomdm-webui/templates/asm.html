@@ -71,6 +71,18 @@
   <pre id="vpp-output" style="background:#0d1117; color:#c9d6e8; padding:14px 16px; border-radius:6px; min-height:160px; max-height:420px; overflow-y:auto; font-family:var(--mono); font-size:12.5px; white-space:pre-wrap;"></pre>
 </div>
 
+<!-- 回收未知App授權:確認 Modal -->
+<div class="modal-overlay hidden" id="app-reclaim-modal">
+  <div class="modal-box" style="width:520px;">
+    <h3>回收授權(Adam ID <span id="app-reclaim-adam-id"></span>)</h3>
+    <div id="app-reclaim-body" style="font-size:13px; line-height:1.7;">查詢中...</div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+      <button id="app-reclaim-cancel-btn" type="button" class="secondary">取消</button>
+      <button id="app-reclaim-confirm-btn" type="button" class="danger" disabled>確定回收</button>
+    </div>
+  </div>
+</div>
+
 <!-- 更新App進度 Modal -->
 <div class="modal-overlay hidden" id="app-update-progress-modal">
   <div class="modal-box" style="width:500px;">

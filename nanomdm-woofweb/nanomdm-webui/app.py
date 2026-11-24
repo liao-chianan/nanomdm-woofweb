@@ -6,6 +6,7 @@ import json
 import os
 import re
 import requests
+import secrets
 import shutil
 import subprocess
 import sys
@@ -5960,6 +5961,134 @@ def api_asm_update_app_stream():
                 yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'stage': 'done', 'success_count': 0, 'fail_count': 0, 'target_count': 0, 'message': f'發生未預期錯誤: {e}'}, ensure_ascii=False)}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# 未知(已下架)App:回收授權並取消群組綁定
+# ---------------------------------------------------------------------------
+# 先呼叫 reclaim-preview 拿到一次性的確認碼,畫面顯示影響範圍、使用者確認後才帶著確認碼開始執行,
+# 避免單純開啟一個網址就觸發回收。確認碼 10 分鐘內有效,只能用一次。
+_reclaim_tokens = {}
+_reclaim_tokens_lock = threading.Lock()
+RECLAIM_TOKEN_TTL_SECONDS = 600
+
+
+def _reclaim_target_check(adam_id):
+    """確認這個 App 可以回收:ASM 快取裡是「未知」,而且現在直接查 App Store 也確實查不到。
+    回傳 (row, error_message);可以回收時 error_message 是 None。"""
+    if not utils.is_valid_adam_id(adam_id):
+        return None, "Adam ID 格式不正確"
+    rows, _ = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+    row = next((r for r in rows if r.get("Adam ID") == adam_id), None)
+    if row is None:
+        return None, "ASM 軟體資訊裡沒有這個 App,請先同步軟體"
+    if not is_unknown_vpp_app(row):
+        return row, "只有「未知」(已從 App Store 下架)的 App 可以使用回收授權"
+    status = utils.app_store_listing_status(adam_id)
+    if status == "found":
+        return row, "App Store 現在查得到這個 App(可能是上次同步時查詢失敗),請先重新同步軟體,不執行回收"
+    if status == "error":
+        return row, "目前無法連線到 App Store 確認這個 App 已下架,請稍後再試"
+    return row, None
+
+
+def _groups_binding_app(adam_id):
+    groups = utils.load_groups(CFG["paths"]["groups_json"])
+    return sorted(name for name, info in groups.items() if str(adam_id) in [str(a) for a in info.get("apps") or []])
+
+
+@app.route("/api/asm/reclaim-preview", methods=["POST"])
+@login_required
+def api_asm_reclaim_preview():
+    adam_id = str((request.get_json(silent=True) or {}).get("adam_id", "")).strip()
+    _, err = _reclaim_target_check(adam_id)
+    if err:
+        return jsonify({"ok": False, "message": err}), 400
+    try:
+        serials, other_count = utils.list_vpp_associated_serials(CFG["cert_status"]["vpp_token_path"], adam_id)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"查詢授權失敗: {e}"}), 502
+    token = secrets.token_urlsafe(24)
+    now = time.time()
+    with _reclaim_tokens_lock:
+        for t in [t for t, v in _reclaim_tokens.items() if v["expires"] < now]:
+            _reclaim_tokens.pop(t, None)
+        _reclaim_tokens[token] = {"adam_id": adam_id, "username": session.get("username"),
+                                  "expires": now + RECLAIM_TOKEN_TTL_SECONDS}
+    return jsonify({"ok": True, "adam_id": adam_id, "token": token,
+                    "serial_count": len(serials), "other_count": other_count,
+                    "groups": _groups_binding_app(adam_id)})
+
+
+@app.route("/api/asm/reclaim-stream")
+@login_required
+def api_asm_reclaim_stream():
+    adam_id = request.args.get("adam_id", "").strip()
+    token = request.args.get("token", "")
+    with _reclaim_tokens_lock:
+        info = _reclaim_tokens.pop(token, None)
+    if not info or info["adam_id"] != adam_id or info["expires"] < time.time() or info["username"] != session.get("username"):
+        return jsonify({"ok": False, "message": "確認碼無效或已過期,請重新按「回收授權」"}), 400
+    def sse(obj):
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+    def generate():
+        _, err = _reclaim_target_check(adam_id)
+        if err:
+            yield sse({"stage": "done", "ok": False, "message": err})
+            return
+        token_path = CFG["cert_status"]["vpp_token_path"]
+        try:
+            serials, other_count = utils.list_vpp_associated_serials(token_path, adam_id)
+        except Exception as e:
+            yield sse({"stage": "done", "ok": False, "message": f"查詢授權失敗: {e}"})
+            return
+
+        # 1. 依序號逐台解除指派
+        ok_count, fail_count = 0, 0
+        for i, serial in enumerate(serials, start=1):
+            try:
+                resp = utils.revoke_vpp_license(token_path, serial, adam_id)
+                ok = resp.get("status") in (0, "0")
+                msg = "" if ok else (resp.get("errorMessage") or str(resp))
+            except Exception as e:
+                ok, msg = False, str(e)
+            ok_count += ok
+            fail_count += (not ok)
+            yield sse({"stage": "progress", "current": i, "total": len(serials), "serial": serial, "ok": ok, "message": msg})
+
+        # 2. 取消所有群組的綁定
+        try:
+            groups = utils.load_groups(CFG["paths"]["groups_json"])
+            unbound = []
+            for name, g in groups.items():
+                apps = [str(a) for a in g.get("apps") or []]
+                if adam_id in apps:
+                    g["apps"] = [a for a in g.get("apps") or [] if str(a) != adam_id]
+                    unbound.append(name)
+            if unbound:
+                utils.save_groups(CFG["paths"]["groups_json"], groups)
+            group_err = None
+        except Exception as e:
+            unbound, group_err = [], str(e)
+
+        parts = [f"解除指派 {ok_count}/{len(serials)} 台"]
+        if fail_count:
+            parts.append(f"失敗 {fail_count} 台")
+        if other_count:
+            parts.append(f"另有 {other_count} 個授權不是指派給裝置序號,無法用序號解除")
+        parts.append(f"取消綁定 {len(unbound)} 個群組" + (f"({'、'.join(unbound)})" if unbound else ""))
+        if group_err:
+            parts.append(f"取消群組綁定失敗: {group_err}")
+        message = ",".join(parts)
+        all_ok = not fail_count and not group_err
+        try:
+            log_activity_entry("ASM軟體資訊-回收未知App授權", all_ok, detail=f"adamId={adam_id}, {message}")
+        except Exception:
+            pass  # 紀錄寫入失敗不影響已完成的回收結果
+        yield sse({"stage": "done", "ok": all_ok, "message": message, "unbound_groups": unbound})
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 

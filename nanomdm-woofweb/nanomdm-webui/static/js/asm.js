@@ -51,7 +51,9 @@ function renderVppTable(rows, emptyMessage = "尚無資料,請按「立即同步
       <td>${row["版本日期"] ? escapeHtml(row["版本日期"]) : '<span style="color:#9ca3af;">(查無資料)</span>'}</td>
       <td>${escapeHtml(row["總數量"] || "")}</td>
       <td>${escapeHtml(row["剩餘量"] || "")}</td>
-      <td><button class="secondary app-update-btn" type="button" style="font-size:12px;" data-adam-id="${escapeHtml(adamId)}" data-app-name="${escapeHtml(row["軟體名稱"] || "")}">更新 App</button></td>
+      <td style="white-space:nowrap;"><button class="secondary app-update-btn" type="button" style="font-size:12px;" data-adam-id="${escapeHtml(adamId)}" data-app-name="${escapeHtml(row["軟體名稱"] || "")}">更新 App</button>${
+        isUnknownVppRow(row) ? ` <button class="danger app-reclaim-btn" type="button" style="font-size:12px;" data-adam-id="${escapeHtml(adamId)}" title="已下架的 App:解除所有裝置的授權指派,並取消所有群組的綁定">回收授權</button>` : ""
+      }</td>
       <td style="text-align:center;"><input type="checkbox" class="app-auto-update-checkbox" data-adam-id="${escapeHtml(adamId)}" ${isAutoUpdate ? "checked" : ""}></td>
     `;
     tbody.appendChild(tr);
@@ -282,6 +284,87 @@ async function triggerAppUpdate(adamId, appName) {
   };
 }
 
+// ---- 回收未知(已下架)App 的授權 ----
+let reclaimPending = null;  // {adamId, token}
+
+async function openReclaimModal(adamId) {
+  reclaimPending = null;
+  document.getElementById("app-reclaim-adam-id").textContent = adamId;
+  const body = document.getElementById("app-reclaim-body");
+  const confirmBtn = document.getElementById("app-reclaim-confirm-btn");
+  body.textContent = "正在向 Apple 查詢目前已指派的授權...";
+  confirmBtn.disabled = true;
+  openModal("app-reclaim-modal");
+
+  const res = await apiFetchJSON("/api/asm/reclaim-preview", "POST", { adam_id: adamId });
+  if (!res.ok) {
+    body.innerHTML = `<span style="color:#b42318;">${escapeHtml((res.data && res.data.message) || "查詢失敗")}</span>`;
+    return;
+  }
+  const d = res.data;
+  const groupsHtml = d.groups.length
+    ? d.groups.map((g) => `<code>${escapeHtml(g)}</code>`).join("、")
+    : "(沒有群組綁定)";
+  body.innerHTML = `
+    <p>這個 App 已經從 App Store 下架(查不到資料)。確定後會:</p>
+    <ol style="margin:6px 0 10px 20px; padding:0;">
+      <li>依序號逐台解除授權指派:<strong>${d.serial_count}</strong> 台${d.other_count ? `(另有 ${d.other_count} 個授權不是指派給裝置序號,無法用序號解除)` : ""}</li>
+      <li>取消以下群組的綁定:${groupsHtml}</li>
+    </ol>
+    <p style="color:#b42318; margin:0;">已下架的 App 解除指派後就無法再指派安裝。iPad 上已經安裝的 App 不會由這個功能移除。</p>`;
+  if (d.serial_count === 0 && d.groups.length === 0) {
+    body.innerHTML += `<p style="margin-top:8px;">目前沒有需要處理的授權或群組。</p>`;
+    return;
+  }
+  reclaimPending = { adamId, token: d.token };
+  confirmBtn.disabled = false;
+}
+
+function runReclaim() {
+  if (!reclaimPending) return;
+  const { adamId, token } = reclaimPending;
+  reclaimPending = null;
+  closeModal("app-reclaim-modal");
+
+  document.getElementById("app-update-progress-title").textContent = `回收授權中(Adam ID ${adamId})...`;
+  document.getElementById("app-update-progress-bar").style.width = "0%";
+  document.getElementById("app-update-progress-text").textContent = "準備中...";
+  document.getElementById("app-update-progress-errors").innerHTML = "";
+  document.getElementById("app-update-progress-close-btn").style.display = "none";
+  openModal("app-update-progress-modal");
+
+  const errors = [];
+  let finished = false;
+  const es = new EventSource(apiUrl(`/api/asm/reclaim-stream?adam_id=${encodeURIComponent(adamId)}&token=${encodeURIComponent(token)}`));
+  es.onmessage = (event) => {
+    let p;
+    try { p = JSON.parse(event.data); } catch (e) { return; }
+    if (p.stage === "progress") {
+      document.getElementById("app-update-progress-bar").style.width = `${Math.round((p.current / p.total) * 100)}%`;
+      document.getElementById("app-update-progress-text").textContent = `解除指派 ${p.current}/${p.total}: ${p.serial}`;
+      if (!p.ok) errors.push(`${p.serial}: ${p.message}`);
+    } else if (p.stage === "done") {
+      finished = true;
+      document.getElementById("app-update-progress-bar").style.width = "100%";
+      document.getElementById("app-update-progress-title").textContent = p.ok ? "回收完成" : "回收結束(有項目未完成)";
+      document.getElementById("app-update-progress-text").textContent =
+        (p.message || "") + "。授權數量會在下次同步軟體後更新。";
+      if (errors.length > 0) {
+        document.getElementById("app-update-progress-errors").innerHTML =
+          `<strong>失敗項目:</strong><br>` + errors.map((e) => escapeHtml(e)).join("<br>");
+      }
+      document.getElementById("app-update-progress-close-btn").style.display = "";
+      es.close();
+    }
+  };
+  es.onerror = () => {
+    if (finished) return;
+    document.getElementById("app-update-progress-title").textContent = "連線中斷(請到系統紀錄確認結果)";
+    document.getElementById("app-update-progress-close-btn").style.display = "";
+    es.close();
+  };
+}
+
 async function toggleAppAutoUpdate(adamId, enabled) {
   // 先更新記憶體裡的資料(不等伺服器回應):搜尋/排序會用allVppRows重新產生表格,這裡不同步的話,
   // 剛勾選的App一搜尋或排序,勾選框就會跳回舊的狀態。失敗時下面會重新載入,恢復成實際存檔的狀態
@@ -312,6 +395,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("vpp-tbody").addEventListener("click", (e) => {
     if (e.target.classList.contains("app-update-btn")) {
       triggerAppUpdate(e.target.dataset.adamId, e.target.dataset.appName);
+    } else if (e.target.classList.contains("app-reclaim-btn")) {
+      openReclaimModal(e.target.dataset.adamId);
     }
   });
 
@@ -324,4 +409,9 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("app-update-progress-close-btn").addEventListener("click", () => {
     closeModal("app-update-progress-modal");
   });
+  document.getElementById("app-reclaim-cancel-btn").addEventListener("click", () => {
+    reclaimPending = null;
+    closeModal("app-reclaim-modal");
+  });
+  document.getElementById("app-reclaim-confirm-btn").addEventListener("click", runReclaim);
 });

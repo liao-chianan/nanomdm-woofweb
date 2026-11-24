@@ -1637,6 +1637,51 @@ def revoke_vpp_license(vpp_token_path, serial, adam_id, timeout=30):
         return {"raw": resp.text, "status_code": resp.status_code}
 
 
+def list_vpp_associated_serials(vpp_token_path, adam_id, timeout=30):
+    """查詢這個 App 目前「已指派」(status=Associated)的授權,回傳 (serials, other_count)。
+    serials 是指派給裝置序號的授權;other_count 是已指派、但不是指派給序號的授權
+    (例如舊式指派給 Apple ID 的),這種沒辦法用序號解除,只回報數量。
+    分頁用 batchToken 一直查到最後一頁,查詢失敗時丟出 RuntimeError。"""
+    with open(vpp_token_path, "r") as f:
+        stoken = f.read().strip()
+    serials, other_count, batch_token = [], 0, None
+    for _ in range(1000):  # 保險上限,避免 Apple 一直回傳 batchToken 時無限迴圈
+        payload = {"sToken": stoken, "batchToken": batch_token} if batch_token else {"sToken": stoken, "adamId": str(adam_id)}
+        resp = requests.post("https://vpp.itunes.apple.com/mdm/getVPPLicensesSrv",
+                             headers={"Content-Type": "application/json"}, json=payload, timeout=timeout)
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError(f"Apple 回應不是 JSON(HTTP {resp.status_code})")
+        if data.get("status") not in (0, "0", None):
+            raise RuntimeError(data.get("errorMessage") or f"查詢授權失敗: status={data.get('status')}")
+        for lic in data.get("licenses") or []:
+            if lic.get("status") != "Associated":
+                continue
+            if lic.get("serialNumber"):
+                serials.append(lic["serialNumber"])
+            else:
+                other_count += 1
+        batch_token = data.get("batchToken")
+        if not batch_token:
+            break
+    return sorted(set(serials)), other_count
+
+
+def app_store_listing_status(adam_id, country="tw", timeout=15):
+    """直接查 iTunes Lookup,確認這個 App 現在是不是真的查不到(已下架)。
+    回傳 "found"、"not_found" 或 "error"(網路或 Apple 端錯誤,沒辦法確定)。
+    回收授權前用這個再確認一次:同步時如果剛好查詢失敗,快取裡正常的 App 也可能被標成「未知」。"""
+    try:
+        resp = requests.get("https://itunes.apple.com/lookup",
+                            params={"id": str(adam_id), "country": country, "_": int(time.time())}, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return "error"
+    return "found" if (data.get("resultCount") or data.get("results")) else "not_found"
+
+
 def assign_vpp_license(vpp_token_path, serial, adam_id, timeout=30):
     """透過 classic VPP API 把 App 授權指派給指定的裝置序號。
     這一步是送出 InstallApplication 指令「之前」一定要做的準備動作
