@@ -29,6 +29,8 @@ DEFAULT_CONFIG = {
         "check_vpp_license_script": "/opt/nanomdm-deployment/check_vpp_license.sh",
         "vpp_cache_csv": "/opt/nanomdm-deployment/vpp_license.csv",
         "app_display_names_json": "/opt/nanomdm-deployment/app_display_names.json",
+        # ASM 軟體資訊「自動更新」勾選:跟同步快取 vpp_license.csv 分開存,同步出錯也不會被清掉
+        "vpp_auto_update_json": "/opt/nanomdm-deployment/vpp_auto_update.json",
         "installed_apps_cache_json": "/opt/nanomdm-deployment/installed_apps_cache.json",
         "mobileconfig_dir": "/opt/nanomdm-deployment/mobileconfig",
         "dep_profiles_dir": "/opt/nanomdm-deployment/dep-profiles",

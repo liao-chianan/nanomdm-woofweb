@@ -22,6 +22,18 @@ ASSETS_JSON=$(curl -s -X POST https://vpp.itunes.apple.com/mdm/getVPPAssetsSrv \
   -H "Content-Type: application/json" \
   -d "{\"sToken\": \"$STOKEN\"}")
 
+# Apple 回應異常(連線失敗、不是 JSON、回傳錯誤)時視為查詢失敗,回傳非 0,
+# 讓 WebUI 保留上次的資料,不要當成「0 筆授權」把快取清空
+if [ -z "$ASSETS_JSON" ] || ! echo "$ASSETS_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "❌ 查詢 App 清單失敗：Apple 沒有回應或回應格式不正確" >&2
+    exit 1
+fi
+ASSETS_STATUS=$(echo "$ASSETS_JSON" | jq -r '.status // 0')
+if [ "$ASSETS_STATUS" != "0" ] || [ "$(echo "$ASSETS_JSON" | jq 'has("assets")')" != "true" ]; then
+    echo "❌ 查詢 App 清單失敗：$(echo "$ASSETS_JSON" | jq -r '.errorMessage // "Apple 回應沒有 assets 欄位"')（status=$ASSETS_STATUS）" >&2
+    exit 1
+fi
+
 # 提取所有 Adam ID 到陣列中
 ADAM_IDS_ARRAY=($(echo "$ASSETS_JSON" | jq -r '.assets[]?.adamIdStr // empty'))
 

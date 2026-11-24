@@ -5695,14 +5695,21 @@ def dispatch_app_update_to_bound_devices_gen(adam_id, triggered_by_system=False)
            "message": f"「{app_name}」更新派送完成,成功 {success_count} 台,失敗 {fail_count} 台"}
 
 
+_vpp_auto_update_lock = threading.Lock()
+
+
+def _read_auto_update_ids():
+    return utils.read_vpp_auto_update_ids(CFG["paths"]["vpp_auto_update_json"], CFG["paths"]["vpp_cache_csv"])
+
+
 def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
     """對每一列VPP資料,查詢iTunes Lookup API補上當下版本跟版本發布日期,逐一yield進度
     (方便SSE串流即時顯示查詢進度給使用者看)。查詢失敗時,退回沿用既有快取裡的舊版本資訊,
     不要因為單純的網路暫時性問題,就讓原本已經查到的版本資訊被清空。
 
     同時做兩件事:
-    1. 保留既有的「自動更新」勾選狀態——每次同步整份CSV都會重新寫入,如果不從舊資料
-       carry over過來,使用者勾選過的設定會每次同步後就被清空,等於這個功能形同虛設。
+    1. 帶入「自動更新」勾選狀態——勾選存在獨立的 vpp_auto_update.json(不再從舊的 CSV 帶過來:
+       曾經因為同步寫入 0 筆的 CSV,把所有勾選一起清空),CSV 的「自動更新」欄位只是同步當下的副本。
     2. 偵測版本是否「真的有變化」(不是第一次查到、也不是這次查詢失敗退回沿用舊資料
        的情況),如果版本確實從舊版變成新版、且這個App有勾選自動更新,自動觸發派送更新
        給所有綁定群組的裝置,不需要管理者手動按按鈕。
@@ -5714,9 +5721,7 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
     existing_version_by_adam_id = {
         r.get("Adam ID"): (r.get("當下版本", ""), r.get("版本日期", "")) for r in existing_rows
     }
-    existing_auto_update_by_adam_id = {
-        r.get("Adam ID"): (r.get("自動更新", "") == "true") for r in existing_rows
-    }
+    auto_update_ids = _read_auto_update_ids()
     existing_platforms_by_adam_id = {
         r.get("Adam ID"): [p for p in (r.get("支援裝置") or "").split("/") if p] for r in existing_rows
     }
@@ -5727,7 +5732,7 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
     total = len(rows)
     for i, r in enumerate(rows):
         old_version, old_release_date = existing_version_by_adam_id.get(r["adam_id"], ("", ""))
-        r["auto_update"] = existing_auto_update_by_adam_id.get(r["adam_id"], False)
+        r["auto_update"] = str(r["adam_id"]) in auto_update_ids
 
         store_info = store_info_by_adam_id.get(str(r["adam_id"]), {})
         version, release_date = store_info.get("version", ""), store_info.get("release_date", "")
@@ -5801,6 +5806,12 @@ def refresh_vpp_cache_once():
     if rc != 0:
         return False, (err or out or "未知錯誤"), 0
     rows = utils.parse_vpp_table_output(out)
+    if not rows:
+        # Apple 或網路暫時出問題時可能回傳 0 筆;以前會把 0 筆寫進快取,整份清單(含自動更新勾選)被清空。
+        # 現在視為同步失敗,保留上次的資料
+        old_rows, _ = utils.read_vpp_cache_csv(cache_path)
+        if old_rows:
+            return False, f"Apple 回傳 0 筆 App 授權,保留上次資料({len(old_rows)} 筆)", 0
 
     for _ in _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
         pass  # 背景排程不需要即時進度,把產生器跑完即可
@@ -5850,6 +5861,9 @@ def asm_page():
 @login_required
 def api_asm_cache():
     rows, mtime = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+    auto_update_ids = _read_auto_update_ids()
+    for r in rows:
+        r["自動更新"] = "true" if r.get("Adam ID") in auto_update_ids else "false"
     return jsonify({"ok": True, "rows": rows, "last_sync": _format_last_sync(mtime)})
 
 
@@ -5927,22 +5941,19 @@ def api_asm_toggle_auto_update():
     if not adam_id:
         return jsonify({"ok": False, "message": "缺少 adam_id"}), 400
 
-    cache_path = CFG["paths"]["vpp_cache_csv"]
-    rows, _ = utils.read_vpp_cache_csv(cache_path)
-    target = next((r for r in rows if r.get("Adam ID") == adam_id), None)
-    if target is None:
+    rows, _ = utils.read_vpp_cache_csv(CFG["paths"]["vpp_cache_csv"])
+    if not any(r.get("Adam ID") == adam_id for r in rows):
         return jsonify({"ok": False, "message": "找不到這個 App,請先同步軟體清單"}), 404
 
-    # 轉成write_vpp_cache_csv預期的欄位名稱(adam_id/bundle_id/name/...)再整份寫回
-    write_rows = [{
-        "adam_id": r["Adam ID"], "bundle_id": r["Bundle ID"], "name": r["軟體名稱"],
-        "version": r.get("當下版本", ""), "release_date": r.get("版本日期", ""),
-        "total": r.get("總數量", ""), "available": r.get("剩餘量", ""),
-        "auto_update": (r.get("Adam ID") == adam_id and enabled) or (r.get("Adam ID") != adam_id and r.get("自動更新") == "true"),
-    } for r in rows]
-
-    with _vpp_cache_lock:
-        utils.write_vpp_cache_csv(cache_path, write_rows)
+    # 勾選只寫在獨立的 vpp_auto_update.json,不再整份重寫同步快取:
+    # 不會跟同時進行中的同步互相覆蓋,也不會動到快取的其他欄位
+    with _vpp_auto_update_lock:
+        ids = _read_auto_update_ids()
+        if enabled:
+            ids.add(adam_id)
+        else:
+            ids.discard(adam_id)
+        utils.write_vpp_auto_update_ids(CFG["paths"]["vpp_auto_update_json"], ids)
 
     log_activity_entry("ASM軟體資訊-自動更新設定", True, detail=f"adamId={adam_id}, enabled={enabled}")
     return jsonify({"ok": True})

@@ -1204,6 +1204,24 @@ def write_vpp_cache_csv(path, rows):
     os.replace(tmp_path, path)
 
 
+def read_vpp_auto_update_ids(path, vpp_cache_path=None):
+    """讀取「自動更新」有勾選的 adamId 集合(存在獨立的 JSON,不跟同步快取放一起)。
+    檔案還不存在時(剛更新到這個版本),從舊的 vpp_license.csv「自動更新」欄位帶入一次並寫成 JSON。"""
+    if os.path.exists(path):
+        data = read_json_cache(path)
+        return {str(a) for a in data.get("adam_ids") or [] if is_valid_adam_id(a)}
+    ids = set()
+    if vpp_cache_path:
+        rows, _ = read_vpp_cache_csv(vpp_cache_path)
+        ids = {r.get("Adam ID") for r in rows if r.get("自動更新") == "true" and is_valid_adam_id(r.get("Adam ID"))}
+    write_vpp_auto_update_ids(path, ids)
+    return ids
+
+
+def write_vpp_auto_update_ids(path, ids):
+    write_json_cache(path, {"adam_ids": sorted({str(a) for a in ids}, key=lambda x: int(x))})
+
+
 def read_json_cache(path):
     """讀取本地端 JSON 快取,檔案不存在或損毀時回傳空 dict"""
     try:
