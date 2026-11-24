@@ -1654,7 +1654,7 @@ def send_mdm_command(nanomdm_base_url, api_user, api_key, enrollment_id, request
     return resp.status_code, result_json
 
 
-def send_mdm_command_bulk(nanomdm_base_url, api_user, api_key, enrollment_ids, request_type, params=None, timeout=30):
+def send_mdm_command_bulk(nanomdm_base_url, api_user, api_key, enrollment_ids, request_type, params=None, timeout=30, nopush=False):
     """把同一道指令一次派送給多台裝置(nanomdm 的 /v1/enqueue/{id,id,...})。
     nanomdm 只建立一筆 commands,再替每台裝置各排入一筆 enrollment_queue,結果也是逐台記錄。
 
@@ -1665,10 +1665,15 @@ def send_mdm_command_bulk(nanomdm_base_url, api_user, api_key, enrollment_ids, r
       push_errors:   {enrollment_id: 錯誤} 推播失敗的裝置——指令「已經」排入佇列,只是這次沒喚醒裝置,
                      呼叫端不可以重送,不然會重複排入同一道指令
       unknown:       連線失敗或逾時,不確定有沒有排入——呼叫端不要重送,交給下一輪排程的 pending 檢查處理
+
+    nopush=True:只排入佇列、不推播(nanomdm 的 ?nopush=1),由呼叫端之後用 trigger_push_bulk()
+    分批喚醒裝置,避免上百台裝置同時連回來、把 MySQL 連線數用完(Error 1040)。
     """
     result = {"queued": False, "command_error": None, "push_errors": {}, "unknown": None}
     plist_bytes = build_command_plist(request_type, params)
     url = f"{nanomdm_base_url.rstrip('/')}/v1/enqueue/{','.join(enrollment_ids)}"
+    if nopush:
+        url += "?nopush=1"
     try:
         resp = requests.put(url, data=plist_bytes, auth=(api_user, api_key), timeout=timeout, verify=True)
     except requests.RequestException as e:
@@ -1691,6 +1696,37 @@ def send_mdm_command_bulk(nanomdm_base_url, api_user, api_key, enrollment_ids, r
         if isinstance(st, dict) and st.get("push_error"):
             result["push_errors"][eid] = st["push_error"]
     return result
+
+
+def send_mdm_command_nopush(nanomdm_base_url, api_user, api_key, enrollment_id, request_type, params=None, timeout=15):
+    """跟 send_mdm_command 一樣,但只排入佇列、不推播(之後由呼叫端統一分批推播)。"""
+    plist_bytes = build_command_plist(request_type, params)
+    url = f"{nanomdm_base_url.rstrip('/')}/v1/enqueue/{enrollment_id}?nopush=1"
+    resp = requests.put(url, data=plist_bytes, auth=(api_user, api_key), timeout=timeout, verify=True)
+    try:
+        result_json = resp.json()
+    except Exception:
+        result_json = {"raw": resp.text}
+    return resp.status_code, result_json
+
+
+def trigger_push_bulk(nanomdm_base_url, api_user, api_key, enrollment_ids, timeout=30):
+    """一次推播多台裝置(nanomdm 的 /v1/push/{id,id,...})。
+    回傳 (push_errors, error):push_errors 是 {enrollment_id: 錯誤};error 是整批請求失敗的原因(沒有則為 None)。
+    推播失敗只代表這次沒喚醒裝置,指令仍在佇列,裝置下次連線就會處理。
+    """
+    url = f"{nanomdm_base_url.rstrip('/')}/v1/push/{','.join(enrollment_ids)}"
+    try:
+        resp = requests.get(url, auth=(api_user, api_key), timeout=timeout)
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        return {}, str(e)
+    push_errors = {}
+    for eid, st in (data.get("status") or {}).items():
+        if isinstance(st, dict) and st.get("push_error"):
+            push_errors[eid] = st["push_error"]
+    error = data.get("push_error") if not data.get("status") else None
+    return push_errors, error
 
 
 def trigger_push(nanomdm_base_url, api_user, api_key, enrollment_id, timeout=15):

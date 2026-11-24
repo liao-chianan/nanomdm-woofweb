@@ -6083,6 +6083,11 @@ def sync_single_device_status(serial, enrollment_id, wait_for_response_seconds=5
 
 
 STATUS_QUERY_BATCH_SIZE = 50  # 背景狀態查詢每次派送最多幾台裝置(網址長度跟單次寫入量都保持在合理範圍)
+# 指令全部排入佇列後才分批推播:每組最多幾台、組與組之間隔幾秒。
+# 以前每批排入就立刻推播,同一台裝置幾秒內被喚醒好幾次、上百台同時連回來,
+# 曾讓 nanomdm 把 MySQL 連線數用完(Error 1040: Too many connections)。
+STATUS_PUSH_GROUP_SIZE = 50
+STATUS_PUSH_GROUP_INTERVAL_SECONDS = 5
 
 
 def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=False):
@@ -6175,11 +6180,14 @@ def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=Fa
         batches = [(rt, ids[i:i + STATUS_QUERY_BATCH_SIZE])
                    for rt, ids in targets.items() for i in range(0, len(ids), STATUS_QUERY_BATCH_SIZE)]
         push_error_count = fallback_count = unknown_count = 0
+        to_push = []  # 這一輪有排入(或可能有排入)指令的裝置,排完後統一分批推播,每台只推一次
         for n, (request_type, ids) in enumerate(batches, start=1):
             params = command_params.get(request_type, {})
+            for eid in ids:
+                if eid not in to_push:
+                    to_push.append(eid)
             try:
-                res = utils.send_mdm_command_bulk(base_url, api_user, api_key, ids, request_type, params)
-                push_error_count += len(res["push_errors"])
+                res = utils.send_mdm_command_bulk(base_url, api_user, api_key, ids, request_type, params, nopush=True)
                 if res["unknown"]:
                     # 不確定有沒有排入:不重送,下一輪排程的pending檢查會判斷要不要再送
                     unknown_count += 1
@@ -6191,15 +6199,30 @@ def _refresh_devices_status_cache_once_gen(wait_for_response_seconds=3, force=Fa
                     print(f"[裝置狀態排程]   {request_type} 批次派送失敗,改為逐台派送({len(ids)} 台): {res['command_error']}")
                     for eid in ids:
                         try:
-                            utils.send_mdm_command(base_url, api_user, api_key, eid, request_type, params)
+                            utils.send_mdm_command_nopush(base_url, api_user, api_key, eid, request_type, params)
                         except Exception:
                             pass  # 個別裝置排入失敗不該影響其他裝置
             except Exception as e:
                 print(f"[裝置狀態排程]   {request_type} 批次派送發生例外({len(ids)} 台): {e}")
             yield {"progress": True, "current": n, "total": len(batches), "label": request_type}
+
+        # 全部排入後才推播:每組 STATUS_PUSH_GROUP_SIZE 台,組與組之間隔幾秒,讓裝置分批連回來
+        push_groups = [to_push[i:i + STATUS_PUSH_GROUP_SIZE] for i in range(0, len(to_push), STATUS_PUSH_GROUP_SIZE)]
+        push_group_error_count = 0
+        for n, group in enumerate(push_groups, start=1):
+            if n > 1:
+                time.sleep(STATUS_PUSH_GROUP_INTERVAL_SECONDS)
+            push_errors, group_error = utils.trigger_push_bulk(base_url, api_user, api_key, group)
+            push_error_count += len(push_errors)
+            if group_error:
+                push_group_error_count += 1
+                print(f"[裝置狀態排程]   第 {n}/{len(push_groups)} 組推播失敗({len(group)} 台),裝置下次連線時仍會處理: {group_error}")
+            yield {"progress": True, "stage": "push", "current": n, "total": len(push_groups)}
         summary = ", ".join(f"{rt} {len(ids)} 台" for rt, ids in targets.items() if ids) or "沒有需要派送的查詢"
         print(f"[裝置狀態排程]   派送查詢指令完成({summary};共 {len(batches)} 批"
+              + (f",分 {len(push_groups)} 組推播" if push_groups else "")
               + (f",推播失敗 {push_error_count} 台" if push_error_count else "")
+              + (f",整組推播失敗 {push_group_error_count} 組" if push_group_error_count else "")
               + (f",改為逐台派送 {fallback_count} 批" if fallback_count else "")
               + (f",結果不明 {unknown_count} 批" if unknown_count else "")
               + f"),耗時 {(datetime.datetime.now()-step_started).total_seconds():.1f} 秒")
@@ -7219,7 +7242,11 @@ def api_devices_status_sync_stream():
             for item in _refresh_devices_status_cache_once_gen(wait_for_response_seconds=5, force=True):
                 if item.get("progress"):
                     current, total, label = item["current"], item["total"], item.get("label", "")
-                    yield f"data: {json.dumps({'message': f'已派送查詢指令: 第 {current}/{total} 批({label})', 'done': False}, ensure_ascii=False)}\n\n"
+                    if item.get("stage") == "push":
+                        msg = f'正在分批喚醒裝置: 第 {current}/{total} 組(每組最多 {STATUS_PUSH_GROUP_SIZE} 台)'
+                    else:
+                        msg = f'已排入查詢指令: 第 {current}/{total} 批({label})'
+                    yield f"data: {json.dumps({'message': msg, 'done': False}, ensure_ascii=False)}\n\n"
                 elif item.get("final"):
                     if not item["ok"]:
                         yield f"data: {json.dumps({'error': item['msg'], 'done': True}, ensure_ascii=False)}\n\n"
