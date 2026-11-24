@@ -5716,6 +5716,9 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
     existing_auto_update_by_adam_id = {
         r.get("Adam ID"): (r.get("自動更新", "") == "true") for r in existing_rows
     }
+    existing_platforms_by_adam_id = {
+        r.get("Adam ID"): [p for p in (r.get("支援裝置") or "").split("/") if p] for r in existing_rows
+    }
 
     # 先用批次查詢一次拿到所有App的版本資訊(141個App約4秒),不用每個App各查一次
     store_info_by_adam_id = utils.fetch_app_store_info_batch([r["adam_id"] for r in rows])
@@ -5739,6 +5742,8 @@ def _enrich_vpp_rows_with_version_info_gen(rows, cache_path):
 
         r["version"] = version
         r["release_date"] = release_date
+        # 支援裝置類型(ASM 頁面的裝置類型篩選用);這次沒查到時沿用舊資料
+        r["platforms"] = store_info.get("platforms") or existing_platforms_by_adam_id.get(r["adam_id"], [])
 
         # 只有「這次查詢確實成功」、「先前已經有版本資訊可以比較(不是第一次查到)」、
         # 「版本真的不一樣」,才算是偵測到新版本;第一次查到(舊版本是空字串)不算,

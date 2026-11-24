@@ -13,6 +13,16 @@ let allVppRows = [];
 // check_vpp_license.sh 到App Store查不到這個App(通常是已經下架)時,Bundle ID跟軟體名稱都會填入這個字樣
 const VPP_UNKNOWN_LABEL = "未知";
 
+// 「支援裝置」欄位(同步時從App Store資料判斷,例如 "iPad/iPhone/Mac")。
+// 空白代表判斷不出來(未知App,或更新後還沒重新同步過),這種不套用裝置類型篩選,避免誤藏
+function vppRowPlatforms(row) {
+  return (row["支援裝置"] || "").split("/").filter(Boolean);
+}
+
+function selectedVppPlatforms() {
+  return Array.from(document.querySelectorAll(".vpp-platform-checkbox:checked")).map((cb) => cb.value);
+}
+
 function isUnknownVppRow(row) {
   return (row["軟體名稱"] || "").trim() === VPP_UNKNOWN_LABEL || (row["Bundle ID"] || "").trim() === VPP_UNKNOWN_LABEL;
 }
@@ -65,6 +75,7 @@ function bundleIdHtml(adamId, bundleId) {
 function applyVppFilters() {
   const searchText = document.getElementById("vpp-filter-search").value.trim().toLowerCase();
   const hideUnknown = document.getElementById("vpp-hide-unknown").checked;
+  const platforms = selectedVppPlatforms();
 
   let filtered = allVppRows;
   if (searchText) {
@@ -82,22 +93,37 @@ function applyVppFilters() {
     hiddenCount = filtered.length - visible.length;
     filtered = visible;
   }
+  // 裝置類型:App支援的裝置類型跟勾選的有交集才顯示;判斷不出裝置類型的App不受影響
+  let platformHiddenCount = 0;
+  const visibleByPlatform = filtered.filter((row) => {
+    const rowPlatforms = vppRowPlatforms(row);
+    return rowPlatforms.length === 0 || rowPlatforms.some((p) => platforms.includes(p));
+  });
+  platformHiddenCount = filtered.length - visibleByPlatform.length;
+  filtered = visibleByPlatform;
   filtered = vppSorter.sortRows(filtered, VPP_TABLE_COLUMNS);
 
   let emptyMessage;   // undefined = 沿用renderVppTable預設的「尚無資料,請按立即同步」
   if (allVppRows.length > 0) {
-    emptyMessage = hiddenCount > 0
-      ? `沒有符合條件的軟體(另有 ${hiddenCount} 筆未知 App 已隱藏,取消勾選「隱藏未知 App」可以顯示)`
-      : "沒有符合搜尋條件的軟體";
+    if (hiddenCount > 0) {
+      emptyMessage = `沒有符合條件的軟體(另有 ${hiddenCount} 筆未知 App 已隱藏,取消勾選「隱藏未知 App」可以顯示)`;
+    } else if (platformHiddenCount > 0) {
+      emptyMessage = `沒有符合條件的軟體(另有 ${platformHiddenCount} 筆其他裝置類型的 App 已隱藏,可以勾選其他裝置類型顯示)`;
+    } else {
+      emptyMessage = "沒有符合搜尋條件的軟體";
+    }
   }
   renderVppTable(filtered, emptyMessage);
 
   let countText = "";
   if (allVppRows.length > 0) {
-    countText = (searchText || hiddenCount > 0)
+    countText = (searchText || hiddenCount > 0 || platformHiddenCount > 0)
       ? `${searchText ? "符合" : "顯示"} ${filtered.length} / 共 ${allVppRows.length} 筆`
       : `共 ${allVppRows.length} 筆`;
-    if (hiddenCount > 0) countText += `(已隱藏 ${hiddenCount} 筆未知 App)`;
+    const hiddenParts = [];
+    if (hiddenCount > 0) hiddenParts.push(`${hiddenCount} 筆未知 App`);
+    if (platformHiddenCount > 0) hiddenParts.push(`${platformHiddenCount} 筆其他裝置類型 App`);
+    if (hiddenParts.length > 0) countText += `(已隱藏 ${hiddenParts.join("、")})`;
   }
   document.getElementById("vpp-filter-count").textContent = countText;
   updateVppSortArrows();
@@ -273,6 +299,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadVppCache();
   document.getElementById("vpp-filter-search").addEventListener("input", applyVppFilters);
   document.getElementById("vpp-hide-unknown").addEventListener("change", applyVppFilters);
+  document.querySelectorAll(".vpp-platform-checkbox").forEach((cb) => cb.addEventListener("change", applyVppFilters));
   document.querySelector("#vpp-table thead").addEventListener("click", (e) => {
     const th = e.target.closest("th.sortable");
     if (!th) return;

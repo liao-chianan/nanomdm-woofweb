@@ -982,10 +982,37 @@ def fetch_app_store_info(adam_id, country="tw", timeout=10):
         return {}
 
 
+# ASM 軟體清單的「裝置類型」篩選用:依序是畫面上勾選方框的順序
+APP_PLATFORMS = ("iPad", "iPhone", "Mac", "AppleTV")
+
+
+def app_platforms_from_store_info(info):
+    """從 iTunes Lookup 的 kind 與 supportedDevices 判斷這個 App 可以裝在哪些裝置類型。
+    supportedDevices 是像 "iPad716-iPad716"、"iPhone15-iPhone15"、"AppleTV4K-AppleTV4K"、
+    "MacDesktop-MacDesktop" 這類代號;Mac 專用 App 的 kind 是 "mac-software",沒有 supportedDevices。
+    iPhone/iPad App 若允許在 Apple 晶片的 Mac 上執行,supportedDevices 也會出現 Mac,一併算 Mac。
+    回傳依 APP_PLATFORMS 順序排列的 list,判斷不出來時回傳空 list。"""
+    found = set()
+    if info.get("kind") == "mac-software":
+        found.add("Mac")
+    for d in info.get("supportedDevices") or []:
+        d = str(d)
+        if d.startswith("iPad"):
+            found.add("iPad")
+        elif d.startswith(("iPhone", "iPod")):
+            found.add("iPhone")
+        elif d.startswith("AppleTV"):
+            found.add("AppleTV")
+        elif d.startswith("Mac"):
+            found.add("Mac")
+    return [p for p in APP_PLATFORMS if p in found]
+
+
 def _parse_app_store_info(info):
-    """把iTunes Lookup回傳的單筆結果整理成 {"version", "release_date", "artwork_url"}"""
+    """把iTunes Lookup回傳的單筆結果整理成 {"version", "release_date", "artwork_url", "platforms"}"""
     release_date_raw = info.get("currentVersionReleaseDate", "")
     return {
+        "platforms": app_platforms_from_store_info(info),
         "version": info.get("version", ""),
         # 日期原始格式是ISO 8601(例如"2026-07-18T07:00:00Z"),只取日期部分,不需要精確到時分秒
         "release_date": release_date_raw.split("T")[0] if release_date_raw else "",
@@ -1165,13 +1192,14 @@ def write_vpp_cache_csv(path, rows):
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Adam ID", "Bundle ID", "軟體名稱", "當下版本", "版本日期", "總數量", "剩餘量", "自動更新"])
+        writer.writerow(["Adam ID", "Bundle ID", "軟體名稱", "當下版本", "版本日期", "總數量", "剩餘量", "自動更新", "支援裝置"])
         for r in rows:
             writer.writerow([
                 r["adam_id"], r["bundle_id"], r["name"],
                 r.get("version", ""), r.get("release_date", ""),
                 r["total"], r["available"],
                 "true" if r.get("auto_update") else "false",
+                "/".join(r.get("platforms") or []),
             ])
     os.replace(tmp_path, path)
 
